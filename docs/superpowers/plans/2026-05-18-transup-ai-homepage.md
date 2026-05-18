@@ -1,0 +1,238 @@
+# Transup.ai Homepage Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build a polished static homepage for `transup.ai` as an enterprise AI agent workspace.
+
+**Architecture:** The site is a no-build static page with separated structure, styling, and small progressive enhancement. `index.html` owns content and semantic sections, `styles.css` owns responsive layout and visual system, and `script.js` owns smooth anchor behavior and FAQ disclosure state.
+
+**Tech Stack:** HTML5, CSS3, vanilla JavaScript, GitHub Pages compatible static files.
+
+---
+
+## File Structure
+
+- Create `index.html`: semantic homepage markup, product preview, feature sections, workflow, security, FAQ, final CTA.
+- Create `styles.css`: visual system, responsive grid, product preview styling, mobile behavior.
+- Create `script.js`: smooth scrolling for anchor links and accessible FAQ toggles.
+- Modify `docs/superpowers/plans/2026-05-18-transup-ai-homepage.md`: track completed steps while implementing.
+
+## Task 1: Static Homepage Markup
+
+**Files:**
+- Create: `index.html`
+
+- [x] **Step 1: Create semantic page content**
+
+Create `index.html` with this structure:
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Transup.ai - Enterprise AI Agent Workspace</title>
+    <meta name="description" content="Transup.ai is an AI agent workspace for enterprise teams to coordinate research, planning, execution, review, and delivery.">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Transup.ai home">transup.ai</a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#product">Product</a>
+        <a href="#agents">Agents</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#security">Security</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+      <a class="nav-cta" href="mailto:hello@transup.ai">Request access</a>
+    </header>
+
+    <main id="top">
+      <section class="hero section-shell" id="product">
+        <div class="hero-copy">
+          <p class="eyebrow">Enterprise AI agent workspace</p>
+          <h1>AI agents that move enterprise work forward</h1>
+          <p class="hero-text">Transup.ai gives teams a controlled workspace where agents can research, plan, execute, and hand work back for review before delivery.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="mailto:hello@transup.ai">Request access</a>
+            <a class="button button-secondary" href="#workflow">View workflow</a>
+          </div>
+          <dl class="hero-metrics" aria-label="Workspace highlights">
+            <div><dt>5</dt><dd>handoff stages</dd></div>
+            <div><dt>4</dt><dd>agent roles</dd></div>
+            <div><dt>1</dt><dd>review trail</dd></div>
+          </dl>
+        </div>
+        <div class="workspace-preview" aria-label="Transup.ai workspace preview">
+          <div class="preview-window">
+            <div class="window-bar"><span></span><span></span><span></span><strong>Enterprise launch brief</strong></div>
+            <div class="preview-grid">
+              <aside class="agent-rail">
+                <p class="panel-label">Agents</p>
+                <div class="agent active"><span>R</span><div><strong>Research</strong><small>Mapping market context</small></div></div>
+                <div class="agent"><span>P</span><div><strong>Planning</strong><small>Drafting execution path</small></div></div>
+                <div class="agent"><span>E</span><div><strong>Execution</strong><small>Preparing deliverables</small></div></div>
+                <div class="agent"><span>Q</span><div><strong>Review</strong><small>Waiting for approval</small></div></div>
+              </aside>
+              <section class="brief-panel">
+                <div class="panel-heading"><p class="panel-label">Active work brief</p><span class="status-pill">Human review required</span></div>
+                <h2>Prepare Q3 partner expansion plan</h2>
+                <p>Summarize account signals, identify partner risks, draft action plan, and route final recommendation to revenue leadership.</p>
+                <div class="progress-track"><span></span></div>
+                <div class="timeline">
+                  <div><span class="dot done"></span><strong>Research complete</strong><small>18 sources summarized with citations</small></div>
+                  <div><span class="dot done"></span><strong>Plan generated</strong><small>Dependencies and owners assigned</small></div>
+                  <div><span class="dot active"></span><strong>Approval pending</strong><small>Two decisions need human sign-off</small></div>
+                </div>
+              </section>
+              <aside class="audit-panel">
+                <p class="panel-label">Audit trail</p>
+                <div class="audit-item"><strong>Permissions checked</strong><span>CRM read-only</span></div>
+                <div class="audit-item"><strong>Memory attached</strong><span>Partner workspace</span></div>
+                <div class="audit-item"><strong>Delivery status</strong><span>Draft ready</span></div>
+              </aside>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-shell section-intro" id="agents">
+        <p class="eyebrow">Product</p>
+        <h2>A workspace for agent-powered operations</h2>
+        <p>Give agents clear roles, bounded tools, shared context, and human checkpoints so enterprise work can progress without losing control.</p>
+      </section>
+
+      <section class="feature-grid section-shell">
+        <article><span>01</span><h3>Coordinate specialist agents</h3><p>Assign research, planning, execution, and review to focused agents that work from the same brief.</p></article>
+        <article><span>02</span><h3>Keep humans in control</h3><p>Route material decisions through approval gates before agents update records or deliver final outputs.</p></article>
+        <article><span>03</span><h3>Connect enterprise workflows</h3><p>Represent docs, tickets, CRM records, and internal tools as controlled work context instead of scattered tabs.</p></article>
+        <article><span>04</span><h3>Measure every handoff</h3><p>Track progress, ownership, logs, and review state from the first brief to final delivery.</p></article>
+      </section>
+
+      <section class="workflow section-shell" id="workflow">
+        <div>
+          <p class="eyebrow">Workflow</p>
+          <h2>From brief to delivery, with review built in</h2>
+        </div>
+        <ol class="workflow-steps">
+          <li><span>Brief</span><p>Define the outcome, context, tools, and constraints.</p></li>
+          <li><span>Plan</span><p>Agents propose tasks, dependencies, and ownership.</p></li>
+          <li><span>Execute</span><p>Specialist agents complete bounded work with logs.</p></li>
+          <li><span>Review</span><p>Humans approve critical changes and recommendations.</p></li>
+          <li><span>Deliver</span><p>Final outputs move back into the team workflow.</p></li>
+        </ol>
+      </section>
+
+      <section class="security section-shell" id="security">
+        <div class="security-copy">
+          <p class="eyebrow">Security</p>
+          <h2>Designed for controlled enterprise execution</h2>
+          <p>Transup.ai keeps agent activity observable, bounded, and reviewable so teams can adopt automation without turning work into a black box.</p>
+        </div>
+        <div class="security-list">
+          <div><strong>Permission boundaries</strong><span>Define what agents can read, draft, or request.</span></div>
+          <div><strong>Human approval</strong><span>Escalate consequential choices before delivery.</span></div>
+          <div><strong>Audit trail</strong><span>See who asked, what ran, and what changed.</span></div>
+          <div><strong>Workspace memory</strong><span>Reuse approved context across related work.</span></div>
+        </div>
+      </section>
+
+      <section class="faq section-shell" id="faq">
+        <p class="eyebrow">FAQ</p>
+        <h2>Questions enterprise teams ask first</h2>
+        <div class="faq-list">
+          <button class="faq-item" aria-expanded="false"><span>What teams is Transup.ai for?</span><small>Operations, revenue, support, and delivery teams that need agents to complete structured work with oversight.</small></button>
+          <button class="faq-item" aria-expanded="false"><span>Is this a chatbot?</span><small>No. Transup.ai is a workspace for assigning, tracking, reviewing, and delivering agent-powered work.</small></button>
+          <button class="faq-item" aria-expanded="false"><span>Can humans review agent work?</span><small>Yes. The product direction centers on approval gates, review trails, and handoffs.</small></button>
+          <button class="faq-item" aria-expanded="false"><span>What tools does it connect to?</span><small>The homepage describes the workflow layer without claiming specific integrations before they are confirmed.</small></button>
+          <button class="faq-item" aria-expanded="false"><span>How do we get access?</span><small>Use the request access link to start a conversation with the Transup.ai team.</small></button>
+        </div>
+      </section>
+
+      <section class="final-cta section-shell">
+        <p class="eyebrow">Transup.ai</p>
+        <h2>Bring agents into real enterprise work</h2>
+        <a class="button button-primary" href="mailto:hello@transup.ai">Request access</a>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>transup.ai</span>
+      <span>Enterprise AI agent workspace</span>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
+```
+
+- [x] **Step 2: Confirm markup exists**
+
+Run: `test -f index.html`
+
+Expected: exit code `0`.
+
+## Task 2: Visual System And Responsive CSS
+
+**Files:**
+- Create: `styles.css`
+
+- [x] **Step 1: Add complete styling**
+
+Create `styles.css` with responsive desktop and mobile styling for all classes in `index.html`. Use a warm neutral background, dark product preview, restrained borders, and no external assets.
+
+- [x] **Step 2: Confirm CSS is linked and class names match**
+
+Run: `rg -n "styles.css|workspace-preview|faq-item|workflow-steps" index.html styles.css`
+
+Expected: output includes `styles.css`, `.workspace-preview`, `.faq-item`, and `.workflow-steps`.
+
+## Task 3: Small JavaScript Enhancements
+
+**Files:**
+- Create: `script.js`
+
+- [x] **Step 1: Add FAQ and anchor behavior**
+
+Create `script.js` that:
+
+- Smooth-scrolls same-page anchor links.
+- Toggles `aria-expanded` on `.faq-item` buttons.
+- Keeps behavior safe when elements are missing.
+
+- [x] **Step 2: Confirm script is linked**
+
+Run: `rg -n "script.js|faq-item" index.html script.js`
+
+Expected: output includes the script tag and JavaScript selector for `.faq-item`.
+
+## Task 4: Local Verification
+
+**Files:**
+- Verify: `index.html`
+- Verify: `styles.css`
+- Verify: `script.js`
+
+- [x] **Step 1: Run a local static server**
+
+Run: `python3 -m http.server 8080`
+
+Expected: server starts and serves the site at `http://localhost:8080`.
+
+- [x] **Step 2: Inspect the page**
+
+Open `http://localhost:8080` and verify:
+
+- Desktop layout shows hero copy and product preview side by side.
+- Mobile layout stacks hero copy and product preview without overlap.
+- Navigation anchors move to the correct sections.
+- FAQ rows expand and collapse.
+- No external image or font assets are required.
+
+- [x] **Step 3: Final git status**
+
+Run: `git status --short`
+
+Expected: only intended homepage files and plan updates are modified.
