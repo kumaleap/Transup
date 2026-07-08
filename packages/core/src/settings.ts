@@ -1,5 +1,5 @@
 /**
- * 项目设置 —— .mycode/settings.json
+ * 项目设置 —— .transup/settings.json
  *
  * 一个文件承载两类配置：
  *   mcpServers   外部 MCP server 声明
@@ -18,7 +18,7 @@ export interface Settings {
   };
 }
 
-const SETTINGS_DIR = ".mycode";
+const SETTINGS_DIR = ".transup";
 const SETTINGS_FILE = "settings.json";
 
 export async function loadSettings(dir: string = SETTINGS_DIR): Promise<Settings> {

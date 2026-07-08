@@ -1,16 +1,16 @@
 {
-  "name": "@mycode/cli",
+  "name": "@transup/cli",
   "version": "0.1.0",
   "type": "module",
-  "description": "mycode 终端界面：REPL、渲染、权限确认。所有智能在 @mycode/core。",
+  "description": "transup 终端界面：REPL、渲染、权限确认。所有智能在 @transup/core。",
   "bin": {
-    "mycode": "./src/index.ts"
+    "transup": "./src/index.ts"
   },
   "scripts": {
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "@mycode/core": "*",
+    "@transup/core": "*",
     "dotenv": "^17.4.2"
   }
 }

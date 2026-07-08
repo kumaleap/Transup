@@ -8,13 +8,13 @@
  *  - 崩溃安全：进程随时被杀，最多丢最后一行
  *  - 可审计：会话文件就是完整的事件历史，人和工具都能读
  *
- * 存储位置：<项目>/.mycode/sessions/<sessionId>.jsonl
+ * 存储位置：<项目>/.transup/sessions/<sessionId>.jsonl
  */
 import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message } from "../provider/types.js";
 
-const DEFAULT_DIR = ".mycode/sessions";
+const DEFAULT_DIR = ".transup/sessions";
 
 export class SessionStore {
   readonly id: string;

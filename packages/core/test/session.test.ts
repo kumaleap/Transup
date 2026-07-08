@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { SessionStore } from "../src/session/store.js";
 
 async function tempDir() {
-  return mkdtemp(join(tmpdir(), "mycode-sessions-"));
+  return mkdtemp(join(tmpdir(), "transup-sessions-"));
 }
 
 describe("SessionStore", () => {

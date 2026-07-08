@@ -68,7 +68,7 @@ describe("bash 流式输出", () => {
         yield { type: "message_done", ...r };
       }
     }
-    const dir = await mkdtemp(join(tmpdir(), "mycode-stream-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-stream-"));
     const engine = new AgentEngine({
       provider: new P(),
       canUseTool: allow,

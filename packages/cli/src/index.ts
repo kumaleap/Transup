@@ -1,8 +1,8 @@
 /**
- * mycode CLI 入口
+ * transup CLI 入口
  *
  * 职责：读配置、组装 Provider 和引擎、实现权限回调（含 diff 预览）、
- * 斜杠命令、REPL 渲染。所有智能都在 @mycode/core。
+ * 斜杠命令、REPL 渲染。所有智能都在 @transup/core。
  *
  * 用法：
  *   npm start                     # 新会话
@@ -26,7 +26,7 @@ import {
   type Provider,
   type Message,
   type Tool,
-} from "@mycode/core";
+} from "@transup/core";
 import { color, printToolCall, printToolResult } from "./ui.js";
 import { renderEditPreview, renderWritePreview } from "./diff.js";
 import { expandFileRefs } from "./input.js";
@@ -77,7 +77,7 @@ const sessionAllowed = new Set<string>();
 
 async function canUseTool(name: string, args: Record<string, unknown>): Promise<boolean> {
   if (sessionAllowed.has(name)) return true;
-  if (isAllowed(settings, name)) return true; // .mycode/settings.json 里的持久规则
+  if (isAllowed(settings, name)) return true; // .transup/settings.json 里的持久规则
 
   console.log(color.yellow(`\n⚠ 模型请求执行 ${color.bold(name)}:`));
   if (name === "edit_file") {
@@ -224,7 +224,7 @@ async function handleSlashCommand(input: string): Promise<boolean> {
 
 // ── REPL ────────────────────────────────────────────────────
 console.log(
-  color.bold(color.cyan("\n✻ mycode")) +
+  color.bold(color.cyan("\n✻ Transup")) +
   color.dim(` — ${provider.id}:${provider.model} · 会话 ${sessionId}`),
 );
 if (history.length > 0) console.log(color.dim(`已恢复 ${history.length} 条历史消息`));

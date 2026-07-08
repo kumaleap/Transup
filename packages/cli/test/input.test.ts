@@ -7,7 +7,7 @@ import { expandFileRefs } from "../src/input.js";
 
 describe("expandFileRefs", () => {
   it("真实文件被展开为附件", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-input-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-input-"));
     const f = join(dir, "a.ts");
     await writeFile(f, "export const x = 1;");
     const out = expandFileRefs(`解释一下 @${f} 这个文件`);
@@ -27,7 +27,7 @@ describe("expandFileRefs", () => {
   });
 
   it("超大文件被截断", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-input-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-input-"));
     const f = join(dir, "big.txt");
     await writeFile(f, "x".repeat(50_000));
     const out = expandFileRefs(`@${f}`);

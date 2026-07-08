@@ -9,7 +9,7 @@
     "esModuleInterop": true,
     "noEmit": true,
     "paths": {
-      "@mycode/core": ["./packages/core/src/index.ts"]
+      "@transup/core": ["./packages/core/src/index.ts"]
     }
   },
   "include": ["packages/*/src"]

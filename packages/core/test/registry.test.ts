@@ -43,7 +43,7 @@ describe("工具执行管线", () => {
   it("只读工具不触发权限回调", async () => {
     let asked = false;
     const spy = async () => { asked = true; return true; };
-    const dir = await mkdtemp(join(tmpdir(), "mycode-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-"));
     await writeFile(join(dir, "a.txt"), "hello");
     const r = await reg.execute("1", "read_file", JSON.stringify({ path: join(dir, "a.txt") }), spy);
     expect(r.isError).toBe(false);
@@ -51,7 +51,7 @@ describe("工具执行管线", () => {
   });
 
   it("执行异常 → 错误信息回流（edit_file 找不到 old_string）", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-"));
     await writeFile(join(dir, "a.txt"), "hello world");
     const r = await reg.execute("1", "edit_file", JSON.stringify({
       path: join(dir, "a.txt"), old_string: "不存在的内容", new_string: "x",
@@ -61,7 +61,7 @@ describe("工具执行管线", () => {
   });
 
   it("edit_file 多处匹配 → 要求提供更多上下文", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-"));
     await writeFile(join(dir, "a.txt"), "foo\nfoo\n");
     const r = await reg.execute("1", "edit_file", JSON.stringify({
       path: join(dir, "a.txt"), old_string: "foo", new_string: "bar",

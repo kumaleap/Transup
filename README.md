@@ -1,4 +1,4 @@
-# mycode
+# Transup
 
 一个开源的 AI coding agent CLI —— provider 无关的架构，任何模型都是一等公民。
 

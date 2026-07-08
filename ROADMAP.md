@@ -1,4 +1,4 @@
-# mycode 开发计划
+# Transup 开发计划
 
 > 目标：开源 AI coding agent CLI，对标 Claude Code / Codex CLI 的行业顶尖水平。
 > 差异化定位：**任何模型都是一等公民** —— provider 无关的架构下做到与官方工具同级的体验。
@@ -19,7 +19,7 @@
 
 ## M0 架构骨架 ✅
 
-- [x] monorepo 分包：`@mycode/core`（引擎，零 UI 依赖）+ `@mycode/cli`（渲染层）
+- [x] monorepo 分包：`@transup/core`（引擎，零 UI 依赖）+ `@transup/cli`（渲染层）
 - [x] Provider 抽象：中立消息类型；OpenAI 兼容 + Anthropic 原生（prompt caching 双断点）
 - [x] 事件化 agent loop（AsyncGenerator，支撑未来 IDE/headless/server 形态）
 - [x] 工具协议（zod schema + readOnly 声明 + fail-closed）与执行管线（校验→权限→执行→错误回流）
@@ -50,7 +50,7 @@
 
 - [x] 子 agent（task 工具）：复用 AgentEngine 派生只读探索型子任务，上下文隔离、禁递归、可并行
 - [x] MCP 客户端：stdio 传输接入外部 MCP server，工具以 `mcp__server__tool` 命名合入注册表（含真实 server 集成测试）
-- [x] 权限策略配置文件：`.mycode/settings.json` 持久化 allow 规则（`[A]永久允许` + `mcp__x__*` 通配）
+- [x] 权限策略配置文件：`.transup/settings.json` 持久化 allow 规则（`[A]永久允许` + `mcp__x__*` 通配）
 
 ## M4 TUI 升级
 
@@ -60,7 +60,7 @@
 
 ## M5 打包发布与 CI
 
-- [ ] tsup 构建产物，`npx mycode` 可直接运行；bin 入口与版本管理
+- [ ] tsup 构建产物，`npx transup` 可直接运行；bin 入口与版本管理
 - [ ] GitHub Actions：typecheck + test + 发布流水线
 - [ ] README（英文为主）、贡献指南、许可证（MIT）
 - [ ] 迁出到独立开源仓库

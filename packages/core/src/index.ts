@@ -1,5 +1,5 @@
 /**
- * @mycode/core 公开 API
+ * @transup/core 公开 API
  *
  * 宿主（CLI / IDE / server）只依赖这里导出的东西。
  */

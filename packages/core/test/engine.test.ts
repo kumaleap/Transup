@@ -38,7 +38,7 @@ class MockProvider implements Provider {
 }
 
 async function makeEngine(provider: Provider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
-  const dir = await mkdtemp(join(tmpdir(), "mycode-engine-"));
+  const dir = await mkdtemp(join(tmpdir(), "transup-engine-"));
   return new AgentEngine({
     provider,
     canUseTool: async () => true,

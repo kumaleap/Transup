@@ -14,7 +14,7 @@
  * 3. schema 用 server 自带的 JSON Schema（Tool.parameters 通道），
  *    参数校验交给 server —— 它比我们更知道什么是合法输入。
  *
- * 配置（项目根 .mycode/settings.json）：
+ * 配置（项目根 .transup/settings.json）：
  *   { "mcpServers": { "github": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"] } } }
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -46,7 +46,7 @@ export async function connectMcpServer(
     args: config.args ?? [],
     env: { ...process.env as Record<string, string>, ...config.env },
   });
-  const client = new Client({ name: "mycode", version: "0.1.0" });
+  const client = new Client({ name: "transup", version: "0.1.0" });
   await client.connect(transport);
 
   const { tools: mcpTools } = await client.listTools();

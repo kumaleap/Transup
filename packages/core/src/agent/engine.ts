@@ -330,7 +330,7 @@ export class AgentEngine {
  * 注意：日期只到"天"，不能放时间戳 —— 任何每次请求都变的字节都会击穿缓存。
  */
 function systemPrompt(projectContext?: string): string {
-  const base = `你是 mycode，一个在终端中运行的 AI 编程助手。
+  const base = `你是 Transup，一个在终端中运行的 AI 编程助手。
 
 # 行为准则
 - 回答保持简洁，面向终端显示，避免冗长的客套话。

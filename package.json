@@ -1,5 +1,5 @@
 {
-  "name": "mycode-monorepo",
+  "name": "transup-monorepo",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "start": "npm start -w @mycode/cli",
+    "start": "npm start -w @transup/cli",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

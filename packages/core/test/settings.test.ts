@@ -7,12 +7,12 @@ import { loadSettings, saveSettings, isAllowed, persistAllow } from "../src/sett
 
 describe("settings", () => {
   it("不存在的设置文件 → 空对象", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-settings-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-settings-"));
     expect(await loadSettings(dir)).toEqual({});
   });
 
   it("保存后能读回", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-settings-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-settings-"));
     await saveSettings({ permissions: { allow: ["bash"] } }, dir);
     const s = await loadSettings(dir);
     expect(s.permissions?.allow).toEqual(["bash"]);
@@ -27,7 +27,7 @@ describe("settings", () => {
   });
 
   it("persistAllow：追加并落盘，不重复", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "mycode-settings-"));
+    const dir = await mkdtemp(join(tmpdir(), "transup-settings-"));
     const s = await loadSettings(dir);
     await persistAllow(s, "bash", dir);
     await persistAllow(s, "bash", dir); // 重复调用
