@@ -1,0 +1,16 @@
+{
+  "name": "@mycode/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "mycode 终端界面：REPL、渲染、权限确认。所有智能在 @mycode/core。",
+  "bin": {
+    "mycode": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@mycode/core": "*",
+    "dotenv": "^17.4.2"
+  }
+}

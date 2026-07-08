@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "esModuleInterop": true,
+    "noEmit": true,
+    "paths": {
+      "@mycode/core": ["./packages/core/src/index.ts"]
+    }
+  },
+  "include": ["packages/*/src"]
+}

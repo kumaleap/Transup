@@ -1,0 +1,15 @@
+{
+  "name": "@mycode/core",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "mycode 引擎：agent loop、工具系统、provider 抽象、会话持久化。不依赖任何终端 UI。",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "openai": "^6.45.0",
+    "zod": "^4.4.3"
+  }
+}
