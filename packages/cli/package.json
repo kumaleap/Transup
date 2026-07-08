@@ -11,6 +11,12 @@
   },
   "dependencies": {
     "@transup/core": "*",
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "ink": "^6.8.0",
+    "react": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "ink-testing-library": "^4.0.0"
   }
 }

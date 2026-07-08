@@ -1,5 +1,6 @@
 /**
- * 终端渲染。刻意极简（ANSI 上色），升级 Ink TUI 时只动这一层。
+ * ANSI 上色工具。Ink 的 <Text> 原样透传 ANSI 码，
+ * 所以纯字符串渲染器（diff 预览、语法高亮）继续用它。
  */
 
 const codes = {
@@ -22,19 +23,3 @@ export const color = {
   red: (s: string) => `${codes.red}${s}${codes.reset}`,
   magenta: (s: string) => `${codes.magenta}${s}${codes.reset}`,
 };
-
-export function printToolCall(name: string, args: Record<string, unknown>) {
-  const argStr = Object.entries(args)
-    .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
-    .join(", ")
-    .slice(0, 120);
-  console.log(color.magenta(`⏺ ${name}`) + color.dim(`(${argStr})`));
-}
-
-export function printToolResult(result: string, isError: boolean) {
-  const lines = result.split("\n");
-  const preview = lines.slice(0, 3).join("\n  ");
-  const more = lines.length > 3 ? color.dim(`\n  … 共 ${lines.length} 行`) : "";
-  const mark = isError ? color.red("  ⎿ ") : color.dim("  ⎿ ");
-  console.log(mark + color.dim(preview) + more);
-}
