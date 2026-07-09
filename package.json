@@ -7,8 +7,8 @@
     "packages/*"
   ],
   "scripts": {
-    "start": "npm start -w @transup/cli",
-    "build": "npm run build -w @transup/cli",
+    "start": "npm start -w transup",
+    "build": "npm run build -w transup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

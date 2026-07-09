@@ -20,7 +20,7 @@
 
 ## M0 架构骨架 ✅
 
-- [x] monorepo 分包：`@transup/core`（引擎，零 UI 依赖）+ `@transup/cli`（渲染层）
+- [x] monorepo 分包：`@transup/core`（引擎，零 UI 依赖）+ `transup`（CLI 渲染层，原 @transup/cli）
 - [x] Provider 抽象：中立消息类型；OpenAI 兼容 + Anthropic 原生（prompt caching 双断点）
 - [x] 事件化 agent loop（AsyncGenerator，支撑未来 IDE/headless/server 形态）
 - [x] 工具协议（zod schema + readOnly 声明 + fail-closed）与执行管线（校验→权限→执行→错误回流）
@@ -81,8 +81,8 @@
 - [x] headless 模式入口：`transup -p "任务"` 非交互执行 —— stdout 只有正文、stderr 只有过程信息（管道友好）；权限 fail-closed（settings 允许清单或 `--allow-all` 才放行写操作）；退出码 0/1；core 多宿主承诺的第一个非终端消费者
 - [x] GitHub Actions：push/PR 跑 typecheck + test + build + 产物冒烟
 - [x] README（英文为主，附中文摘要）、CONTRIBUTING.md、LICENSE（MIT）
-- [ ] npm 发布流水线（publish workflow）—— 等迁独立仓库后一起做
-- [ ] 迁出到独立开源仓库（需要决定时机与仓库名）
+- [x] npm 发布流水线：推 `v*` tag → 校验 → `npm publish`（provenance）；CLI 包改名 `transup`（npm 上已确认空闲），`@transup/core` 标 private 防误发、以 devDep 身份被内联
+- [ ] 仓库正名 transup：代码侧已就绪；剩两步手工操作 —— GitHub 上把仓库 Transup 改名为 transup（Settings → Rename，旧 URL 自动重定向），仓库 Secrets 添加 `NPM_TOKEN`（npmjs Automation token）
 
 ## M6 安全与高级上下文
 

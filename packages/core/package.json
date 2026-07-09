@@ -1,6 +1,7 @@
 {
   "name": "@transup/core",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "description": "transup 引擎：agent loop、工具系统、provider 抽象、会话持久化。不依赖任何终端 UI。",
   "exports": {

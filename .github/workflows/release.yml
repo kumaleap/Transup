@@ -1,0 +1,35 @@
+# 发布流水线：推 v* tag → 全量校验 → npm publish（带 provenance）
+#
+# 前置条件（一次性，仓库 Settings → Secrets）：
+#   NPM_TOKEN —— npmjs.com 的 Automation token，需要 transup 包的发布权
+#
+# 发布方式：
+#   npm version patch -w transup   # 或 minor/major，更新版本号
+#   git push && git push --tags
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance 需要
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # prepack 会自动跑 tsup，产物即 dist
+      - run: npm publish -w transup --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

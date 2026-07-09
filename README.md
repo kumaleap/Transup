@@ -19,6 +19,12 @@ Transup speaks both the OpenAI-compatible protocol (DeepSeek, Kimi, OpenRouter, 
 ## Quick start
 
 ```bash
+npx transup            # once published to npm (v0.1.0 pending)
+```
+
+From source:
+
+```bash
 npm install
 cp .env.example .env   # fill in your API key
 npm start              # interactive TUI
