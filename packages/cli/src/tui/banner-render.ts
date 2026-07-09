@@ -4,7 +4,7 @@
  * 形态（宽终端，双栏）：
  *   ╭─── transup v0.1.0 ──────────────────────────────╮
  *   │        欢迎回来，kuma！        │ 上手提示        │
- *   │        （乌贼 logo）           │ …               │
+ *   │        （transup 字标）        │ …               │
  *   │        做极致体验的编程 agent  │ ───────         │
  *   │        模型 · 目录 · 会话      │ 最近更新        │
  *   ╰──────────────────────────────────────────────────╯
@@ -14,8 +14,8 @@
  * 分隔线，Ink 的 border 都做不到；而横幅是纯静态内容，字符串渲染
  * 反而可以对"每行显示宽度一致"写测试（CJK 对齐的回归护栏）。
  *
- * logo 是一只乌贼：头部像向上的箭头（up —— 产出质量向上的代码），
- * 底部是圆润柔软的触手（trans —— 吸收各路模型与信息）。
+ * logo 是终端字标：块字符强调 CLI 质感，底部箭头轨道表达
+ * trans（吸收/转换上下文）与 up（把代码质量往上推）。
  */
 import { homedir, userInfo } from "node:os";
 import { color } from "../ui.js";
@@ -32,15 +32,15 @@ export interface BannerInfo {
   mcpToolCount: number;
 }
 
-/** 乌贼：箭头头部 + 圆润触手 */
+/** transup CLI 字标：等宽块字 + 向上轨道 */
 const LOGO = [
-  "   ▟▙   ",
-  "  ▟██▙  ",
-  " ▟████▙ ",
-  "▐██████▌",
-  "▝▜████▛▘",
-  "╭╯╰╮╭╯╰╮",
-  "╰╮ ╰╯ ╭╯",
+  "████ ███  ███  █  █ ████ █  █ ███ ",
+  " ██  █  █ █  █ ██ █ █    █  █ █  █",
+  " ██  ███  ████ █ ██ ███  █  █ ███ ",
+  " ██  █ █  █  █ █  █    █ █  █ █   ",
+  " ██  █  █ █  █ █  █ ████ ████ █   ",
+  "          ───╮ ▲ ╭───              ",
+  "             ╰─╯                   ",
 ];
 
 const TAGLINE = "做极致体验的编程 agent";
@@ -140,7 +140,7 @@ function leftColumn(info: BannerInfo, width: number): Cell[] {
     blank,
     cell(name ? `欢迎回来，${name}！` : "欢迎！", (s) => color.bold(s)),
     blank,
-    // 乌贼从头到触手：电光青 → 霓虹紫 的垂直渐变
+    // 字标自上而下：电光青 → 霓虹紫 的垂直渐变
     ...LOGO.map((l, i) => cell(l, rampAt(i, LOGO.length))),
     blank,
     cell(TAGLINE, (s) => gradientText(s, { bold: true })),

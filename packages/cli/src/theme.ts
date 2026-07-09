@@ -40,7 +40,7 @@ export const paint = {
   frame: fg(60),
 };
 
-/** 按行做垂直渐变（乌贼 logo） */
+/** 按行做垂直渐变（CLI logo） */
 export function gradientLines(lines: string[]): string[] {
   return lines.map((line, i) => rampAt(i, lines.length)(line));
 }
