@@ -19,6 +19,7 @@
  */
 import { homedir, userInfo } from "node:os";
 import { color } from "../ui.js";
+import { paint, rampAt, gradientText } from "../theme.js";
 
 export interface BannerInfo {
   version: string;
@@ -109,12 +110,11 @@ const blank: Cell = { text: "" };
 function renderCell(c: Cell, width: number, align: "left" | "center"): string {
   const text = truncate(c.text, width);
   const pad = width - displayWidth(text);
-  const padded =
-    align === "center"
-      ? " ".repeat(Math.floor(pad / 2)) + text + " ".repeat(Math.ceil(pad / 2))
-      : text + " ".repeat(pad);
-  // 上色包住内容但不包住补位空格也可以 —— 空格无色差，这里整段包更简单
-  return c.paint ? c.paint(padded) : padded;
+  // 先上色再补位：渐变等按字符位置取色的画笔，必须只作用于可见文字
+  const painted = c.paint ? c.paint(text) : text;
+  return align === "center"
+    ? " ".repeat(Math.floor(pad / 2)) + painted + " ".repeat(Math.ceil(pad / 2))
+    : painted + " ".repeat(pad);
 }
 
 function shortenPath(p: string, max: number): string {
@@ -140,11 +140,12 @@ function leftColumn(info: BannerInfo, width: number): Cell[] {
     blank,
     cell(name ? `欢迎回来，${name}！` : "欢迎！", (s) => color.bold(s)),
     blank,
-    ...LOGO.map((l) => cell(l, (s) => color.cyan(s))),
+    // 乌贼从头到触手：电光青 → 霓虹紫 的垂直渐变
+    ...LOGO.map((l, i) => cell(l, rampAt(i, LOGO.length))),
     blank,
-    cell(TAGLINE, (s) => color.bold(color.cyan(s))),
+    cell(TAGLINE, (s) => gradientText(s, { bold: true })),
     blank,
-    cell(`${info.model} · ${info.providerId}`),
+    cell(`${info.model} · ${info.providerId}`, (s) => paint.primary(s)),
     cell(shortenPath(info.cwd, width), (s) => color.dim(s)),
     cell(session, (s) => color.dim(s)),
     ...(info.mcpToolCount > 0
@@ -156,10 +157,10 @@ function leftColumn(info: BannerInfo, width: number): Cell[] {
 
 function rightColumn(width: number): Cell[] {
   return [
-    cell("上手提示", (s) => color.bold(s)),
+    cell("◇ 上手提示", (s) => paint.secondary(color.bold(s))),
     ...TIPS.map((t) => cell(t, (s) => color.dim(s))),
-    cell("─".repeat(width), (s) => color.dim(s)),
-    cell("最近更新", (s) => color.bold(s)),
+    cell("─".repeat(width), (s) => paint.frame(s)),
+    cell("◇ 最近更新", (s) => paint.secondary(color.bold(s))),
     ...WHATS_NEW.map((t) => cell(t, (s) => color.dim(s))),
     cell("完整进展见 ROADMAP.md", (s) => color.dim(s)),
   ];
@@ -194,10 +195,12 @@ export function renderBanner(info: BannerInfo, columns: number): string {
   const title = `transup v${info.version}`;
   const fill = W - displayWidth(title) - 7; // "╭─── " + " " + "╮"
   lines.push(
-    color.dim("╭─── ") + color.bold(title) + color.dim(" " + "─".repeat(Math.max(fill, 1)) + "╮"),
+    paint.frame("╭─── ") +
+      paint.primary(color.bold(title)) +
+      paint.frame(" " + "─".repeat(Math.max(fill, 1)) + "╮"),
   );
 
-  const bar = color.dim("│");
+  const bar = paint.frame("│");
   for (let i = 0; i < rows; i++) {
     const l = renderCell(left[i - leftPad] ?? blank, leftW, "center");
     if (twoCol) {
@@ -208,6 +211,6 @@ export function renderBanner(info: BannerInfo, columns: number): string {
     }
   }
 
-  lines.push(color.dim("╰" + "─".repeat(W - 2) + "╯"));
+  lines.push(paint.frame("╰" + "─".repeat(W - 2) + "╯"));
   return lines.join("\n");
 }

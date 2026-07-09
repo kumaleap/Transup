@@ -24,6 +24,7 @@ import {
   type Tool,
 } from "@transup/core";
 import { color } from "../ui.js";
+import { T } from "../theme.js";
 import { renderEditPreview, renderWritePreview } from "../diff.js";
 import { expandFileRefs } from "../input.js";
 import { renderMarkdown } from "../highlight.js";
@@ -410,7 +411,8 @@ export function App(props: AppProps) {
   }
 
   // ── 渲染 ──────────────────────────────────────────────────
-  const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  // 扫描式 spinner：一个光点在轨道上来回，比转圈更"仪器感"
+  const SPINNER = ["▰▱▱▱▱", "▱▰▱▱▱", "▱▱▰▱▱", "▱▱▱▰▱", "▱▱▱▱▰", "▱▱▱▰▱", "▱▱▰▱▱", "▱▰▱▱▱"];
 
   return (
     <Box flexDirection="column">
@@ -427,9 +429,9 @@ export function App(props: AppProps) {
       {activeTool && (
         <Box flexDirection="column" marginTop={1}>
           <Text>
-            <Text color="magenta">⏺ {activeTool.name}</Text>
+            <Text color={T.secondary}>◆ {activeTool.name}</Text>
             <Text dimColor>({activeTool.argSummary})</Text>
-            <Text color="yellow"> 运行中…</Text>
+            <Text color={T.warn}> 运行中…</Text>
           </Text>
           {activeTool.tail.length > 0 && (
             <Text dimColor>
@@ -441,7 +443,7 @@ export function App(props: AppProps) {
 
       {thinking && (
         <Box marginTop={1}>
-          <Text color="cyan">{SPINNER[spinnerTick % SPINNER.length]} </Text>
+          <Text color={T.primary}>{SPINNER[spinnerTick % SPINNER.length]} </Text>
           <Text dimColor>思考中…（Ctrl+C 中断）</Text>
         </Box>
       )}

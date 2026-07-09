@@ -4,6 +4,7 @@
  */
 import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
+import { T } from "../theme.js";
 
 interface Props {
   onSubmit: (value: string) => void;
@@ -111,7 +112,7 @@ export function TextInput({ onSubmit, active }: Props) {
 
   return (
     <Box>
-      <Text color="cyan">❯ </Text>
+      <Text color={T.primary}>❯ </Text>
       <Text>
         {before}
         <Text inverse>{at}</Text>

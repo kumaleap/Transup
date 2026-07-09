@@ -5,6 +5,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { renderMarkdown } from "../highlight.js";
+import { T } from "../theme.js";
 import { Banner, type BannerInfo } from "./Banner.js";
 
 export type TranscriptItem =
@@ -44,7 +45,7 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
     case "user":
       return (
         <Box marginTop={1}>
-          <Text color="cyan">❯ </Text>
+          <Text color={T.primary}>❯ </Text>
           <Text>{item.text}</Text>
         </Box>
       );
@@ -58,15 +59,15 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
       return (
         <Box flexDirection="column" marginTop={1}>
           <Text>
-            <Text color="magenta">⏺ {item.name}</Text>
+            <Text color={T.secondary}>◆ {item.name}</Text>
             <Text dimColor>({item.argSummary})</Text>
           </Text>
           {item.preview && (
             <Text>
-              <Text color={item.isError ? "red" : undefined} dimColor={!item.isError}>
+              <Text color={item.isError ? T.danger : undefined} dimColor={!item.isError}>
                 {"  ⎿ "}
               </Text>
-              <Text dimColor color={item.isError ? "red" : undefined}>
+              <Text dimColor color={item.isError ? T.danger : undefined}>
                 {item.preview.replace(/\n/g, "\n    ")}
               </Text>
             </Text>
@@ -74,11 +75,12 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
         </Box>
       );
     case "info": {
-      const color =
-        item.tone === "dim" ? undefined : (item.tone as "green" | "yellow" | "red");
+      const toneColor = { green: T.success, yellow: T.warn, red: T.danger }[
+        item.tone as "green" | "yellow" | "red"
+      ];
       return (
         <Box>
-          <Text dimColor={item.tone === "dim"} color={color}>
+          <Text dimColor={item.tone === "dim"} color={toneColor}>
             {item.text}
           </Text>
         </Box>

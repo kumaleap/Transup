@@ -6,6 +6,7 @@
  */
 import React from "react";
 import { Box, Text, useInput } from "ink";
+import { T } from "../theme.js";
 
 export type PermissionDecision = "yes" | "no" | "session" | "always";
 
@@ -14,6 +15,17 @@ export interface PermissionRequest {
   /** 已渲染好的 ANSI 预览（diff / 参数 JSON） */
   preview: string;
   resolve: (d: PermissionDecision) => void;
+}
+
+function Key({ k, label }: { k: string; label: string }) {
+  return (
+    <Text>
+      <Text color={T.primary} bold>
+        [{k}]
+      </Text>
+      <Text dimColor>{label} </Text>
+    </Text>
+  );
 }
 
 export function PermissionDialog({ request }: { request: PermissionRequest }) {
@@ -25,14 +37,17 @@ export function PermissionDialog({ request }: { request: PermissionRequest }) {
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
-      <Text color="yellow">
-        ⚠ 模型请求执行 <Text bold>{request.toolName}</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={T.warn} paddingX={1}>
+      <Text color={T.warn}>
+        ◈ 权限请求 —— 模型想执行 <Text bold>{request.toolName}</Text>
       </Text>
       <Text>{request.preview}</Text>
-      <Text color="yellow">
-        允许吗? <Text bold>[y]</Text>是 <Text bold>[n]</Text>否{" "}
-        <Text bold>[a]</Text>本会话允许 <Text bold>[A]</Text>永久允许
+      <Text>
+        <Text color={T.warn}>允许吗? </Text>
+        <Key k="y" label="是" />
+        <Key k="n" label="否" />
+        <Key k="a" label="本会话允许" />
+        <Key k="A" label="永久允许" />
       </Text>
     </Box>
   );

@@ -60,14 +60,16 @@ describe("TUI", () => {
   it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
-    const frame = lastFrame()!;
+    // tagline 逐字符渐变，字符间夹着色码 —— 剥掉 ANSI 再断言原文
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(frame).toContain("transup vdev"); // 边框标题（未传 version 时兜底 dev）
     expect(frame).toContain("做极致体验的编程 agent"); // tagline
     expect(frame).toContain("test-model"); // 横幅：模型行
     expect(frame).toContain("会话");
-    expect(frame).toContain("mock:test-model"); // 底部状态栏
+    expect(frame).toContain("◆ test-model"); // 底部状态栏（模型 + 主题标记）
     expect(frame).toContain("❯");
     expect(frame).toContain("上下文");
+    expect(frame).toContain("▱"); // 上下文水位仪表条
     unmount();
   });
 
