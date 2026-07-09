@@ -2,18 +2,26 @@
   "name": "@transup/cli",
   "version": "0.1.0",
   "type": "module",
-  "description": "transup 终端界面：REPL、渲染、权限确认。所有智能在 @transup/core。",
+  "description": "transup 终端界面：Ink TUI、headless 模式、权限确认。所有智能在 @transup/core。",
   "bin": {
-    "transup": "./src/index.ts"
+    "transup": "./dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "build": "tsup"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@transup/core": "*",
     "dotenv": "^17.4.2",
     "ink": "^6.8.0",
-    "react": "^19.2.7"
+    "openai": "^6.45.0",
+    "react": "^19.2.7",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",

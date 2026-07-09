@@ -13,7 +13,7 @@
 | M3 | 多 agent 与生态（MCP） | ✅ 代码完成（待实测验收） |
 | M4 | TUI 升级（Ink） | ✅ 代码完成（待实测验收） |
 | M4.5 | 运行时韧性与回归护栏 | ✅ 完成 |
-| M5 | 打包发布与 CI | ⬜ |
+| M5 | 打包发布与 CI | 🔶 代码完成（迁独立仓库待定） |
 | M6 | 安全与高级上下文 | ⬜ |
 
 ---
@@ -75,13 +75,14 @@
 - [x] 回归套件：`test/resilience.test.ts` 11 个用例固化断流重试 / 4xx 快速失败 / 退避中中断 / 截断续跑 / 催跑上限 / 熔断与不误伤 / 恢复后重注入
 - [ ] 意图级断档检测（模型说"接下来我会…"却不调工具）：启发式风险高，推迟到有真实 API 使用数据后再做
 
-## M5 打包发布与 CI
+## M5 打包发布与 CI 🔶（代码完成，迁独立仓库待定）
 
-- [ ] tsup 构建产物，`npx transup` 可直接运行；bin 入口与版本管理
-- [ ] headless 模式入口（`-p "任务"` 非交互执行，纯事件流消费）——验证 core 的多宿主承诺
-- [ ] GitHub Actions：typecheck + test + 发布流水线
-- [ ] README（英文为主）、贡献指南、许可证（MIT）
-- [ ] 迁出到独立开源仓库
+- [x] tsup 构建产物：`packages/cli/dist/index.js`（ESM + shebang），bin 指向 dist；core 以源码内联打进 bundle（独立发包等迁仓库时再拆），`--help` / `--version` 齐备
+- [x] headless 模式入口：`transup -p "任务"` 非交互执行 —— stdout 只有正文、stderr 只有过程信息（管道友好）；权限 fail-closed（settings 允许清单或 `--allow-all` 才放行写操作）；退出码 0/1；core 多宿主承诺的第一个非终端消费者
+- [x] GitHub Actions：push/PR 跑 typecheck + test + build + 产物冒烟
+- [x] README（英文为主，附中文摘要）、CONTRIBUTING.md、LICENSE（MIT）
+- [ ] npm 发布流水线（publish workflow）—— 等迁独立仓库后一起做
+- [ ] 迁出到独立开源仓库（需要决定时机与仓库名）
 
 ## M6 安全与高级上下文
 

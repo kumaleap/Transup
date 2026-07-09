@@ -1,0 +1,24 @@
+# CI：每次 push / PR 跑满 typecheck + 测试 + 构建
+# 三步就是本仓库"完成"的定义（见 ROADMAP 工作约定），CI 只是把它固化。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      # 产物冒烟：bin 能跑起来、版本号能读到
+      - run: node packages/cli/dist/index.js --version
