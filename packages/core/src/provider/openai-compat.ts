@@ -10,7 +10,7 @@
  */
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
-import type { Message, Provider, ProviderEvent, ToolCall, ToolSpec } from "./types.js";
+import type { Message, Provider, ProviderEvent, StopReason, ToolCall, ToolSpec } from "./types.js";
 
 export interface OpenAICompatOptions {
   baseURL: string;
@@ -75,6 +75,7 @@ export class OpenAICompatProvider implements Provider {
     let content = "";
     const calls: { id: string; name: string; args: string }[] = [];
     let usage: { inputTokens: number; outputTokens: number } | undefined;
+    let finish: string | null = null;
 
     for await (const chunk of stream) {
       if (chunk.usage) {
@@ -83,6 +84,7 @@ export class OpenAICompatProvider implements Provider {
           outputTokens: chunk.usage.completion_tokens,
         };
       }
+      if (chunk.choices[0]?.finish_reason) finish = chunk.choices[0].finish_reason;
       const delta = chunk.choices[0]?.delta;
       if (!delta) continue;
 
@@ -100,6 +102,11 @@ export class OpenAICompatProvider implements Provider {
     }
 
     const toolCalls: ToolCall[] = calls.filter(Boolean).map((c) => ({ ...c }));
-    yield { type: "message_done", content, toolCalls, usage };
+    const stopReason: StopReason =
+      finish === "length" ? "max_tokens"
+      : finish === "tool_calls" ? "tool_use"
+      : finish === "stop" ? "end_turn"
+      : "other";
+    yield { type: "message_done", content, toolCalls, usage, stopReason };
   }
 }

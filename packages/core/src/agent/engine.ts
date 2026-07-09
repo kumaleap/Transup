@@ -4,18 +4,25 @@
  * 引擎不打印任何东西：runTurn() 是 AsyncGenerator，把发生的一切作为
  * 事件 yield 给宿主（终端 CLI / IDE 插件 / headless server）渲染。
  *
- * 本版本的三个进阶能力：
- * 1. 上下文压缩（compact）：接近预算时用 LLM 生成结构化摘要替代旧历史，
- *    并重新注入最近读过的文件 ——"模型失忆但工作台还在"。
- * 2. 并行工具执行：一批 tool_use 里的只读工具并发跑，写工具串行
- *    （权限确认本身就必须串行）。
- * 3. 项目上下文：AGENT.md 约定 + repo map 注入 system prompt。
+ * 职责边界（M4.5 拆分后）：本文件只做主循环编排与消息所有权管理，
+ * 具体能力在同目录模块里 —— compact.ts（上下文压缩）、
+ * tool-runner.ts（工具批执行）、guard.ts（循环保护）。
+ *
+ * 运行时韧性（现代 harness 的分水岭 —— 长任务不断档）：
+ * 1. 流式重试：模型调用中途断流/瞬时错误时指数退避重试。SDK 的
+ *    maxRetries 只覆盖"请求未成功建立"，流开始后断开必须引擎自己兜。
+ * 2. 截断续跑：输出因 max_tokens 被截断时自动催模型"从断处继续"。
+ * 3. 空回复催跑：模型交白卷时推一把，而不是无声结束回合。
+ * 4. 循环熔断：完全相同的调用+结果反复出现 → 先警告模型，再强制停轮。
+ * 所有自动干预都有次数上限 —— 韧性不能变成失控的自我对话。
  */
-import { readFile } from "node:fs/promises";
-import type { Message, Provider, ToolCall, Usage } from "../provider/types.js";
+import type { Message, Provider, StopReason, ToolCall, Usage } from "../provider/types.js";
 import { ToolRegistry } from "../tools/registry.js";
-import type { PermissionFn, Tool, ToolResult } from "../tools/types.js";
+import type { PermissionFn, Tool } from "../tools/types.js";
 import { SessionStore } from "../session/store.js";
+import { summarize, reinjectFiles, trimHistory } from "./compact.js";
+import { executeToolBatch } from "./tool-runner.js";
+import { TurnGuard } from "./guard.js";
 
 export type AgentEvent =
   | { type: "text_delta"; text: string }
@@ -25,7 +32,11 @@ export type AgentEvent =
   | { type: "usage"; usage: Usage }
   | { type: "compact_start"; beforeChars: number }
   | { type: "compact_end"; afterChars: number; ok: boolean }
-  | { type: "turn_end"; reason: "done" | "max_iterations" | "aborted" };
+  /** 模型调用失败，引擎将在 delayMs 后重试（宿主应提示并清掉已流出的半截文本） */
+  | { type: "stream_retry"; attempt: number; maxAttempts: number; error: string; delayMs: number }
+  /** 引擎自动催模型继续（截断续跑 / 空回复催跑） */
+  | { type: "auto_continue"; reason: "truncated" | "empty_response" }
+  | { type: "turn_end"; reason: "done" | "max_iterations" | "aborted" | "loop_detected" };
 
 export interface EngineOptions {
   provider: Provider;
@@ -41,11 +52,37 @@ export interface EngineOptions {
   maxIterations?: number;
   /** 上下文字符预算，超出触发 compact */
   maxContextChars?: number;
+  /** 流式调用失败的引擎级重试次数（SDK 重试之外的兜底） */
+  maxStreamRetries?: number;
+  /** 重试退避基数（毫秒），测试时调小加速 */
+  retryBaseMs?: number;
 }
 
-/** compact 后重新注入的"最近读过的文件"数量与单文件大小上限 */
-const REINJECT_FILES = 3;
-const REINJECT_MAX_CHARS = 8_000;
+/** 每轮自动干预（截断续跑 + 空回复催跑）的总次数上限 */
+const AUTO_CONTINUE_LIMIT = 3;
+
+/** 判断模型调用错误是否值得重试：4xx（限流/超时除外）是请求本身的问题，重试无意义 */
+function isRetryable(err: unknown): boolean {
+  const status = (err as { status?: unknown })?.status;
+  if (typeof status === "number") {
+    return status === 408 || status === 429 || status >= 500;
+  }
+  return true; // 网络层错误（断流、DNS、连接重置）没有 status，一律可重试
+}
+
+/** 可被 abort 打断的 sleep（打断时立即返回，由调用方检查 signal） */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done);
+  });
+}
 
 export class AgentEngine {
   private messages: Message[];
@@ -55,6 +92,8 @@ export class AgentEngine {
   private session?: SessionStore;
   private maxIterations: number;
   private maxContextChars: number;
+  private maxStreamRetries: number;
+  private retryBaseMs: number;
   /** 最近 read_file 过的路径（去重、保序），compact 后重注入用 */
   private recentFiles: string[] = [];
 
@@ -65,10 +104,24 @@ export class AgentEngine {
     this.registry = new ToolRegistry(opts.tools);
     this.maxIterations = opts.maxIterations ?? 40;
     this.maxContextChars = opts.maxContextChars ?? 300_000;
+    this.maxStreamRetries = opts.maxStreamRetries ?? 3;
+    this.retryBaseMs = opts.retryBaseMs ?? 1000;
     this.messages = [
       { role: "system", content: systemPrompt(opts.projectContext) },
       ...(opts.history ?? []),
     ];
+    // 中断恢复质量：从历史里重建"最近读过的文件"清单，
+    // 恢复会话后第一次 compact 依然能重注入工作台
+    for (const m of opts.history ?? []) {
+      if (m.role !== "assistant") continue;
+      for (const tc of m.toolCalls ?? []) {
+        if (tc.name !== "read_file") continue;
+        try {
+          const path = (JSON.parse(tc.args || "{}") as { path?: unknown }).path;
+          if (typeof path === "string") this.trackFile(path);
+        } catch {}
+      }
+    }
   }
 
   /** 消息进入系统的唯一入口：内存 + 持久化双写 */
@@ -77,26 +130,22 @@ export class AgentEngine {
     await this.session?.append(m);
   }
 
+  private trackFile(path: string): void {
+    this.recentFiles = this.recentFiles.filter((p) => p !== path);
+    this.recentFiles.push(path);
+  }
+
   private contextSize(): number {
     return JSON.stringify(this.messages).length;
   }
 
-  // ── 上下文压缩 ─────────────────────────────────────────────
-  //
-  // 流程（借鉴 Claude Code 的 compact）：
-  //  1. 把 system 之外的全部历史交给模型，用专项 prompt 生成结构化摘要
-  //     （单任务协议：禁用工具、强制 TEXT ONLY）
-  //  2. 用摘要替换旧历史
-  //  3. 重新注入最近读过的文件内容 —— 摘要救的是"记忆"，
-  //     重注入救的是"工作台"，两者缺一不可
-  //  4. 失败则退回最简截断，绝不让压缩挡住主流程
+  // ── 上下文压缩（计算在 compact.ts，历史替换在这里） ─────────
 
   private async *compact(): AsyncGenerator<AgentEvent> {
-    const before = this.contextSize();
-    yield { type: "compact_start", beforeChars: before };
+    yield { type: "compact_start", beforeChars: this.contextSize() };
 
     try {
-      const summary = await this.summarize();
+      const summary = await summarize(this.provider, this.messages);
 
       const newMessages: Message[] = [
         this.messages[0], // system prompt 保留
@@ -104,147 +153,20 @@ export class AgentEngine {
           role: "user",
           content:
             `[系统提示] 对话历史已被压缩。以下是此前对话的摘要，请基于它继续工作：\n\n${summary}` +
-            (await this.reinjectFiles()),
+            (await reinjectFiles(this.recentFiles)),
         },
         { role: "assistant", content: "已了解此前的工作进展，继续。" },
       ];
       this.messages = newMessages;
       // 压缩是历史重写，在 transcript 里记录为一个事件（新会话段）
       await this.session?.append(newMessages[1]);
-      await this.session?.append(newMessages[2] as Message);
+      await this.session?.append(newMessages[2]);
 
       yield { type: "compact_end", afterChars: this.contextSize(), ok: true };
     } catch {
       // 熔断：压缩失败退回最简截断
-      this.trimHistory();
+      trimHistory(this.messages, this.maxContextChars);
       yield { type: "compact_end", afterChars: this.contextSize(), ok: false };
-    }
-  }
-
-  /** 用专项 prompt 让模型生成摘要（无工具、单任务） */
-  private async summarize(): Promise<string> {
-    const COMPACT_PROMPT =
-      "把上面的对话压缩成一份工作交接摘要，供接手的工程师继续任务。必须包含：\n" +
-      "1. 用户的原始目标和当前任务\n" +
-      "2. 已完成的工作（改了哪些文件、跑了什么命令、结果如何）\n" +
-      "3. 进行中/未完成的工作和下一步计划\n" +
-      "4. 重要的技术决策和踩过的坑\n" +
-      "只输出摘要正文，不要客套话。";
-
-    const request: Message[] = [
-      ...this.messages,
-      { role: "user", content: COMPACT_PROMPT },
-    ];
-
-    let summary = "";
-    // 不传工具 —— 摘要任务禁止工具调用
-    for await (const ev of this.provider.stream(request, [])) {
-      if (ev.type === "message_done") summary = ev.content;
-    }
-    if (!summary.trim()) throw new Error("摘要为空");
-    return summary;
-  }
-
-  /** 重新注入最近读过的文件 —— 让模型"失忆但工作台还在" */
-  private async reinjectFiles(): Promise<string> {
-    const files = this.recentFiles.slice(-REINJECT_FILES);
-    if (files.length === 0) return "";
-
-    const parts: string[] = [];
-    for (const path of files) {
-      try {
-        let text = await readFile(path, "utf-8");
-        if (text.length > REINJECT_MAX_CHARS) {
-          text = text.slice(0, REINJECT_MAX_CHARS) + "\n… (已截断，需要时重新 read_file)";
-        }
-        parts.push(`\n\n[重新注入] 最近读过的文件 ${path} 当前内容：\n${text}`);
-      } catch {
-        // 文件可能已被删除，跳过
-      }
-    }
-    return parts.join("");
-  }
-
-  /** 兜底截断（compact 失败时用）。tool 消息必须与 assistant 成对丢弃。 */
-  private trimHistory(): void {
-    while (this.contextSize() > this.maxContextChars && this.messages.length > 3) {
-      this.messages.splice(1, 1);
-      while (this.messages[1]?.role === "tool") {
-        this.messages.splice(1, 1);
-      }
-    }
-  }
-
-  // ── 并行工具执行 ────────────────────────────────────────────
-  //
-  // 只读工具（read/grep/list）之间没有依赖，并发执行；
-  // 写工具必须串行 —— 不仅因为写操作有顺序性，权限确认（终端问询）
-  // 本身也只能一次问一个。
-  // 实现：只读的先全部启动（fire），再按原顺序 await —— 事件顺序稳定，
-  // 墙钟时间却是并行的。
-
-  private async *executeToolBatch(toolCalls: ToolCall[], signal?: AbortSignal): AsyncGenerator<AgentEvent> {
-    // 先把只读工具全部启动
-    const started = new Map<string, Promise<ToolResult>>();
-    for (const call of toolCalls) {
-      if (this.registry.isReadOnly(call.name)) {
-        started.set(call.id, this.registry.execute(call.id, call.name, call.args, this.canUseTool));
-      }
-    }
-
-    for (const call of toolCalls) {
-      // 中断时不能直接 return —— 每个 tool_use 都必须有对应的 tool_result，
-      // 否则下一轮请求 API 会报错。剩余的调用补"已中断"结果。
-      if (signal?.aborted) {
-        await this.push({ role: "tool", toolCallId: call.id, content: "[错误] 已被用户中断" });
-        continue;
-      }
-
-      let parsedArgs: Record<string, unknown> = {};
-      try { parsedArgs = JSON.parse(call.args || "{}"); } catch {}
-      yield { type: "tool_start", call, parsedArgs };
-
-      // 只读 → 取已启动的并发任务；写 → 现在才串行执行（权限门在里面）。
-      // 串行执行时接上进度通道：回调发生在 await 期间，而事件必须从
-      // generator yield 出去，所以用"队列 + 唤醒"桥接两个世界。
-      let result: ToolResult;
-      const startedPromise = started.get(call.id);
-      if (startedPromise) {
-        result = await startedPromise;
-      } else {
-        const queue: string[] = [];
-        let wake: (() => void) | null = null;
-        const resultPromise = this.registry.execute(
-          call.id, call.name, call.args, this.canUseTool,
-          (chunk) => { queue.push(chunk); wake?.(); },
-        );
-        let settled = false;
-        resultPromise.finally(() => { settled = true; wake?.(); });
-
-        while (!settled || queue.length > 0) {
-          if (queue.length > 0) {
-            yield { type: "tool_progress", call, chunk: queue.shift()! };
-          } else {
-            await new Promise<void>((r) => { wake = r; });
-            wake = null;
-          }
-        }
-        result = await resultPromise;
-      }
-
-      // 记录最近读过的文件，供 compact 重注入
-      if (call.name === "read_file" && typeof parsedArgs.path === "string" && !result.isError) {
-        this.recentFiles = this.recentFiles.filter((p) => p !== parsedArgs.path);
-        this.recentFiles.push(parsedArgs.path);
-      }
-
-      yield { type: "tool_end", call, content: result.content, isError: result.isError };
-
-      await this.push({
-        role: "tool",
-        toolCallId: result.toolCallId,
-        content: result.isError ? `[错误] ${result.content}` : result.content,
-      });
     }
   }
 
@@ -265,6 +187,10 @@ export class AgentEngine {
   async *runTurn(userInput: string, signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     await this.push({ role: "user", content: userInput });
 
+    const guard = new TurnGuard(); // 循环保护以 turn 为生命周期
+    let retries = 0; // 连续流式失败次数（成功即清零）
+    let autoContinues = 0; // 本轮自动干预次数（截断续跑 + 空回复催跑共享上限）
+
     for (let i = 0; i < this.maxIterations; i++) {
       if (signal?.aborted) {
         yield { type: "turn_end", reason: "aborted" };
@@ -277,6 +203,7 @@ export class AgentEngine {
       // 1. 调用模型，转发文本增量，收集完整消息
       let content = "";
       let toolCalls: ToolCall[] = [];
+      let stopReason: StopReason | undefined;
       try {
         for await (const ev of this.provider.stream(this.messages, this.registry.specs(), signal)) {
           if (ev.type === "text_delta") {
@@ -284,10 +211,11 @@ export class AgentEngine {
           } else {
             content = ev.content;
             toolCalls = ev.toolCalls;
+            stopReason = ev.stopReason;
             if (ev.usage) yield { type: "usage", usage: ev.usage };
           }
         }
-      } catch (err: any) {
+      } catch (err) {
         // 用户中断：SDK 会抛 abort 错误。已流出的部分文本作为消息保留，
         // transcript 保持一致（user 消息必须有 assistant 回应）
         if (signal?.aborted) {
@@ -295,8 +223,30 @@ export class AgentEngine {
           yield { type: "turn_end", reason: "aborted" };
           return;
         }
+        // 引擎级重试：什么都还没 push，退避后原样重发即可。
+        // 已经 yield 出去的半截 text_delta 由宿主收到 stream_retry 时清理。
+        if (retries < this.maxStreamRetries && isRetryable(err)) {
+          retries++;
+          const delayMs = this.retryBaseMs * 2 ** (retries - 1);
+          yield {
+            type: "stream_retry",
+            attempt: retries,
+            maxAttempts: this.maxStreamRetries,
+            error: err instanceof Error ? err.message : String(err),
+            delayMs,
+          };
+          await sleep(delayMs, signal);
+          if (signal?.aborted) {
+            await this.push({ role: "assistant", content: "(已被用户中断)" });
+            yield { type: "turn_end", reason: "aborted" };
+            return;
+          }
+          i--; // 重试不消耗迭代预算（迭代预算是留给真实工作的）
+          continue;
+        }
         throw err;
       }
+      retries = 0;
 
       await this.push({
         role: "assistant",
@@ -304,16 +254,52 @@ export class AgentEngine {
         ...(toolCalls.length > 0 && { toolCalls }),
       });
 
-      // 2. 没有工具调用 → 模型说完了
+      // 2. 没有工具调用 → 先判断是"说完了"还是"断档了"
       if (toolCalls.length === 0) {
+        // 截断续跑：输出被 max_tokens 拦腰砍断，催模型从断处继续
+        if (stopReason === "max_tokens" && autoContinues < AUTO_CONTINUE_LIMIT) {
+          autoContinues++;
+          yield { type: "auto_continue", reason: "truncated" };
+          await this.push({
+            role: "user",
+            content: "[系统提示] 你的上一条输出因长度限制被截断。请从截断处继续，不要重复已输出的内容。",
+          });
+          continue;
+        }
+        // 空回复催跑：模型交了白卷，推一把而不是无声结束
+        if (!content.trim() && autoContinues < AUTO_CONTINUE_LIMIT) {
+          autoContinues++;
+          yield { type: "auto_continue", reason: "empty_response" };
+          await this.push({
+            role: "user",
+            content: "[系统提示] 你的上一条回复是空的。任务未完成请继续执行；已完成请简要总结结果。",
+          });
+          continue;
+        }
         yield { type: "turn_end", reason: "done" };
         return;
       }
 
       // 3. 执行工具（只读并发、写串行），结果回流
-      yield* this.executeToolBatch(toolCalls, signal);
+      yield* executeToolBatch(
+        {
+          registry: this.registry,
+          canUseTool: this.canUseTool,
+          push: (m) => this.push(m),
+          onFileRead: (path) => this.trackFile(path),
+          guard,
+        },
+        toolCalls,
+        signal,
+      );
       if (signal?.aborted) {
         yield { type: "turn_end", reason: "aborted" };
+        return;
+      }
+      // 循环熔断：警告后模型仍在原地打转，强制停轮止损。
+      // 此时所有 tool_use 都已有配对的 tool result，transcript 是一致的。
+      if (guard.tripped) {
+        yield { type: "turn_end", reason: "loop_detected" };
         return;
       }
     }

@@ -10,7 +10,7 @@ export { buildProjectContext } from "./agent/context.js";
 export { createTaskTool } from "./agent/subagent.js";
 export { connectMcpServer, connectAllMcpServers, type McpServerConfig, type McpConnection } from "./tools/mcp.js";
 export { loadSettings, saveSettings, isAllowed, persistAllow, type Settings } from "./settings.js";
-export type { Provider, ProviderEvent, Message, ToolCall, ToolSpec, Usage } from "./provider/types.js";
+export type { Provider, ProviderEvent, Message, StopReason, ToolCall, ToolSpec, Usage } from "./provider/types.js";
 export { ToolRegistry, builtinTools } from "./tools/registry.js";
 export type { Tool, ToolResult, PermissionFn } from "./tools/types.js";
 export { SessionStore } from "./session/store.js";

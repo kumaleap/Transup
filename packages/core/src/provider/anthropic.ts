@@ -25,7 +25,7 @@ import type {
   ToolUnion,
   TextBlockParam,
 } from "@anthropic-ai/sdk/resources/messages";
-import type { Message, Provider, ProviderEvent, ToolCall, ToolSpec } from "./types.js";
+import type { Message, Provider, ProviderEvent, StopReason, ToolCall, ToolSpec } from "./types.js";
 
 export interface AnthropicOptions {
   apiKey: string;
@@ -172,10 +172,16 @@ export class AnthropicProvider implements Provider {
     }
 
     const final = await stream.finalMessage();
+    const stopReason: StopReason =
+      final.stop_reason === "max_tokens" ? "max_tokens"
+      : final.stop_reason === "tool_use" ? "tool_use"
+      : final.stop_reason === "end_turn" || final.stop_reason === "stop_sequence" ? "end_turn"
+      : "other";
     yield {
       type: "message_done",
       content,
       toolCalls,
+      stopReason,
       usage: {
         // cache_read 是省下的钱的直接体现 —— UI 里展示它，能看到缓存是否生效
         inputTokens: final.usage.input_tokens,

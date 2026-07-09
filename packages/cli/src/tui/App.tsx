@@ -338,6 +338,24 @@ export function App(props: AppProps) {
             turnUsage.cacheRead += ev.usage.cacheReadTokens ?? 0;
             turnUsage.cacheWrite += ev.usage.cacheWriteTokens ?? 0;
             break;
+          case "stream_retry":
+            // 半截流式文本作废（引擎会整条重发），清掉避免和重试后的输出重复
+            stream = "";
+            setStreamText("");
+            info(
+              `⚠ 模型调用失败（${ev.error}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}…`,
+              "yellow",
+            );
+            break;
+          case "auto_continue":
+            flushStream();
+            info(
+              ev.reason === "truncated"
+                ? "⟳ 输出被长度限制截断，自动续跑…"
+                : "⟳ 模型返回了空回复，自动催跑…",
+              "yellow",
+            );
+            break;
           case "compact_start":
             info("⟳ 上下文接近上限，正在压缩…", "yellow");
             break;
@@ -348,6 +366,8 @@ export function App(props: AppProps) {
           case "turn_end":
             if (ev.reason === "max_iterations") info("已达到单轮最大迭代次数，强制停止。", "red");
             else if (ev.reason === "aborted") info("任务已中断。", "yellow");
+            else if (ev.reason === "loop_detected")
+              info("检测到模型在重复相同的调用（循环空转），已强制停止本轮。", "red");
             break;
         }
       }

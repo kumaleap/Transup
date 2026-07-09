@@ -38,9 +38,16 @@ export interface ToolSpec {
   parameters: Record<string, unknown>;
 }
 
+/**
+ * 归一化的停止原因 —— 引擎韧性能力的判定依据：
+ *   max_tokens 表示输出被长度限制截断（引擎会自动续跑），
+ *   其余情况引擎按"模型主动结束"处理。不识别的厂商值归入 other。
+ */
+export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "other";
+
 export type ProviderEvent =
   | { type: "text_delta"; text: string }
-  | { type: "message_done"; content: string; toolCalls: ToolCall[]; usage?: Usage };
+  | { type: "message_done"; content: string; toolCalls: ToolCall[]; usage?: Usage; stopReason?: StopReason };
 
 export interface Usage {
   inputTokens: number;
