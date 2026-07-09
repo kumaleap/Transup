@@ -62,9 +62,12 @@ if (flag("--help") || flag("-h")) {
   console.log(HELP);
   process.exit(0);
 }
+const VERSION: string = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
+).version;
+
 if (flag("--version") || flag("-v")) {
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
-  console.log(`transup ${pkg.version}`);
+  console.log(`transup ${VERSION}`);
   process.exit(0);
 }
 
@@ -158,6 +161,7 @@ const instance = render(
     initialSessionId: id,
     initialHistory: history,
     mcpToolCount: mcp.tools.length,
+    version: VERSION,
   }),
   { exitOnCtrlC: false },
 );

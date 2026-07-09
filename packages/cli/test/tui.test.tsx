@@ -57,12 +57,16 @@ function makeApp(provider: Provider) {
 const flush = (ms = 150) => new Promise((r) => setTimeout(r, ms));
 
 describe("TUI", () => {
-  it("首屏渲染横幅、输入框和状态栏", async () => {
+  it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
     const frame = lastFrame()!;
-    expect(frame).toContain("Transup");
-    expect(frame).toContain("mock:test-model");
+    expect(frame).toContain("任何模型都是一等公民"); // 横幅 tagline
+    expect(frame).toContain("vdev"); // 未传 version 时的兜底
+    expect(frame).toContain("test-model"); // 横幅信息框：模型行
+    expect(frame).toContain("目录");
+    expect(frame).toContain("会话");
+    expect(frame).toContain("mock:test-model"); // 底部状态栏
     expect(frame).toContain("❯");
     expect(frame).toContain("上下文");
     unmount();

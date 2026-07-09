@@ -5,8 +5,10 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { renderMarkdown } from "../highlight.js";
+import { Banner, type BannerInfo } from "./Banner.js";
 
 export type TranscriptItem =
+  | { id: number; kind: "banner"; info: BannerInfo }
   | { id: number; kind: "user"; text: string }
   | { id: number; kind: "assistant"; text: string }
   | {
@@ -37,6 +39,8 @@ export function previewResult(content: string, streamed: boolean): string {
 
 export function TranscriptItemView({ item }: { item: TranscriptItem }) {
   switch (item.kind) {
+    case "banner":
+      return <Banner info={item.info} />;
     case "user":
       return (
         <Box marginTop={1}>

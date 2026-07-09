@@ -45,6 +45,8 @@ export interface AppProps {
   initialSessionId: string;
   initialHistory: Message[];
   mcpToolCount: number;
+  /** 显示在首屏横幅上的版本号（入口从 package.json 读出传入） */
+  version?: string;
   /** 会话持久化目录覆盖（测试用）；不传用默认目录 */
   sessionDir?: string;
 }
@@ -173,19 +175,20 @@ export function App(props: AppProps) {
     engineRef.current = createEngine(props.initialSessionId, props.initialHistory);
   }
 
-  // ── 首屏横幅 ──────────────────────────────────────────────
+  // ── 首屏横幅（logo + 版本 + 模型/目录/会话/MCP 状态） ─────
   useEffect(() => {
-    info(
-      color.bold(color.cyan("✻ Transup")) +
-        color.dim(
-          ` — ${props.provider.id}:${props.provider.model} · 会话 ${props.initialSessionId}`,
-        ),
-    );
-    if (props.initialHistory.length > 0) {
-      info(`已恢复 ${props.initialHistory.length} 条历史消息`);
-    }
-    if (props.mcpToolCount > 0) info(`已接入 ${props.mcpToolCount} 个 MCP 工具`);
-    info("输入你的任务，/help 查看命令");
+    push({
+      kind: "banner",
+      info: {
+        version: props.version ?? "dev",
+        providerId: props.provider.id,
+        model: props.provider.model,
+        sessionId: props.initialSessionId,
+        resumedMessages: props.initialHistory.length,
+        cwd: process.cwd(),
+        mcpToolCount: props.mcpToolCount,
+      },
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

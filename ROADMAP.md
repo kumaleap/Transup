@@ -60,6 +60,7 @@
 - [x] 状态栏：模型 / token 用量 / 缓存命中 / 上下文水位（`tui/StatusBar`）
 - [x] 权限对话框组件化（`tui/PermissionDialog`：y/n/会话内/永久 四档）
 - [x] TUI 冒烟测试（ink-testing-library + mock provider；修复 TextInput 同 tick 连续按键读到旧 state 吞提交的 bug）
+- [x] 首屏横幅（`tui/Banner.tsx`）：块字 logo + 版本 + 模型/目录/会话/MCP 信息框 + 快捷提示，对标 Claude Code/Codex 的开场体验
 
 ## M4.5 运行时韧性与回归护栏 ✅（源自 docs/TODO-功能补齐.md）
 
