@@ -61,10 +61,9 @@ describe("TUI", () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
     const frame = lastFrame()!;
-    expect(frame).toContain("任何模型都是一等公民"); // 横幅 tagline
-    expect(frame).toContain("vdev"); // 未传 version 时的兜底
-    expect(frame).toContain("test-model"); // 横幅信息框：模型行
-    expect(frame).toContain("目录");
+    expect(frame).toContain("transup vdev"); // 边框标题（未传 version 时兜底 dev）
+    expect(frame).toContain("做极致体验的编程 agent"); // tagline
+    expect(frame).toContain("test-model"); // 横幅：模型行
     expect(frame).toContain("会话");
     expect(frame).toContain("mock:test-model"); // 底部状态栏
     expect(frame).toContain("❯");

@@ -1,6 +1,6 @@
 # transup
 
-Open-source AI coding agent for your terminal — **any model is a first-class citizen**.
+Open-source AI coding agent for your terminal — built for **a polished, top-tier agent experience, whatever model you run**.
 
 Works with any OpenAI-compatible API (DeepSeek, Kimi, OpenRouter, vLLM, …) and the native Anthropic protocol (with prompt caching).
 

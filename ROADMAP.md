@@ -1,7 +1,7 @@
 # Transup 开发计划
 
-> 目标：开源 AI coding agent CLI，对标 Claude Code / Codex CLI 的行业顶尖水平。
-> 差异化定位：**任何模型都是一等公民** —— provider 无关的架构下做到与官方工具同级的体验。
+> 目标：**做极致体验的编程 agent** —— 开源 CLI，对标 Claude Code / Codex 的行业顶尖水平。
+> 架构手段：provider 无关，任何模型上都做到与官方工具同级的体验。
 
 ## 里程碑总览
 
