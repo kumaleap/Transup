@@ -19,6 +19,7 @@ export const T = {
   success: "#5fff87", // 荧光绿（≈ 84）
   warn: "#ffaf5f", // 琥珀（≈ 215）
   danger: "#ff5f87", // 霓虹粉（≈ 204）
+  border: "#585b70", // 低调灰蓝 —— 输入框边框，跟记录区分隔又不抢眼
 } as const;
 
 /** 电光青 → 霓虹紫 的 256 色渐变坡道（logo、tagline 用） */

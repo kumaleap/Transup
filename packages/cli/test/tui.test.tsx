@@ -13,7 +13,7 @@ import { render } from "ink-testing-library";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Provider, ProviderEvent, ToolCall } from "@transup/core";
+import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import { App } from "../src/tui/App.js";
 
@@ -22,8 +22,12 @@ class MockProvider implements Provider {
   readonly id = "mock";
   readonly model = "test-model";
   private step = 0;
+  /** 最近一次请求里的 user 消息内容（验证占位符已还原成全文） */
+  lastUserContent = "";
   constructor(private replies: { content: string; toolCalls?: ToolCall[] }[]) {}
-  async *stream(): AsyncIterable<ProviderEvent> {
+  async *stream(messages?: Message[]): AsyncIterable<ProviderEvent> {
+    const u = [...(messages ?? [])].reverse().find((m) => m.role === "user");
+    if (u) this.lastUserContent = u.content;
     const r = this.replies[Math.min(this.step++, this.replies.length - 1)] ?? {
       content: "(空)",
     };
@@ -34,6 +38,17 @@ class MockProvider implements Provider {
       toolCalls: r.toolCalls ?? [],
       usage: { inputTokens: 10, outputTokens: 5 },
     };
+  }
+}
+
+/** 先报 usage 再挂起一会才结束，便于在运行中途抓到活动行 */
+class SlowProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  async *stream(): AsyncIterable<ProviderEvent> {
+    yield { type: "usage", usage: { inputTokens: 1200, outputTokens: 340 } };
+    await new Promise((r) => setTimeout(r, 500));
+    yield { type: "message_done", content: "ok", toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
   }
 }
 
@@ -70,6 +85,25 @@ describe("TUI", () => {
     expect(frame).toContain("❯");
     expect(frame).toContain("上下文");
     expect(frame).toContain("▱"); // 上下文水位仪表条
+    expect(/[╭╮╰╯]/.test(frame)).toBe(true); // 输入框圆角边框
+    unmount();
+  });
+
+  it("多行粘贴折叠成占位符：输入框不刷屏、记录区显示占位符、模型收到全文", async () => {
+    const provider = new MockProvider([{ content: "收到" }]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    // Ink 把整段粘贴作为单次 input 传入
+    stdin.write("行1\n行2\n行3");
+    await flush();
+    const framed = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(framed).toContain("[粘贴 #1 · 3 行]");
+    expect(framed).not.toContain("行2"); // 原文不刷进输入框
+    stdin.write("\r");
+    await flush(400);
+    const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(done).toContain("[粘贴 #1 · 3 行]"); // 记录区也是占位符
+    expect(provider.lastUserContent).toContain("行1\n行2\n行3"); // 模型收到还原后的全文
     unmount();
   });
 
@@ -144,6 +178,21 @@ describe("TUI", () => {
     await flush(600);
     expect(lastFrame()).toContain("好的，不写了");
     expect(existsSync(target)).toBe(false);
+    unmount();
+  });
+
+  it("运行期活动行：英文状态词 + 执行时长 + 实时 tokens", async () => {
+    const { stdin, lastFrame, unmount } = render(makeApp(new SlowProvider()));
+    await flush();
+    stdin.write("hi");
+    stdin.write("\r");
+    await flush(250); // 此刻引擎还挂在 SlowProvider 里
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toMatch(/Thinking|Responding/); // 英文状态词
+    expect(frame).toMatch(/\d+s ·/); // 执行时长
+    expect(frame).toContain("↑1.2k"); // 实时 input tokens
+    expect(frame).toContain("↓340"); // 实时 output tokens
+    expect(frame).toContain("working…"); // 输入框运行态英文占位
     unmount();
   });
 

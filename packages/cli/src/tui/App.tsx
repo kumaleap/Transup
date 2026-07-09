@@ -72,6 +72,11 @@ function newSessionId(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+/** 紧凑 token 数：1234 → 1.2k，12345 → 12k */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(n);
+}
+
 interface ActiveTool {
   name: string;
   argSummary: string;
@@ -99,6 +104,9 @@ export function App(props: AppProps) {
   const sessionAllowed = useRef(new Set<string>());
   const totals = useRef({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   const permissionRef = useRef<PermissionRequest | null>(null);
+  // 本轮起始时间戳与实时累计用量 —— 渲染时读取，展示执行时长 / tokens
+  const turnStartRef = useRef(0);
+  const liveUsage = useRef({ input: 0, output: 0 });
 
   const [status, setStatus] = useState<StatusInfo>({
     providerId: props.provider.id,
@@ -197,13 +205,14 @@ export function App(props: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 思考中 spinner ────────────────────────────────────────
-  const thinking = running && !streamText && !activeTool && !permission;
+  // ── 运行期心跳 ────────────────────────────────────────────
+  // 整轮运行期间跑一个 120ms 心跳：驱动 spinner 动画，同时让执行时长与
+  // 实时 tokens 每帧重渲染（覆盖 思考 / 工具执行 / 流式 三个子状态）。
   useEffect(() => {
-    if (!thinking) return;
+    if (!running) return;
     const t = setInterval(() => setSpinnerTick((n) => n + 1), 120);
     return () => clearInterval(t);
-  }, [thinking]);
+  }, [running]);
 
   // ── Ctrl+C：运行中先中断任务，空闲时退出 ──────────────────
   useInput((input, key) => {
@@ -290,6 +299,8 @@ export function App(props: AppProps) {
     const input = expandFileRefs(raw);
     const controller = new AbortController();
     controllerRef.current = controller;
+    turnStartRef.current = Date.now();
+    liveUsage.current = { input: 0, output: 0 };
     setRunning(true);
 
     // 流式文本用 ref 累积（setState 是异步的，flush 时要拿到最新值）
@@ -346,6 +357,8 @@ export function App(props: AppProps) {
             turnUsage.output += ev.usage.outputTokens;
             turnUsage.cacheRead += ev.usage.cacheReadTokens ?? 0;
             turnUsage.cacheWrite += ev.usage.cacheWriteTokens ?? 0;
+            // 供运行期活动行实时展示（每个模型往返更新一次）
+            liveUsage.current = { input: turnUsage.input, output: turnUsage.output };
             break;
           case "stream_retry":
             // 半截流式文本作废（引擎会整条重发），清掉避免和重试后的输出重复
@@ -405,19 +418,30 @@ export function App(props: AppProps) {
     }
   }
 
-  async function onSubmit(raw: string) {
-    if (raw === "exit" || raw === "quit") {
+  // display：可见串（大段粘贴已折叠成占位符），进记录区与斜杠命令解析；
+  // expanded：占位符还原后的全文，真正喂给引擎
+  async function onSubmit(display: string, expanded: string) {
+    if (display === "exit" || display === "quit") {
       exit();
       return;
     }
-    push({ kind: "user", text: raw });
-    if (await handleSlashCommand(raw)) return;
-    void runTurn(raw);
+    push({ kind: "user", text: display });
+    if (await handleSlashCommand(display)) return;
+    void runTurn(expanded);
   }
 
   // ── 渲染 ──────────────────────────────────────────────────
   // 扫描式 spinner：一个光点在轨道上来回，比转圈更"仪器感"
   const SPINNER = ["▰▱▱▱▱", "▱▰▱▱▱", "▱▱▰▱▱", "▱▱▱▰▱", "▱▱▱▱▰", "▱▱▱▰▱", "▱▱▰▱▱", "▱▰▱▱▱"];
+
+  // 运行期活动状态：英文状态词 + 执行时长 + 实时累计 tokens
+  const elapsedSec = running ? Math.max(0, Math.floor((Date.now() - turnStartRef.current) / 1000)) : 0;
+  const statusWord = activeTool
+    ? `Running ${activeTool.name}`
+    : streamText
+      ? "Responding"
+      : "Thinking";
+  const meter = `${elapsedSec}s · ↑${fmtTokens(liveUsage.current.input)} ↓${fmtTokens(liveUsage.current.output)}`;
 
   return (
     <Box flexDirection="column">
@@ -436,7 +460,6 @@ export function App(props: AppProps) {
           <Text>
             <Text color={T.secondary}>◆ {activeTool.name}</Text>
             <Text dimColor>({activeTool.argSummary})</Text>
-            <Text color={T.warn}> 运行中…</Text>
           </Text>
           {activeTool.tail.length > 0 && (
             <Text dimColor>
@@ -446,10 +469,12 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      {thinking && (
+      {running && (
         <Box marginTop={1}>
           <Text color={T.primary}>{SPINNER[spinnerTick % SPINNER.length]} </Text>
-          <Text dimColor>思考中…（Ctrl+C 中断）</Text>
+          <Text dimColor>
+            {statusWord}… · {meter}
+          </Text>
         </Box>
       )}
 
@@ -457,7 +482,10 @@ export function App(props: AppProps) {
         {permission ? (
           <PermissionDialog request={permission} />
         ) : (
-          <TextInput onSubmit={onSubmit} active={!running} />
+          // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
+          <Box borderStyle="round" borderColor={T.border} paddingX={1}>
+            <TextInput onSubmit={onSubmit} active={!running} />
+          </Box>
         )}
         <StatusBar status={status} />
       </Box>

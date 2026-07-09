@@ -7,10 +7,14 @@ import { Box, Text, useInput } from "ink";
 import { T } from "../theme.js";
 
 interface Props {
-  onSubmit: (value: string) => void;
+  /** display：输入框里可见的串（大段粘贴已折叠成占位符）；expanded：占位符还原后的全文，喂给模型 */
+  onSubmit: (display: string, expanded: string) => void;
   /** 任务运行中置 false：不接收按键、变暗提示 */
   active: boolean;
 }
+
+// 折叠占位符：`[粘贴 #1 · 337 行]`。提交时按这个正则还原成真实内容。
+const PASTE_MARKER = /\[粘贴 #(\d+) · \d+ 行\]/g;
 
 export function TextInput({ onSubmit, active }: Props) {
   // 按键事件可能在同一个 tick 内连续到达（快速输入、脚本化 stdin），
@@ -25,6 +29,9 @@ export function TextInput({ onSubmit, active }: Props) {
   const history = useRef<string[]>([]);
   const histIdx = useRef(0);
   const draft = useRef("");
+  // 大段粘贴的原文：占位符 id → 全文。整个会话保留，历史记录里的占位符仍可还原。
+  const pastes = useRef<Map<number, string>>(new Map());
+  const pasteSeq = useRef(0);
 
   const set = (v: string, c: number) => {
     valueRef.current = v;
@@ -32,6 +39,10 @@ export function TextInput({ onSubmit, active }: Props) {
     setValue(v);
     setCursor(c);
   };
+
+  // 把可见串里的占位符还原成真实粘贴内容
+  const expandPastes = (text: string) =>
+    text.replace(PASTE_MARKER, (m, id) => pastes.current.get(Number(id)) ?? m);
 
   useInput(
     (input, key) => {
@@ -44,7 +55,8 @@ export function TextInput({ onSubmit, active }: Props) {
         histIdx.current = history.current.length;
         draft.current = "";
         set("", 0);
-        onSubmit(v);
+        // 可见串（含占位符）进历史/记录区；展开串喂模型
+        onSubmit(v, expandPastes(v));
         return;
       }
       if (key.upArrow) {
@@ -90,8 +102,18 @@ export function TextInput({ onSubmit, active }: Props) {
       }
       // 普通字符（含粘贴的多字符块）；过滤控制键组合
       if (input && !key.ctrl && !key.meta && !key.escape && !key.tab) {
-        const clean = input.replace(/[\r\n]+/g, " ");
-        set(value.slice(0, cursor) + clean + value.slice(cursor), cursor + clean.length);
+        // 多行粘贴：Ink 把整段作为单次 input 传入。折叠成占位符，避免刷屏，
+        // 原文另存、提交时还原。单行输入/粘贴照常内联。
+        if (/[\r\n]/.test(input)) {
+          const full = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          const lines = full.replace(/\n+$/, "").split("\n").length;
+          const id = ++pasteSeq.current;
+          pastes.current.set(id, full);
+          const marker = `[粘贴 #${id} · ${lines} 行]`;
+          set(value.slice(0, cursor) + marker + value.slice(cursor), cursor + marker.length);
+          return;
+        }
+        set(value.slice(0, cursor) + input + value.slice(cursor), cursor + input.length);
       }
     },
     { isActive: active },
@@ -100,7 +122,7 @@ export function TextInput({ onSubmit, active }: Props) {
   if (!active) {
     return (
       <Box>
-        <Text dimColor>❯ （任务运行中，Ctrl+C 中断）</Text>
+        <Text dimColor>❯ working… (ctrl+c to interrupt)</Text>
       </Box>
     );
   }
