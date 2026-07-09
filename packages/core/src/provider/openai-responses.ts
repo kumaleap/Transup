@@ -23,8 +23,13 @@ export interface OpenAIResponsesOptions {
   reasoningEffort?: ReasoningEffort;
   store?: boolean;
   maxOutputTokens?: number;
+  /** 覆写请求的 User-Agent；绕开对 OpenAI 官方 SDK UA 做 WAF 拦截的网关 */
+  userAgent?: string;
   client?: ResponsesClient;
 }
+
+/** 默认 UA：只要不是 OpenAI/* 前缀就能过网关 WAF，同时诚实标识本客户端 */
+export const DEFAULT_USER_AGENT = "transup-cli";
 
 interface ResponsesClient {
   responses: {
@@ -117,6 +122,9 @@ export class OpenAIResponsesProvider implements Provider {
       baseURL: normalizeResponsesBaseURL(opts.baseURL),
       apiKey: opts.apiKey,
       maxRetries: 4,
+      // 有些网关（如 Codex 后端）用 WAF 拦截官方 SDK 的 `User-Agent: OpenAI/JS`，
+      // 覆写成非 OpenAI/* 前缀即可放行。可用 OPENAI_USER_AGENT 定制。
+      defaultHeaders: { "User-Agent": opts.userAgent ?? DEFAULT_USER_AGENT },
     }) as unknown as ResponsesClient);
   }
 

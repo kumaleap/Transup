@@ -15,6 +15,7 @@
  */
 import { config as loadDotenv } from "dotenv";
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { render } from "ink";
@@ -40,7 +41,23 @@ import { TraceRecorder, renderTraceFile } from "./trace.js";
 import { runDogfood } from "./dogfood.js";
 import { ensureProviderConfigured } from "./setup.js";
 
-loadDotenv({ path: ".env", quiet: true });
+// 从 cwd 向上逐级找最近的 .env 再加载。
+// 关键：`npm start -w transup` 会把 cwd 切到 packages/cli，直接读 "./.env"
+// 会漏掉仓库根目录的 .env（表现为每次都重新走 setup 引导）。
+function loadNearestDotenv(): void {
+  let dir = process.cwd();
+  for (;;) {
+    const candidate = join(dir, ".env");
+    if (existsSync(candidate)) {
+      loadDotenv({ path: candidate, quiet: true });
+      return;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return; // 到文件系统根，停止
+    dir = parent;
+  }
+}
+loadNearestDotenv();
 const packageEnvPath = fileURLToPath(new URL("../.env", import.meta.url));
 if (existsSync(packageEnvPath)) {
   loadDotenv({ path: packageEnvPath, override: false, quiet: true });
@@ -137,12 +154,14 @@ function createProvider(): Provider {
       reasoningEffort: process.env.MODEL_REASONING_EFFORT as never,
       store: boolEnv(process.env.DISABLE_RESPONSE_STORAGE) === true ? false : undefined,
       maxOutputTokens: numberEnv(process.env.OPENAI_MAX_OUTPUT_TOKENS),
+      userAgent: process.env.OPENAI_USER_AGENT,
     });
   }
   return new OpenAICompatProvider({
     baseURL: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
     apiKey: required("OPENAI_API_KEY"),
     model: process.env.MODEL ?? "gpt-4o",
+    userAgent: process.env.OPENAI_USER_AGENT,
   });
 }
 

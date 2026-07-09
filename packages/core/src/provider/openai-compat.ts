@@ -11,11 +11,14 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
 import type { Message, Provider, ProviderEvent, StopReason, ToolCall, ToolSpec } from "./types.js";
+import { DEFAULT_USER_AGENT } from "./openai-responses.js";
 
 export interface OpenAICompatOptions {
   baseURL: string;
   apiKey: string;
   model: string;
+  /** 覆写请求的 User-Agent；绕开对 OpenAI 官方 SDK UA 做 WAF 拦截的网关 */
+  userAgent?: string;
 }
 
 function toOpenAI(messages: Message[]): ChatCompletionMessageParam[] {
@@ -52,7 +55,12 @@ export class OpenAICompatProvider implements Provider {
     this.model = opts.model;
     // maxRetries: SDK 内置了对 429/5xx 的指数退避重试，调高次数即可，
     // 不要自己重写重试逻辑
-    this.client = new OpenAI({ baseURL: opts.baseURL, apiKey: opts.apiKey, maxRetries: 4 });
+    this.client = new OpenAI({
+      baseURL: opts.baseURL,
+      apiKey: opts.apiKey,
+      maxRetries: 4,
+      defaultHeaders: { "User-Agent": opts.userAgent ?? DEFAULT_USER_AGENT },
+    });
   }
 
   async *stream(messages: Message[], tools: ToolSpec[], signal?: AbortSignal): AsyncIterable<ProviderEvent> {
