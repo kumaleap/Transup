@@ -10,7 +10,8 @@
     "start": "npm start -w transup",
     "build": "npm run build -w transup",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dogfood": "npm run build -w transup && node packages/cli/dist/index.js dogfood"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

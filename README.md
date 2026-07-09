@@ -15,6 +15,7 @@ Transup speaks both the OpenAI-compatible protocol (DeepSeek, Kimi, OpenRouter, 
 - **MCP ecosystem** — connect any MCP server over stdio; tools are namespaced `mcp__server__tool`
 - **Sessions** — append-only JSONL persistence, `--continue` / `--resume <id>`, clean Ctrl+C interruption
 - **Permission system** — read-only tools run without confirmation; writes are confirmed one by one, with persistable allow rules (`.transup/settings.json`)
+- **Dogfooding diagnostics** — local `doctor` checks plus append-only event traces under `.transup/traces`, replayable as a human-readable timeline
 
 ## Quick start
 
@@ -40,6 +41,17 @@ node packages/cli/dist/index.js -p "explain the structure of this project"
 ```
 
 Model prose goes to **stdout**, tool activity to **stderr** — pipe-friendly. Writes are denied by default (fail-closed); allow them via `.transup/settings.json` or `--allow-all` in trusted environments. Exit code is `0` on clean completion, `1` on interruption/stall.
+
+### Diagnostics and replay
+
+```bash
+npm run build
+node packages/cli/dist/index.js doctor
+node packages/cli/dist/index.js replay .transup/traces/<session-id>.jsonl
+npm run dogfood
+```
+
+Every interactive/headless turn records normalized agent events to `.transup/traces/<session-id>.jsonl`. `doctor` checks local runtime/configuration basics without requiring a successful model call, `replay` renders a trace as a deterministic timeline, and `npm run dogfood` validates committed trace fixtures under `fixtures/dogfood`.
 
 ### Configuration
 
@@ -88,6 +100,7 @@ npm run build       # tsup → packages/cli/dist
 - **双协议**：OpenAI 兼容 API（DeepSeek/Kimi/OpenRouter…）+ Anthropic 原生协议（prompt caching 省 ~90% 长会话输入成本）
 - **运行时韧性**：断流重试、截断续跑、空回复催跑、循环熔断 —— 长任务不断档
 - **双宿主**：交互式 Ink TUI + headless 模式（`-p`，管道/CI/脚本友好）
+- **自举诊断**：`doctor` 本地配置检查 + `.transup/traces` 事件追踪 + `replay` 时间线复盘
 - **完整能力**：diff 预览确认、流式 bash、子 agent、MCP、compact、会话恢复、权限持久化
 
 ```bash

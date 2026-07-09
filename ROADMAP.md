@@ -14,6 +14,7 @@
 | M4 | TUI 升级（Ink） | ✅ 代码完成（待实测验收） |
 | M4.5 | 运行时韧性与回归护栏 | ✅ 完成 |
 | M5 | 打包发布与 CI | 🔶 代码完成（迁独立仓库待定） |
+| M5.5 | Dogfooding 与可观测性 | ✅ 第一版完成 |
 | M6 | 安全与高级上下文 | ⬜ |
 
 ---
@@ -84,6 +85,18 @@
 - [x] README（英文为主，附中文摘要）、CONTRIBUTING.md、LICENSE（MIT）
 - [x] npm 发布流水线：推 `v*` tag → 校验 → `npm publish`（provenance）；CLI 包改名 `transup`（npm 上已确认空闲），`@transup/core` 标 private 防误发、以 devDep 身份被内联
 - [ ] 仓库正名 transup：代码侧已就绪；剩两步手工操作 —— GitHub 上把仓库 Transup 改名为 transup（Settings → Rename，旧 URL 自动重定向），仓库 Secrets 添加 `NPM_TOKEN`（npmjs Automation token）
+
+## M5.5 Dogfooding 与可观测性 ✅（第一版）
+
+目标：让 Transup 自己能稳定开发 Transup；真实使用里出现的断档、权限误判、渲染问题和 provider 边界问题，都能留下可复现证据。
+
+- [x] 事件 trace：TUI/headless 消费 `AgentEvent` 时同步写入 `.transup/traces/<session-id>.jsonl`，包含 session/provider/model/cwd/turn/timestamp 元数据。
+- [x] trace 读取容错：append-only JSONL 恢复时跳过损坏行，进程崩溃最多丢最后一条事件。
+- [x] `transup replay <trace.jsonl>`：把 trace 渲染为确定性时间线，方便在 issue、测试和体验打磨里复盘。
+- [x] `transup doctor`：在不要求真实 API 调通的前提下检查 Node 版本、Provider env、settings、TTY、工作目录。
+- [x] `fixtures/dogfood/*.jsonl` + `npm run dogfood`：把代表性 agent 事件流变成可重复的本地验收集；第一条样本覆盖 headless 只读工具流。
+- [x] 回归测试：`trace.test.ts` 覆盖 JSONL 格式 / 损坏行 / replay 输出；`headless.test.ts` 覆盖事件落盘；`doctor.test.ts` 覆盖 provider 配置诊断；`dogfood.test.ts` 覆盖 fixture 验收。
+- [ ] 后续：把真实 API dogfooding 中的长任务 trace 脱敏后沉淀为更多样本，覆盖权限拒绝、重试、compact、loop_detected。
 
 ## M6 安全与高级上下文
 

@@ -20,6 +20,7 @@ import {
   AgentEngine,
   SessionStore,
   isAllowed,
+  type AgentEvent,
   type Message,
   type Provider,
   type Settings,
@@ -42,6 +43,9 @@ export interface HeadlessOptions {
   signal?: AbortSignal;
   out?: (s: string) => void;
   err?: (s: string) => void;
+  trace?: {
+    record: (event: AgentEvent) => Promise<void>;
+  };
 }
 
 /** 返回进程退出码：0 = 正常收尾，1 = 中断/熔断/迭代耗尽/API 失败 */
@@ -65,6 +69,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
   let exitCode = 0;
   try {
     for await (const ev of engine.runTurn(opts.prompt, opts.signal)) {
+      await opts.trace?.record(ev);
       switch (ev.type) {
         case "text_delta":
           out(ev.text);

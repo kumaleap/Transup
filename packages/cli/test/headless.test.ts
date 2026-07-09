@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import { runHeadless, type HeadlessOptions } from "../src/headless.js";
+import { TraceRecorder, readTrace } from "../src/trace.js";
 
 class MockProvider implements Provider {
   readonly id = "mock";
@@ -140,5 +141,28 @@ describe("headless 模式", () => {
 
     expect(code).toBe(1);
     expect(err).toContain("bad request");
+  });
+
+  it("可把 agent 事件写入 trace sink，供事后 replay", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-headless-trace-"));
+    const trace = new TraceRecorder({
+      dir,
+      sessionId: "trace-session",
+      providerId: "mock",
+      model: "test-model",
+      cwd: "/repo",
+    });
+    const provider = new MockProvider([{ content: "trace me" }]);
+
+    await run(provider, { trace });
+
+    const entries = await readTrace(trace.path);
+    expect(entries.map((entry) => entry.event.type)).toEqual(["text_delta", "usage", "turn_end"]);
+    expect(entries[0]).toMatchObject({
+      sessionId: "trace-session",
+      providerId: "mock",
+      model: "test-model",
+      event: { type: "text_delta", text: "trace me" },
+    });
   });
 });

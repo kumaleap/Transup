@@ -33,6 +33,9 @@ import {
 import { color } from "./ui.js";
 import { App } from "./tui/App.js";
 import { runHeadless } from "./headless.js";
+import { runDoctor } from "./doctor.js";
+import { TraceRecorder, renderTraceFile } from "./trace.js";
+import { runDogfood } from "./dogfood.js";
 
 const HELP = `transup — AI coding agent（任何模型都是一等公民）
 
@@ -43,6 +46,9 @@ const HELP = `transup — AI coding agent（任何模型都是一等公民）
   transup -p "任务"           headless 模式：非交互跑完一轮就退出
                               （stdout 只输出正文，过程信息在 stderr）
   transup -p "任务" --allow-all   headless 且跳过写操作确认（仅可信环境）
+  transup doctor              检查 Node / Provider / settings / 终端环境
+  transup replay <trace.jsonl> 以可读时间线重放 .transup/traces 里的事件
+  transup dogfood             验证 fixtures/dogfood trace 样本
 
   --help      显示本帮助
   --version   显示版本
@@ -71,10 +77,30 @@ if (flag("--version") || flag("-v")) {
   process.exit(0);
 }
 
+if (argv[0] === "replay") {
+  const tracePath = argv[1];
+  if (!tracePath) {
+    console.error("replay 需要 trace 文件路径，例如：transup replay .transup/traces/<session>.jsonl");
+    process.exit(1);
+  }
+  process.stdout.write(await renderTraceFile(tracePath));
+  process.exit(0);
+}
+
+if (argv[0] === "dogfood") {
+  process.exit(await runDogfood());
+}
+
 const headlessPrompt = value("-p") ?? value("--print");
 if ((flag("-p") || flag("--print")) && !headlessPrompt) {
   console.error('-p 需要跟任务内容，例如：transup -p "解释这个项目的结构"');
   process.exit(1);
+}
+
+const settings = await loadSettings();
+
+if (argv[0] === "doctor" || flag("--doctor")) {
+  process.exit(await runDoctor({ settings }));
 }
 
 function required(name: string): string {
@@ -125,12 +151,17 @@ async function resolveSession(): Promise<{ id: string; history: Message[] }> {
 
 const provider = createProvider();
 const projectContext = await buildProjectContext(process.cwd());
-const settings = await loadSettings();
 const mcp = await connectAllMcpServers(settings.mcpServers ?? {}, (name, err) => {
   console.error(color.red(`MCP server "${name}" 连接失败：${err.message}（已跳过）`));
 });
 const tools: Tool[] = [...builtinTools, createTaskTool(provider), ...mcp.tools];
 const { id, history } = await resolveSession();
+const trace = new TraceRecorder({
+  sessionId: id,
+  providerId: provider.id,
+  model: provider.model,
+  cwd: process.cwd(),
+});
 
 if (headlessPrompt) {
   // ── headless：跑一轮，退出码回传 ────────────────────────
@@ -146,6 +177,7 @@ if (headlessPrompt) {
     prompt: headlessPrompt,
     allowAll: flag("--allow-all"),
     signal: controller.signal,
+    trace,
   });
   await mcp.close();
   process.exit(code);
@@ -162,6 +194,7 @@ const instance = render(
     initialHistory: history,
     mcpToolCount: mcp.tools.length,
     version: VERSION,
+    trace,
   }),
   { exitOnCtrlC: false },
 );

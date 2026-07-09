@@ -18,6 +18,7 @@ import {
   SessionStore,
   isAllowed,
   persistAllow,
+  type AgentEvent,
   type Message,
   type Provider,
   type Settings,
@@ -48,6 +49,9 @@ export interface AppProps {
   mcpToolCount: number;
   /** 显示在首屏横幅上的版本号（入口从 package.json 读出传入） */
   version?: string;
+  trace?: {
+    record: (event: AgentEvent) => Promise<void>;
+  };
   /** 会话持久化目录覆盖（测试用）；不传用默认目录 */
   sessionDir?: string;
 }
@@ -300,6 +304,7 @@ export function App(props: AppProps) {
 
     try {
       for await (const ev of engineRef.current!.runTurn(input, controller.signal)) {
+        await props.trace?.record(ev);
         switch (ev.type) {
           case "text_delta":
             stream += ev.text;
