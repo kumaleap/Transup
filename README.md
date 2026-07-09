@@ -27,8 +27,7 @@ From source:
 
 ```bash
 npm install
-cp .env.example .env   # fill in your API key
-npm start              # interactive TUI
+npm start              # interactive TUI; first run guides you through .env setup
 ```
 
 Inside a session, type `/help` for commands; reference files with `@path/to/file`.
@@ -54,6 +53,8 @@ npm run dogfood
 Every interactive/headless turn records normalized agent events to `.transup/traces/<session-id>.jsonl`. `doctor` checks local runtime/configuration basics without requiring a successful model call, `replay` renders a trace as a deterministic timeline, and `npm run dogfood` validates committed trace fixtures under `fixtures/dogfood`.
 
 ### Configuration
+
+Interactive first run writes `.env` for you. You can also create it manually:
 
 ```bash
 # .env — OpenAI-compatible (default)
@@ -104,5 +105,5 @@ npm run build       # tsup → packages/cli/dist
 - **完整能力**：diff 预览确认、流式 bash、子 agent、MCP、compact、会话恢复、权限持久化
 
 ```bash
-npm install && cp .env.example .env && npm start
+npm install && npm start
 ```

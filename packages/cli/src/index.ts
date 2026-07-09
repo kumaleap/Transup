@@ -36,6 +36,7 @@ import { runHeadless } from "./headless.js";
 import { runDoctor } from "./doctor.js";
 import { TraceRecorder, renderTraceFile } from "./trace.js";
 import { runDogfood } from "./dogfood.js";
+import { ensureProviderConfigured } from "./setup.js";
 
 const HELP = `transup — AI coding agent（任何模型都是一等公民）
 
@@ -54,7 +55,7 @@ const HELP = `transup — AI coding agent（任何模型都是一等公民）
   --version   显示版本
 
 配置：项目根目录 .env（参考 .env.example），支持 OpenAI 兼容 API 与
-Anthropic 原生协议。权限允许清单在 .transup/settings.json。`;
+Anthropic 原生协议；首次交互启动会引导生成 .env。权限允许清单在 .transup/settings.json。`;
 
 // ── 参数解析（就几个 flag，不值得引参数库） ──────────────────
 const argv = process.argv.slice(2);
@@ -130,6 +131,10 @@ function createProvider(): Provider {
 // 交互模式需要真实终端（raw mode）；headless 模式不需要
 if (!headlessPrompt && !process.stdin.isTTY) {
   console.error('transup 交互模式需要终端运行。管道/CI 场景请用 headless 模式：transup -p "任务"');
+  process.exit(1);
+}
+
+if (!(await ensureProviderConfigured({ interactive: !headlessPrompt && Boolean(process.stdin.isTTY) }))) {
   process.exit(1);
 }
 

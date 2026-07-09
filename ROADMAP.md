@@ -47,6 +47,7 @@
 - [x] diff 预览确认：edit_file 显示红删绿增，write_file 区分新建/覆盖并警告
 - [x] bash 输出实时流式显示（spawn + onProgress 通道 + 引擎队列桥接）
 - [x] 会话列表与选择恢复：`--resume <id>` / `/sessions`
+- [x] 首次初始化引导：交互式启动缺少 provider key 时，提示配置 OpenAI 兼容 / Anthropic 的 URL、model、API key，并写入 `.env`
 
 ## M3 多 agent 与生态 ✅（代码完成，待实测验收）
 
