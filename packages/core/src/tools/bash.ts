@@ -36,16 +36,26 @@ function findWindowsBash(): string | null {
 const shellPath: string | true =
   process.platform === "win32" ? findWindowsBash() ?? true : true;
 
-/** 超时杀进程：Windows 必须杀整棵进程树，否则孤儿进程拖住 stdio，close 永不触发 */
+/**
+ * 超时必须杀整棵进程树，否则孤儿进程拖住 stdio，close 永不触发。
+ * POSIX 上只杀 shell 的 pid 是不够的：Linux 的 /bin/sh(dash) 会 fork 出
+ * 真正的命令，shell 死了命令还活着并占着输出管道（macOS 的 shell 常直接
+ * exec，侥幸杀得掉 —— CI 上第一次暴露）。配合 spawn 的 detached:true
+ * 让子进程自成进程组，kill(-pid) 一次杀全组。
+ */
 function killTree(pid: number | undefined) {
   if (pid == null) return;
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"]);
   } else {
     try {
-      process.kill(pid, "SIGKILL");
+      process.kill(-pid, "SIGKILL"); // 负 pid = 整个进程组
     } catch {
-      /* 已退出 */
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* 已退出 */
+      }
     }
   }
 }
@@ -68,7 +78,11 @@ export const bashTool: Tool<typeof schema> = {
   readOnly: false,
   execute({ command, timeout_seconds = 60 }, onProgress) {
     return new Promise<string>((resolve, reject) => {
-      const child = spawn(command, { shell: shellPath });
+      // detached: POSIX 上自成进程组，超时才能连孙进程一起杀（见 killTree）
+      const child = spawn(command, {
+        shell: shellPath,
+        detached: process.platform !== "win32",
+      });
       let stdout = "";
       let stderr = "";
       let timedOut = false;
@@ -76,6 +90,9 @@ export const bashTool: Tool<typeof schema> = {
       const timer = setTimeout(() => {
         timedOut = true;
         killTree(child.pid);
+        // 兜底：就算还有漏网进程占着管道，主动断流让 close 能触发
+        child.stdout.destroy();
+        child.stderr.destroy();
       }, timeout_seconds * 1000);
 
       child.stdout.on("data", (chunk: Buffer) => {
