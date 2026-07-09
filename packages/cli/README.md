@@ -2,7 +2,7 @@
 
 Open-source AI coding agent for your terminal — built for **a polished, top-tier agent experience, whatever model you run**.
 
-Works with any OpenAI-compatible API (DeepSeek, Kimi, OpenRouter, vLLM, …) and the native Anthropic protocol (with prompt caching).
+Works with OpenAI-compatible Chat Completions APIs (DeepSeek, Kimi, OpenRouter, vLLM, …), OpenAI Responses API, and the native Anthropic protocol (with prompt caching).
 
 ```bash
 npx transup                # interactive TUI
@@ -16,6 +16,13 @@ PROVIDER=openai
 OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_API_KEY=sk-...
 MODEL=deepseek-chat
+
+# or Responses API gateways
+PROVIDER=openai-responses
+OPENAI_WIRE_API=responses
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+MODEL=gpt-5.1
 ```
 
 Full documentation, roadmap, and source: **https://github.com/kumaleap/transup**

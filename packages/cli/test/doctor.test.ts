@@ -34,4 +34,26 @@ describe("doctor diagnostics", () => {
     expect(out).toContain("✓ Provider");
     expect(out).toContain("✓ Settings");
   });
+
+  it("reports OpenAI Responses wire API configuration", () => {
+    const checks = collectDoctorDiagnostics({
+      env: {
+        PROVIDER: "openai",
+        OPENAI_WIRE_API: "responses",
+        OPENAI_BASE_URL: "https://sub2api.transup.ai",
+        OPENAI_API_KEY: "sk-test",
+        MODEL: "gpt-5.5",
+      },
+      nodeVersion: "v22.0.0",
+      cwd: "/repo",
+      stdinIsTTY: true,
+      settings: {},
+    });
+
+    expect(checks).toContainEqual({
+      name: "Provider",
+      status: "ok",
+      detail: "PROVIDER=openai-responses wire=responses model=gpt-5.5 base=https://sub2api.transup.ai",
+    });
+  });
 });

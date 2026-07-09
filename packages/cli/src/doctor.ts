@@ -32,7 +32,10 @@ export function collectDoctorDiagnostics(opts: DoctorOptions = {}): DoctorCheck[
     detail: major >= 20 ? `${nodeVersion} satisfies >=20` : `${nodeVersion} is below required >=20`,
   });
 
-  const provider = env.PROVIDER === "anthropic" ? "anthropic" : "openai";
+  const provider =
+    env.PROVIDER === "anthropic" ? "anthropic"
+    : env.PROVIDER === "openai-responses" || env.OPENAI_WIRE_API === "responses" ? "openai-responses"
+    : "openai";
   if (provider === "anthropic") {
     checks.push({
       name: "Provider",
@@ -40,6 +43,14 @@ export function collectDoctorDiagnostics(opts: DoctorOptions = {}): DoctorCheck[
       detail: env.ANTHROPIC_API_KEY
         ? `PROVIDER=anthropic model=${env.ANTHROPIC_MODEL ?? "claude-opus-4-8"}`
         : "PROVIDER=anthropic requires ANTHROPIC_API_KEY",
+    });
+  } else if (provider === "openai-responses") {
+    checks.push({
+      name: "Provider",
+      status: env.OPENAI_API_KEY ? "ok" : "fail",
+      detail: env.OPENAI_API_KEY
+        ? `PROVIDER=openai-responses wire=responses model=${env.MODEL ?? "gpt-5.1"} base=${env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"}`
+        : "PROVIDER=openai-responses requires OPENAI_API_KEY",
     });
   } else {
     checks.push({

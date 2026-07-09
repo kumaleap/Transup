@@ -15,8 +15,11 @@ async function tempDir() {
 describe("first-run provider setup", () => {
   it("detects configured OpenAI-compatible and Anthropic providers", () => {
     expect(providerIsConfigured({ PROVIDER: "openai", OPENAI_API_KEY: "sk-test" })).toBe(true);
+    expect(providerIsConfigured({ PROVIDER: "openai", OPENAI_WIRE_API: "responses", OPENAI_API_KEY: "sk-test" })).toBe(true);
+    expect(providerIsConfigured({ PROVIDER: "openai-responses", OPENAI_API_KEY: "sk-test" })).toBe(true);
     expect(providerIsConfigured({ PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant" })).toBe(true);
     expect(providerIsConfigured({ PROVIDER: "openai" })).toBe(false);
+    expect(providerIsConfigured({ PROVIDER: "openai-responses" })).toBe(false);
     expect(providerIsConfigured({ PROVIDER: "anthropic" })).toBe(false);
   });
 
@@ -60,6 +63,36 @@ describe("first-run provider setup", () => {
     });
     expect(await readFile(envPath, "utf-8")).toContain("OPENAI_API_KEY=sk-live\n");
     expect(out).toContain("首次运行需要配置模型服务");
+  });
+
+  it("writes OpenAI Responses values from first-run answers", async () => {
+    const dir = await tempDir();
+    const envPath = join(dir, ".env");
+    const env: Record<string, string | undefined> = {};
+    const answers = ["responses", "https://sub2api.transup.ai", "gpt-5.5", "sk-live", "xhigh", "true"];
+
+    const ok = await ensureProviderConfigured({
+      env,
+      envPath,
+      interactive: true,
+      out: () => {},
+      prompt: async () => answers.shift() ?? "",
+    });
+
+    expect(ok).toBe(true);
+    expect(env).toMatchObject({
+      PROVIDER: "openai-responses",
+      OPENAI_WIRE_API: "responses",
+      OPENAI_BASE_URL: "https://sub2api.transup.ai",
+      OPENAI_API_KEY: "sk-live",
+      MODEL: "gpt-5.5",
+      MODEL_REASONING_EFFORT: "xhigh",
+      DISABLE_RESPONSE_STORAGE: "true",
+    });
+    const text = await readFile(envPath, "utf-8");
+    expect(text).toContain("OPENAI_WIRE_API=responses\n");
+    expect(text).toContain("MODEL_REASONING_EFFORT=xhigh\n");
+    expect(text).toContain("DISABLE_RESPONSE_STORAGE=true\n");
   });
 
   it("preserves existing comments when updating a partial .env", async () => {

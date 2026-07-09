@@ -16,13 +16,19 @@ export interface SetupOptions {
 const DEFAULT_ENV_PATH = ".env";
 const OPENAI_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 const OPENAI_DEFAULT_MODEL = "deepseek-chat";
+const OPENAI_RESPONSES_DEFAULT_BASE_URL = "https://api.openai.com/v1";
+const OPENAI_RESPONSES_DEFAULT_MODEL = "gpt-5.1";
 const ANTHROPIC_DEFAULT_MODEL = "claude-opus-4-8";
 
 const ORDER = [
   "PROVIDER",
+  "OPENAI_WIRE_API",
   "OPENAI_BASE_URL",
   "OPENAI_API_KEY",
   "MODEL",
+  "MODEL_REASONING_EFFORT",
+  "DISABLE_RESPONSE_STORAGE",
+  "OPENAI_MAX_OUTPUT_TOKENS",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_MODEL",
   "ANTHROPIC_BASE_URL",
@@ -92,12 +98,14 @@ export async function ensureProviderConfigured(opts: SetupOptions = {}): Promise
   try {
     out("首次运行需要配置模型服务，配置会写入项目根目录 .env。\n");
     const providerAnswer = normalizeProvider(
-      await ask(prompt, "Provider [openai/anthropic]", env.PROVIDER ?? "openai"),
+      await ask(prompt, "Provider [openai/openai-responses/anthropic]", env.PROVIDER ?? "openai"),
     );
 
     const values =
       providerAnswer === "anthropic"
         ? await collectAnthropic(prompt, env, err)
+        : providerAnswer === "openai-responses"
+          ? await collectOpenAIResponses(prompt, env, err)
         : await collectOpenAI(prompt, env, err);
     if (!values) return false;
 
@@ -137,6 +145,39 @@ async function collectOpenAI(
   };
 }
 
+async function collectOpenAIResponses(
+  prompt: (question: string) => Promise<string>,
+  env: Env,
+  err: (s: string) => void,
+): Promise<Env | null> {
+  const baseURL = await ask(
+    prompt,
+    "OpenAI Responses Base URL",
+    env.OPENAI_BASE_URL ?? OPENAI_RESPONSES_DEFAULT_BASE_URL,
+  );
+  const model = await ask(prompt, "Model", env.MODEL ?? OPENAI_RESPONSES_DEFAULT_MODEL);
+  const apiKey = (await prompt("OPENAI_API_KEY: ")).trim();
+  if (!apiKey) {
+    err("OPENAI_API_KEY 不能为空。\n");
+    return null;
+  }
+  const reasoningEffort = await ask(prompt, "Reasoning effort", env.MODEL_REASONING_EFFORT ?? "xhigh");
+  const disableStorage = await ask(
+    prompt,
+    "Disable response storage [true/false]",
+    env.DISABLE_RESPONSE_STORAGE ?? "true",
+  );
+  return {
+    PROVIDER: "openai-responses",
+    OPENAI_WIRE_API: "responses",
+    OPENAI_BASE_URL: baseURL,
+    OPENAI_API_KEY: apiKey,
+    MODEL: model,
+    MODEL_REASONING_EFFORT: reasoningEffort,
+    DISABLE_RESPONSE_STORAGE: disableStorage,
+  };
+}
+
 async function collectAnthropic(
   prompt: (question: string) => Promise<string>,
   env: Env,
@@ -166,8 +207,13 @@ async function ask(
   return answer || defaultValue;
 }
 
-function normalizeProvider(answer: string): "openai" | "anthropic" {
-  return answer.toLowerCase().startsWith("anthropic") ? "anthropic" : "openai";
+function normalizeProvider(answer: string): "openai" | "openai-responses" | "anthropic" {
+  const normalized = answer.toLowerCase();
+  if (normalized.startsWith("anthropic")) return "anthropic";
+  if (normalized === "responses" || normalized === "openai-responses" || normalized.includes("responses")) {
+    return "openai-responses";
+  }
+  return "openai";
 }
 
 function createTerminalPrompt(): {

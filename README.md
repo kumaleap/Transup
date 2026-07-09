@@ -2,7 +2,7 @@
 
 An open-source AI coding agent for your terminal — built for one thing: **a polished, top-tier agent experience, whatever model you run**.
 
-Transup speaks both the OpenAI-compatible protocol (DeepSeek, Kimi, OpenRouter, vLLM, …) and the native Anthropic protocol (with prompt caching that cuts long-session input cost by ~90%), on top of a provider-agnostic engine.
+Transup speaks OpenAI-compatible Chat Completions (DeepSeek, Kimi, OpenRouter, vLLM, …), OpenAI Responses API, and the native Anthropic protocol (with prompt caching that cuts long-session input cost by ~90%), on top of a provider-agnostic engine.
 
 [中文说明](#中文) · [Roadmap](./ROADMAP.md)
 
@@ -63,6 +63,15 @@ OPENAI_BASE_URL=https://api.deepseek.com/v1
 OPENAI_API_KEY=sk-...
 MODEL=deepseek-chat
 
+# OpenAI Responses API / proxy gateways that require wire_api=responses
+PROVIDER=openai-responses
+OPENAI_WIRE_API=responses
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+MODEL=gpt-5.1
+MODEL_REASONING_EFFORT=xhigh
+DISABLE_RESPONSE_STORAGE=true
+
 # or native Anthropic (recommended: prompt caching)
 PROVIDER=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
@@ -98,7 +107,7 @@ npm run build       # tsup → packages/cli/dist
 
 开源 AI coding agent CLI —— 目标只有一个：**做极致体验的编程 agent**，任何模型上都好用。
 
-- **双协议**：OpenAI 兼容 API（DeepSeek/Kimi/OpenRouter…）+ Anthropic 原生协议（prompt caching 省 ~90% 长会话输入成本）
+- **多协议**：OpenAI Chat Completions 兼容 API（DeepSeek/Kimi/OpenRouter…）+ OpenAI Responses API + Anthropic 原生协议（prompt caching 省 ~90% 长会话输入成本）
 - **运行时韧性**：断流重试、截断续跑、空回复催跑、循环熔断 —— 长任务不断档
 - **双宿主**：交互式 Ink TUI + headless 模式（`-p`，管道/CI/脚本友好）
 - **自举诊断**：`doctor` 本地配置检查 + `.transup/traces` 事件追踪 + `replay` 时间线复盘

@@ -5,6 +5,7 @@
  */
 export { AgentEngine, type AgentEvent, type EngineOptions } from "./agent/engine.js";
 export { OpenAICompatProvider, type OpenAICompatOptions } from "./provider/openai-compat.js";
+export { OpenAIResponsesProvider, type OpenAIResponsesOptions } from "./provider/openai-responses.js";
 export { AnthropicProvider, type AnthropicOptions } from "./provider/anthropic.js";
 export { buildProjectContext } from "./agent/context.js";
 export { createTaskTool } from "./agent/subagent.js";

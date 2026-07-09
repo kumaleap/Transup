@@ -13,13 +13,15 @@
  *   transup -p "解释 src/index.ts"   # headless：跑完一轮就退出
  *   transup -p "修掉这个 bug" --allow-all   # headless 且放行写操作（可信环境）
  */
-import "dotenv/config";
-import { readFileSync } from "node:fs";
+import { config as loadDotenv } from "dotenv";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { render } from "ink";
 import {
   AnthropicProvider,
   OpenAICompatProvider,
+  OpenAIResponsesProvider,
   SessionStore,
   buildProjectContext,
   builtinTools,
@@ -37,6 +39,12 @@ import { runDoctor } from "./doctor.js";
 import { TraceRecorder, renderTraceFile } from "./trace.js";
 import { runDogfood } from "./dogfood.js";
 import { ensureProviderConfigured } from "./setup.js";
+
+loadDotenv({ path: ".env", quiet: true });
+const packageEnvPath = fileURLToPath(new URL("../.env", import.meta.url));
+if (existsSync(packageEnvPath)) {
+  loadDotenv({ path: packageEnvPath, override: false, quiet: true });
+}
 
 const HELP = `transup — AI coding agent（任何模型都是一等公民）
 
@@ -121,11 +129,38 @@ function createProvider(): Provider {
       baseURL: process.env.ANTHROPIC_BASE_URL,
     });
   }
+  if (usesOpenAIResponses(process.env)) {
+    return new OpenAIResponsesProvider({
+      baseURL: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
+      apiKey: required("OPENAI_API_KEY"),
+      model: process.env.MODEL ?? "gpt-5.1",
+      reasoningEffort: process.env.MODEL_REASONING_EFFORT as never,
+      store: boolEnv(process.env.DISABLE_RESPONSE_STORAGE) === true ? false : undefined,
+      maxOutputTokens: numberEnv(process.env.OPENAI_MAX_OUTPUT_TOKENS),
+    });
+  }
   return new OpenAICompatProvider({
     baseURL: process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1",
     apiKey: required("OPENAI_API_KEY"),
     model: process.env.MODEL ?? "gpt-4o",
   });
+}
+
+function usesOpenAIResponses(env: NodeJS.ProcessEnv): boolean {
+  return env.PROVIDER === "openai-responses" || env.OPENAI_WIRE_API === "responses";
+}
+
+function boolEnv(value: string | undefined): boolean | undefined {
+  if (!value) return undefined;
+  if (/^(1|true|yes|on)$/i.test(value)) return true;
+  if (/^(0|false|no|off)$/i.test(value)) return false;
+  return undefined;
+}
+
+function numberEnv(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 // 交互模式需要真实终端（raw mode）；headless 模式不需要
