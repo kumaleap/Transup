@@ -113,7 +113,11 @@ export class OpenAIResponsesProvider implements Provider {
     this.reasoningEffort = opts.reasoningEffort;
     this.store = opts.store;
     this.maxOutputTokens = opts.maxOutputTokens;
-    this.client = opts.client ?? (new OpenAI({ baseURL: opts.baseURL, apiKey: opts.apiKey, maxRetries: 4 }) as unknown as ResponsesClient);
+    this.client = opts.client ?? (new OpenAI({
+      baseURL: normalizeResponsesBaseURL(opts.baseURL),
+      apiKey: opts.apiKey,
+      maxRetries: 4,
+    }) as unknown as ResponsesClient);
   }
 
   async *stream(messages: Message[], tools: ToolSpec[], signal?: AbortSignal): AsyncIterable<ProviderEvent> {
@@ -175,6 +179,19 @@ export class OpenAIResponsesProvider implements Provider {
       usage,
       stopReason: stopReasonFromResponse(completedResponse, toolCalls),
     };
+  }
+}
+
+export function normalizeResponsesBaseURL(baseURL: string): string {
+  try {
+    const url = new URL(baseURL);
+    if (url.pathname === "" || url.pathname === "/") {
+      url.pathname = "/v1";
+      return url.toString().replace(/\/$/, "");
+    }
+    return baseURL.replace(/\/$/, "");
+  } catch {
+    return baseURL.replace(/\/$/, "");
   }
 }
 

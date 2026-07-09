@@ -53,7 +53,7 @@ describe("doctor diagnostics", () => {
     expect(checks).toContainEqual({
       name: "Provider",
       status: "ok",
-      detail: "PROVIDER=openai-responses wire=responses model=gpt-5.5 base=https://sub2api.transup.ai",
+      detail: "PROVIDER=openai-responses wire=responses model=gpt-5.5 base=https://sub2api.transup.ai effective=https://sub2api.transup.ai/v1",
     });
   });
 });

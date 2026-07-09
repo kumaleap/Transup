@@ -25,6 +25,8 @@ OPENAI_API_KEY=sk-...
 MODEL=gpt-5.1
 ```
 
+Responses API gateways can use a bare origin such as `https://sub2api.transup.ai`; Transup normalizes it to `/v1`.
+
 Full documentation, roadmap, and source: **https://github.com/kumaleap/transup**
 
 MIT licensed.

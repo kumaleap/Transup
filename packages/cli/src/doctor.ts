@@ -1,4 +1,4 @@
-import type { Settings } from "@transup/core";
+import { normalizeResponsesBaseURL, type Settings } from "@transup/core";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -45,11 +45,13 @@ export function collectDoctorDiagnostics(opts: DoctorOptions = {}): DoctorCheck[
         : "PROVIDER=anthropic requires ANTHROPIC_API_KEY",
     });
   } else if (provider === "openai-responses") {
+    const baseURL = env.OPENAI_BASE_URL ?? "https://api.openai.com/v1";
+    const effectiveBaseURL = normalizeResponsesBaseURL(baseURL);
     checks.push({
       name: "Provider",
       status: env.OPENAI_API_KEY ? "ok" : "fail",
       detail: env.OPENAI_API_KEY
-        ? `PROVIDER=openai-responses wire=responses model=${env.MODEL ?? "gpt-5.1"} base=${env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"}`
+        ? `PROVIDER=openai-responses wire=responses model=${env.MODEL ?? "gpt-5.1"} base=${baseURL} effective=${effectiveBaseURL}`
         : "PROVIDER=openai-responses requires OPENAI_API_KEY",
     });
   } else {

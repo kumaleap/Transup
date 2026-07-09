@@ -78,6 +78,8 @@ ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_MODEL=claude-opus-4-8
 ```
 
+For Responses API gateways, a bare origin such as `https://sub2api.transup.ai` is normalized to `https://sub2api.transup.ai/v1`; set an explicit path if your gateway uses a non-OpenAI route.
+
 ## Architecture
 
 ```

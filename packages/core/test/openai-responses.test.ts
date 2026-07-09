@@ -1,8 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { OpenAIResponsesProvider, toResponsesInput, toResponsesTools } from "../src/provider/openai-responses.js";
+import {
+  OpenAIResponsesProvider,
+  normalizeResponsesBaseURL,
+  toResponsesInput,
+  toResponsesTools,
+} from "../src/provider/openai-responses.js";
 import type { Message } from "../src/provider/types.js";
 
 describe("OpenAI Responses 协议翻译", () => {
+  it("裸域名 base URL 自动补 /v1，显式路径保持不变", () => {
+    expect(normalizeResponsesBaseURL("https://sub2api.transup.ai")).toBe("https://sub2api.transup.ai/v1");
+    expect(normalizeResponsesBaseURL("https://sub2api.transup.ai/")).toBe("https://sub2api.transup.ai/v1");
+    expect(normalizeResponsesBaseURL("https://sub2api.transup.ai/v1")).toBe("https://sub2api.transup.ai/v1");
+    expect(normalizeResponsesBaseURL("https://proxy.example/openai")).toBe("https://proxy.example/openai");
+  });
+
   it("system 抽为 instructions，其余历史转为 Responses input items", () => {
     const messages: Message[] = [
       { role: "system", content: "你是助手" },
