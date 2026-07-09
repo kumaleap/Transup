@@ -2,7 +2,7 @@
  * 自研文本输入框 —— 不用 ink-text-input：
  * 我们要输入历史（↑/↓）和运行中禁用，自己写只有几十行且完全可控。
  */
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 
 interface Props {
@@ -12,77 +12,85 @@ interface Props {
 }
 
 export function TextInput({ onSubmit, active }: Props) {
+  // 按键事件可能在同一个 tick 内连续到达（快速输入、脚本化 stdin），
+  // 此时 React 还没来得及重渲染，事件处理闭包里的 state 是上一帧的旧值
+  // ——比如"输入文字后立刻回车"会读到空串而吞掉提交。
+  // 所以逻辑上的"当前值"放在 ref（同步读写），state 只负责触发渲染。
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
-  const [history, setHistory] = useState<string[]>([]);
-  // history 游标：history.length 表示"正在编辑新输入"
-  const [histIdx, setHistIdx] = useState(0);
-  const [draft, setDraft] = useState("");
+  const valueRef = useRef("");
+  const cursorRef = useRef(0);
+  // 输入历史不参与渲染，纯 ref 即可。histIdx === history.length 表示"正在编辑新输入"
+  const history = useRef<string[]>([]);
+  const histIdx = useRef(0);
+  const draft = useRef("");
+
+  const set = (v: string, c: number) => {
+    valueRef.current = v;
+    cursorRef.current = c;
+    setValue(v);
+    setCursor(c);
+  };
 
   useInput(
     (input, key) => {
+      const value = valueRef.current;
+      const cursor = cursorRef.current;
       if (key.return) {
         const v = value.trim();
         if (!v) return;
-        const h = [...history, v];
-        setHistory(h);
-        setHistIdx(h.length);
-        setValue("");
-        setCursor(0);
-        setDraft("");
+        history.current.push(v);
+        histIdx.current = history.current.length;
+        draft.current = "";
+        set("", 0);
         onSubmit(v);
         return;
       }
       if (key.upArrow) {
-        if (history.length === 0 || histIdx === 0) return;
-        if (histIdx === history.length) setDraft(value); // 暂存未提交的输入
-        const i = histIdx - 1;
-        setHistIdx(i);
-        setValue(history[i]);
-        setCursor(history[i].length);
+        const h = history.current;
+        if (h.length === 0 || histIdx.current === 0) return;
+        if (histIdx.current === h.length) draft.current = value; // 暂存未提交的输入
+        const i = --histIdx.current;
+        set(h[i], h[i].length);
         return;
       }
       if (key.downArrow) {
-        if (histIdx >= history.length) return;
-        const i = histIdx + 1;
-        setHistIdx(i);
-        const v = i === history.length ? draft : history[i];
-        setValue(v);
-        setCursor(v.length);
+        const h = history.current;
+        if (histIdx.current >= h.length) return;
+        const i = ++histIdx.current;
+        const v = i === h.length ? draft.current : h[i];
+        set(v, v.length);
         return;
       }
       if (key.leftArrow) {
-        setCursor((c) => Math.max(0, c - 1));
+        set(value, Math.max(0, cursor - 1));
         return;
       }
       if (key.rightArrow) {
-        setCursor((c) => Math.min(value.length, c + 1));
+        set(value, Math.min(value.length, cursor + 1));
         return;
       }
       if (key.backspace || key.delete) {
         if (cursor === 0) return;
-        setValue(value.slice(0, cursor - 1) + value.slice(cursor));
-        setCursor(cursor - 1);
+        set(value.slice(0, cursor - 1) + value.slice(cursor), cursor - 1);
         return;
       }
       if (key.ctrl && input === "u") {
-        setValue(value.slice(cursor));
-        setCursor(0);
+        set(value.slice(cursor), 0);
         return;
       }
       if (key.ctrl && input === "a") {
-        setCursor(0);
+        set(value, 0);
         return;
       }
       if (key.ctrl && input === "e") {
-        setCursor(value.length);
+        set(value, value.length);
         return;
       }
       // 普通字符（含粘贴的多字符块）；过滤控制键组合
       if (input && !key.ctrl && !key.meta && !key.escape && !key.tab) {
         const clean = input.replace(/[\r\n]+/g, " ");
-        setValue(value.slice(0, cursor) + clean + value.slice(cursor));
-        setCursor(cursor + clean.length);
+        set(value.slice(0, cursor) + clean + value.slice(cursor), cursor + clean.length);
       }
     },
     { isActive: active },
