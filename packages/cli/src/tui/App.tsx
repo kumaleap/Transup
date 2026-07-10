@@ -12,7 +12,7 @@
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useInput } from "ink";
+import {Box, Static, Text, useApp, useInput} from "./runtime/index.js";
 import {
   AgentEngine,
   SessionStore,
@@ -36,8 +36,18 @@ import {
   type TranscriptItem,
 } from "./Transcript.js";
 import { TextInput } from "./TextInput.js";
-import { PermissionDialog, type PermissionRequest } from "./PermissionDialog.js";
+import {
+  PermissionDialog,
+  type PermissionDecision,
+  type PermissionRequest,
+} from "./PermissionDialog.js";
 import { StatusBar, type StatusInfo } from "./StatusBar.js";
+import {
+  normalizeKeystroke,
+  routeKeystroke,
+  type Keystroke,
+} from "./input/keybinding-router.js";
+import {useInputController} from "./input/use-input-controller.js";
 
 export interface AppProps {
   provider: Provider;
@@ -214,18 +224,50 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
-  // ── Ctrl+C：运行中先中断任务，空闲时退出 ──────────────────
-  useInput((input, key) => {
-    if (!(key.ctrl && input === "c")) return;
+  const inputController = useInputController({active: !running, onSubmit});
+
+  const resolveCurrentPermission = (decision: PermissionDecision): boolean => {
+    const request = permissionRef.current;
+    if (!request) return false;
+    permissionRef.current = null;
+    request.resolve(decision);
+    return true;
+  };
+
+  // ── 全局输入与交互上下文路由 ──────────────────────────────
+  const handleGlobalKey = (stroke: Keystroke): boolean => {
+    if (!(stroke.ctrl && stroke.input === "c")) return false;
     if (running) {
       if (controllerRef.current?.signal.aborted) exit();
       // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
-      permissionRef.current?.resolve("no");
+      resolveCurrentPermission("no");
       info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
       controllerRef.current?.abort();
     } else {
       exit();
     }
+    return true;
+  };
+
+  const handlePermissionKey = (stroke: Keystroke): boolean => {
+    if (stroke.input === "y" || stroke.name === "return") {
+      return resolveCurrentPermission("yes");
+    }
+    if (stroke.input === "n" || stroke.name === "escape") {
+      return resolveCurrentPermission("no");
+    }
+    if (stroke.input === "a") return resolveCurrentPermission("session");
+    if (stroke.input === "A") return resolveCurrentPermission("always");
+    return false;
+  };
+
+  useInput((input, key) => {
+    const stroke = normalizeKeystroke(input, key);
+    routeKeystroke(stroke, permission ? "permission" : "editor", {
+      global: handleGlobalKey,
+      permission: handlePermissionKey,
+      editor: inputController.handleEditorKey,
+    });
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -484,7 +526,7 @@ export function App(props: AppProps) {
         ) : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box borderStyle="round" borderColor={T.border} paddingX={1}>
-            <TextInput onSubmit={onSubmit} active={!running} />
+            <TextInput view={inputController.view} />
           </Box>
         )}
         <StatusBar status={status} />

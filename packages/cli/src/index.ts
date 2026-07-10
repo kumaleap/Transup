@@ -18,7 +18,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
-import { render } from "ink";
 import {
   AnthropicProvider,
   OpenAICompatProvider,
@@ -35,6 +34,7 @@ import {
 } from "@transup/core";
 import { color } from "./ui.js";
 import { App } from "./tui/App.js";
+import {render} from "./tui/runtime/index.js";
 import { runHeadless } from "./headless.js";
 import { runDoctor } from "./doctor.js";
 import { TraceRecorder, renderTraceFile } from "./trace.js";

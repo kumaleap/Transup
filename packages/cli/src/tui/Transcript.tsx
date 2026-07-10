@@ -3,7 +3,7 @@
  * 可以往上翻），正在进行的内容在动态区渲染。
  */
 import React from "react";
-import { Box, Text } from "ink";
+import {Box, Text} from "./runtime/index.js";
 import { renderMarkdown } from "../highlight.js";
 import { T } from "../theme.js";
 import { Banner, type BannerInfo } from "./Banner.js";

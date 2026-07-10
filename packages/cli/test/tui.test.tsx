@@ -8,7 +8,7 @@
  * 4. 斜杠命令 /help /cost
  */
 import React from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,10 +22,12 @@ class MockProvider implements Provider {
   readonly id = "mock";
   readonly model = "test-model";
   private step = 0;
+  streamCalls = 0;
   /** 最近一次请求里的 user 消息内容（验证占位符已还原成全文） */
   lastUserContent = "";
   constructor(private replies: { content: string; toolCalls?: ToolCall[] }[]) {}
   async *stream(messages?: Message[]): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
     const u = [...(messages ?? [])].reverse().find((m) => m.role === "user");
     if (u) this.lastUserContent = u.content;
     const r = this.replies[Math.min(this.step++, this.replies.length - 1)] ?? {
@@ -150,6 +152,50 @@ describe("TUI", () => {
     await flush(600);
     expect(lastFrame()).toContain("写完了");
     expect(readFileSync(target, "utf-8")).toBe("hi");
+    unmount();
+  });
+
+  it("权限对话框保留输入历史和粘贴引用，且放行键不会写入输入框", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-router-"));
+    const target = join(dir, "preserved.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "write_file",
+            args: JSON.stringify({path: target, content: "kept"}),
+          },
+        ],
+      },
+      {content: "权限处理完成"},
+      {content: "历史输入已重放"},
+    ]);
+    const {stdin, lastFrame, unmount} = render(makeApp(provider));
+    const pastedDraft = "保留\n这个\n草稿";
+    await flush();
+
+    stdin.write(pastedDraft);
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 2000});
+
+    stdin.write("y");
+    await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 2000});
+    const callsAfterPermission = provider.streamCalls;
+
+    // If the permission key leaked into the newly visible editor, Enter would submit "y".
+    stdin.write("\r");
+    await flush();
+    expect(provider.streamCalls).toBe(callsAfterPermission);
+
+    stdin.write("\x1b[A");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(provider.streamCalls).toBeGreaterThan(callsAfterPermission),
+      {timeout: 2000},
+    );
+    expect(provider.lastUserContent).toBe(pastedDraft);
     unmount();
   });
 

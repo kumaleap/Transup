@@ -5,7 +5,7 @@
  * Ink 的 <Text> 原样透传 ANSI 码。
  */
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import {Box, Text} from "./runtime/index.js";
 import { T } from "../theme.js";
 
 export type PermissionDecision = "yes" | "no" | "session" | "always";
@@ -28,14 +28,7 @@ function Key({ k, label }: { k: string; label: string }) {
   );
 }
 
-export function PermissionDialog({ request }: { request: PermissionRequest }) {
-  useInput((input, key) => {
-    if (input === "y" || key.return) request.resolve("yes");
-    else if (input === "n" || key.escape) request.resolve("no");
-    else if (input === "a") request.resolve("session");
-    else if (input === "A") request.resolve("always");
-  });
-
+export function PermissionDialog({request}: {request: PermissionRequest}) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={T.warn} paddingX={1}>
       <Text color={T.warn}>
