@@ -6,7 +6,7 @@
 
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
-**Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, string-width 8.1.1, Vitest 3.2.7, ink-testing-library 4.0.0.
+**Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, string-width 8.2.2, Vitest 3.2.7, ink-testing-library 4.0.0.
 
 ## Global Constraints
 
@@ -109,7 +109,7 @@ Make these exact configuration changes:
 package.json engines.node               >=26
 packages/cli/package.json engines.node  >=26
 packages/cli/package.json ink           ^7.1.0
-packages/cli/package.json string-width  ^8.1.1
+packages/cli/package.json string-width  ^8.2.2
 packages/cli/tsup.config.ts target       node26
 doctor minimum/detail                   >=26
 CI/release setup-node                    node-version-file: .nvmrc
@@ -118,7 +118,7 @@ CI/release setup-node                    node-version-file: .nvmrc
 Update the lockfile with:
 
 ```bash
-npm install ink@7.1.0 string-width@8.1.1 -w transup
+npm install ink@7.1.0 string-width@8.2.2 -w transup
 ```
 
 Do not change the TypeScript `ES2022` target; Node 26 already supplies the required `Intl.Segmenter` behavior.

@@ -54,7 +54,7 @@ the text model or history format.
 - Ink 7.1.0.
 - React 19.2.7 and `@types/react` 19.2.17.
 - TypeScript 6.0.3.
-- `string-width` 8.1.1 as a direct CLI dependency for terminal-cell width.
+- `string-width` 8.2.2 as a direct CLI dependency for terminal-cell width.
 
 Ink remains behind `packages/cli/src/tui/runtime/index.ts`. Application code
 imports terminal hooks and primitives from that adapter rather than depending
@@ -125,7 +125,7 @@ the same rule, while whitespace and punctuation are separators.
 ### MeasuredText
 
 `input/measured-text.ts` maps grapheme boundaries to terminal cells and visual
-rows for a supplied content width. It calls the direct `string-width` 8.1.1
+rows for a supplied content width. It calls the direct `string-width` 8.2.2
 dependency for each grapheme and reserves one cell at the end of an input row
 for a visible cursor. The minimum supported editable content width is two cells so a
 single wide grapheme always fits. When the measured component is narrower than
