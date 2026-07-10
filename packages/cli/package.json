@@ -19,7 +19,7 @@
     "mcp"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=26"
   },
   "bin": {
     "transup": "./dist/index.js"
@@ -36,9 +36,10 @@
     "@anthropic-ai/sdk": "^0.110.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^17.4.2",
-    "ink": "^6.8.0",
+    "ink": "^7.1.0",
     "openai": "^6.45.0",
     "react": "^19.2.7",
+    "string-width": "^8.1.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
