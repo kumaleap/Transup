@@ -224,7 +224,7 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
-  const inputController = useInputController({active: !running, onSubmit});
+  const inputController = useInputController({active: !running, onSubmit, onExit: exit});
 
   const resolveCurrentPermission = (decision: PermissionDecision): boolean => {
     const request = permissionRef.current;
@@ -237,15 +237,13 @@ export function App(props: AppProps) {
   // ── 全局输入与交互上下文路由 ──────────────────────────────
   const handleGlobalKey = (stroke: Keystroke): boolean => {
     if (!(stroke.ctrl && stroke.input === "c")) return false;
-    if (running) {
-      if (controllerRef.current?.signal.aborted) exit();
-      // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
-      resolveCurrentPermission("no");
-      info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
-      controllerRef.current?.abort();
-    } else {
-      exit();
-    }
+    if (!running) return inputController.handleGlobalKey(stroke);
+
+    if (controllerRef.current?.signal.aborted) exit();
+    // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
+    resolveCurrentPermission("no");
+    info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
+    controllerRef.current?.abort();
     return true;
   };
 
@@ -526,7 +524,10 @@ export function App(props: AppProps) {
         ) : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box borderStyle="round" borderColor={T.border} paddingX={1}>
-            <TextInput view={inputController.view} />
+            <TextInput
+              view={inputController.view}
+              onContentWidthChange={inputController.setContentWidth}
+            />
           </Box>
         )}
         <StatusBar status={status} />

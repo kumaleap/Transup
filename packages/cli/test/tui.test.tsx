@@ -17,6 +17,15 @@ import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import { App } from "../src/tui/App.js";
 import {TextInput} from "../src/tui/TextInput.js";
+import {
+  normalizeKeystroke,
+  type InputKey,
+  type Keystroke,
+} from "../src/tui/input/keybinding-router.js";
+import {
+  useInputController,
+  type InputController,
+} from "../src/tui/input/use-input-controller.js";
 
 /** 每轮回一段文本；可选带工具调用。usage 挂在 message_done 上。 */
 class MockProvider implements Provider {
@@ -74,6 +83,85 @@ function makeApp(provider: Provider) {
 
 const flush = (ms = 150) => new Promise((r) => setTimeout(r, ms));
 
+const inputKey = (patch: Partial<InputKey> = {}): InputKey => ({
+  upArrow: false,
+  downArrow: false,
+  leftArrow: false,
+  rightArrow: false,
+  pageDown: false,
+  pageUp: false,
+  home: false,
+  end: false,
+  return: false,
+  escape: false,
+  ctrl: false,
+  shift: false,
+  tab: false,
+  backspace: false,
+  delete: false,
+  meta: false,
+  ...patch,
+});
+
+const stroke = (input: string, patch: Partial<InputKey> = {}): Keystroke =>
+  normalizeKeystroke(input, inputKey(patch));
+
+interface ControllerHarnessProps {
+  expose: (controller: InputController) => void;
+  now: () => number;
+  onSubmit: (display: string, expanded: string) => void;
+  onExit: () => void;
+  onHistoryEntry: (draft: string) => void;
+}
+
+function ControllerHarness(props: ControllerHarnessProps) {
+  const controller = useInputController({
+    active: true,
+    now: props.now,
+    onSubmit: props.onSubmit,
+    onExit: props.onExit,
+    onHistoryEntry: props.onHistoryEntry,
+  });
+  props.expose(controller);
+
+  return (
+    <TextInput
+      rootWidth={40}
+      view={controller.view}
+      onContentWidthChange={controller.setContentWidth}
+    />
+  );
+}
+
+function renderController(now: () => number) {
+  let controller: InputController | undefined;
+  const onSubmit = vi.fn();
+  const onExit = vi.fn();
+  const onHistoryEntry = vi.fn();
+  const instance = render(
+    <ControllerHarness
+      expose={(next) => {
+        controller = next;
+      }}
+      now={now}
+      onSubmit={onSubmit}
+      onExit={onExit}
+      onHistoryEntry={onHistoryEntry}
+    />,
+  );
+
+  return {
+    ...instance,
+    get controller() {
+      if (!controller) throw new Error("controller did not render");
+      return controller;
+    },
+    onSubmit,
+    onExit,
+    onHistoryEntry,
+  };
+}
+
 describe("TUI", () => {
   it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
@@ -124,6 +212,166 @@ describe("TUI", () => {
     stdin.write("\r");
 
     await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    unmount();
+  });
+
+  it("Delete performs forward deletion through the App input route", async () => {
+    const provider = new MockProvider([{content: "收到"}]);
+    const {stdin, unmount} = render(makeApp(provider));
+    await flush();
+
+    stdin.write("a你b");
+    stdin.write("\x1b[D");
+    stdin.write("\x1b[D");
+    stdin.write("\x1b[3~");
+    stdin.write("\r");
+
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    unmount();
+  });
+
+  it("routes newline chords, backslash Enter, and fused SSH Enter without losing text", async () => {
+    const now = () => 10;
+    const shift = renderController(now);
+    shift.controller.handleEditorKey(stroke("one"));
+    shift.controller.handleEditorKey(stroke("\r", {return: true, shift: true}));
+    shift.controller.handleEditorKey(stroke("two"));
+    shift.controller.handleEditorKey(stroke("\r", {return: true}));
+    expect(shift.onSubmit).toHaveBeenCalledWith("one\ntwo", "one\ntwo");
+    shift.unmount();
+
+    const meta = renderController(now);
+    meta.controller.handleEditorKey(stroke("one"));
+    meta.controller.handleEditorKey(stroke("\r", {return: true, meta: true}));
+    meta.controller.handleEditorKey(stroke("two"));
+    meta.controller.handleEditorKey(stroke("\r", {return: true}));
+    expect(meta.onSubmit).toHaveBeenCalledWith("one\ntwo", "one\ntwo");
+    meta.unmount();
+
+    const backslash = renderController(now);
+    backslash.controller.handleEditorKey(stroke("one\\"));
+    backslash.controller.handleEditorKey(stroke("\r", {return: true}));
+    backslash.controller.handleEditorKey(stroke("two"));
+    backslash.controller.handleEditorKey(stroke("\r", {return: true}));
+    expect(backslash.onSubmit).toHaveBeenCalledWith("one\ntwo", "one\ntwo");
+    backslash.unmount();
+
+    const fusedSubmit = renderController(now);
+    fusedSubmit.controller.handleEditorKey(stroke("hello\r"));
+    expect(fusedSubmit.onSubmit).toHaveBeenCalledWith("hello", "hello");
+    fusedSubmit.unmount();
+
+    const fusedNewline = renderController(now);
+    fusedNewline.controller.handleEditorKey(stroke("hello\\\r"));
+    await flush();
+    expect(fusedNewline.onSubmit).not.toHaveBeenCalled();
+    expect(fusedNewline.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toContain("hello");
+    expect(fusedNewline.controller.view.value).toBe("hello\n");
+    fusedNewline.unmount();
+  });
+
+  it("idle Ctrl+C clears the draft, arms a footer, and exits on a matching second press", async () => {
+    let currentNow = 100;
+    const harness = renderController(() => currentNow);
+    harness.controller.handleEditorKey(stroke("draft"));
+    await flush();
+
+    expect(harness.controller.handleGlobalKey(stroke("c", {ctrl: true}))).toBe(true);
+    await flush();
+    expect(harness.controller.view.value).toBe("");
+    expect(harness.lastFrame()).toContain("Press Ctrl-C again to exit");
+    expect(harness.onExit).not.toHaveBeenCalled();
+
+    currentNow = 899;
+    harness.controller.handleGlobalKey(stroke("c", {ctrl: true}));
+    expect(harness.onExit).toHaveBeenCalledOnce();
+    harness.unmount();
+  });
+
+  it("empty Ctrl+D shares the 800ms exit primitive and expiry rearms it", async () => {
+    let currentNow = 0;
+    const harness = renderController(() => currentNow);
+
+    harness.controller.handleEditorKey(stroke("d", {ctrl: true}));
+    await flush();
+    expect(harness.lastFrame()).toContain("Press Ctrl-D again to exit");
+
+    currentNow = 801;
+    harness.controller.handleEditorKey(stroke("d", {ctrl: true}));
+    expect(harness.onExit).not.toHaveBeenCalled();
+
+    currentNow = 1600;
+    harness.controller.handleEditorKey(stroke("d", {ctrl: true}));
+    expect(harness.onExit).toHaveBeenCalledOnce();
+    harness.unmount();
+  });
+
+  it("Escape saves the exact draft to history only on the matching second press", async () => {
+    let currentNow = 10;
+    const harness = renderController(() => currentNow);
+    harness.controller.handleEditorKey(stroke("  draft  "));
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+    await flush();
+    expect(harness.lastFrame()).toContain("Esc again to clear");
+    expect(harness.controller.view.value).toBe("  draft  ");
+    expect(harness.onHistoryEntry).not.toHaveBeenCalled();
+
+    currentNow = 809;
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+    await flush();
+    expect(harness.onHistoryEntry).toHaveBeenCalledWith("  draft  ");
+    expect(harness.controller.view.value).toBe("");
+
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("  draft  ");
+    harness.unmount();
+  });
+
+  it("Escape preserves a whitespace-only draft before clearing it", () => {
+    const harness = renderController(() => 10);
+    harness.controller.handleEditorKey(stroke("   "));
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+
+    expect(harness.onHistoryEntry).toHaveBeenCalledWith("   ");
+    expect(harness.controller.view.value).toBe("");
+    harness.unmount();
+  });
+
+  it("unrelated editing clears pending feedback and unmount clears its timer", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      let currentNow = 0;
+      const harness = renderController(() => currentNow);
+      harness.controller.handleEditorKey(stroke("draft"));
+      harness.controller.handleEditorKey(stroke("", {escape: true}));
+      expect(vi.getTimerCount()).toBe(1);
+
+      currentNow = 1;
+      harness.controller.handleEditorKey(stroke("x"));
+      expect(harness.controller.view.footer).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(0);
+
+      harness.controller.handleEditorKey(stroke("", {escape: true}));
+      expect(vi.getTimerCount()).toBe(1);
+      harness.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("App routes the first idle Ctrl+C to the input footer instead of exiting", async () => {
+    const {stdin, lastFrame, unmount} = render(makeApp(new MockProvider([])));
+    await flush();
+    stdin.write("draft");
+    stdin.write("\x03");
+    await flush();
+
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("Press Ctrl-C again to exit");
+    expect(frame).not.toContain("draft");
     unmount();
   });
 

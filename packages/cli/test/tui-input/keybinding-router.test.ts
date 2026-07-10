@@ -1,5 +1,6 @@
 import {describe, expect, it, vi} from "vitest";
 import {
+  editorActionForKeystroke,
   normalizeKeystroke,
   routeKeystroke,
   type InputKey,
@@ -126,5 +127,48 @@ describe("keybinding router", () => {
         expect(handler).not.toHaveBeenCalled();
       }
     }
+  });
+
+  it.each([
+    ["Home", "", {home: true}, {type: "move", direction: "line-start", width: 17}],
+    ["End", "", {end: true}, {type: "move", direction: "line-end", width: 17}],
+    ["Left", "", {leftArrow: true}, {type: "move", direction: "left", width: 17}],
+    ["Right", "", {rightArrow: true}, {type: "move", direction: "right", width: 17}],
+    ["Up", "", {upArrow: true}, {type: "move", direction: "up", width: 17}],
+    ["Down", "", {downArrow: true}, {type: "move", direction: "down", width: 17}],
+    ["Backspace", "", {backspace: true}, {type: "delete", direction: "backward", now: 42}],
+    ["Delete", "", {delete: true}, {type: "delete", direction: "forward", now: 42}],
+    ["Ctrl+A", "a", {ctrl: true}, {type: "move", direction: "line-start", width: 17}],
+    ["Ctrl+B", "b", {ctrl: true}, {type: "move", direction: "left", width: 17}],
+    ["Ctrl+D", "d", {ctrl: true}, {type: "delete", direction: "forward", now: 42}],
+    ["Ctrl+E", "e", {ctrl: true}, {type: "move", direction: "line-end", width: 17}],
+    ["Ctrl+F", "f", {ctrl: true}, {type: "move", direction: "right", width: 17}],
+    ["Ctrl+H", "h", {ctrl: true}, {type: "delete", direction: "backward", now: 42}],
+    ["Ctrl+K", "k", {ctrl: true}, {type: "kill", target: "line-end", now: 42}],
+    ["Ctrl+U", "u", {ctrl: true}, {type: "kill", target: "line-start", now: 42}],
+    ["Ctrl+W", "w", {ctrl: true}, {type: "kill", target: "word-left", now: 42}],
+    ["Ctrl+Y", "y", {ctrl: true}, {type: "yank", now: 42}],
+    ["Ctrl+_", "_", {ctrl: true}, {type: "undo", now: 42}],
+    ["Meta+B", "b", {meta: true}, {type: "move", direction: "word-left", width: 17}],
+    ["Meta+D", "d", {meta: true}, {type: "kill", target: "word-right", now: 42}],
+    ["Meta+F", "f", {meta: true}, {type: "move", direction: "word-right", width: 17}],
+    ["Meta+Y", "y", {meta: true}, {type: "yank-pop", now: 42}],
+    ["Ctrl+Shift+-", "-", {ctrl: true, shift: true}, {type: "undo", now: 42}],
+    ["Shift+Enter", "\r", {return: true, shift: true}, {type: "newline", now: 42}],
+    ["Meta+Enter", "\r", {return: true, meta: true}, {type: "newline", now: 42}],
+    ["printable text", "你", {}, {type: "insert", text: "你", now: 42}],
+  ] as const)("maps %s to an editor action", (_label, input, patch, expected) => {
+    const stroke = normalizeKeystroke(input, key(patch));
+
+    expect(editorActionForKeystroke(stroke, 17, 42)).toEqual(expected);
+  });
+
+  it("leaves plain Enter and unrelated modified text to the controller", () => {
+    expect(
+      editorActionForKeystroke(normalizeKeystroke("\r", key({return: true})), 17, 42),
+    ).toBeUndefined();
+    expect(
+      editorActionForKeystroke(normalizeKeystroke("z", key({meta: true})), 17, 42),
+    ).toBeUndefined();
   });
 });
