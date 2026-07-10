@@ -328,13 +328,15 @@ describe("TUI", () => {
     harness.unmount();
   });
 
-  it("Escape preserves a whitespace-only draft before clearing it", () => {
+  it("Escape clears a whitespace-only draft without saving it", () => {
     const harness = renderController(() => 10);
     harness.controller.handleEditorKey(stroke("   "));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
 
-    expect(harness.onHistoryEntry).toHaveBeenCalledWith("   ");
+    expect(harness.onHistoryEntry).not.toHaveBeenCalled();
+    expect(harness.controller.view.value).toBe("");
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
     expect(harness.controller.view.value).toBe("");
     harness.unmount();
   });

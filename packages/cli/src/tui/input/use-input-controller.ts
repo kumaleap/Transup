@@ -235,10 +235,12 @@ export function useInputController(options: InputControllerOptions): InputContro
           () => undefined,
           () => {
             const draft = editorRef.current.buffer.text;
-            historyRef.current.push(draft);
-            historyIndexRef.current = historyRef.current.length;
+            if (draft.trim()) {
+              historyRef.current.push(draft);
+              historyIndexRef.current = historyRef.current.length;
+              optionsRef.current.onHistoryEntry?.(draft);
+            }
             draftRef.current = "";
-            optionsRef.current.onHistoryEntry?.(draft);
             replaceEditor();
           },
         );

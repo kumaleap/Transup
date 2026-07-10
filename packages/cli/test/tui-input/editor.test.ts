@@ -196,7 +196,7 @@ describe("editor reducer", () => {
     expect(reduceEditor(state, {type: "undo", now: 2}).state.buffer.text).toBe("a");
   });
 
-  it("restores kill, yank, and desired-column state from undo snapshots", () => {
+  it("restores undo data but ends the active kill and yank chains", () => {
     const original: EditorState = {
       ...createEditorState("abc", 1),
       desiredColumn: 7,
@@ -217,7 +217,18 @@ describe("editor reducer", () => {
     expect(restored.buffer.cursor).toBe(1);
     expect(restored.desiredColumn).toBe(7);
     expect(restored.killRing).toEqual(["saved"]);
-    expect(restored.killChain).toEqual({index: 0});
-    expect(restored.yank).toEqual({start: 0, end: 1, ringIndex: 0});
+    expect(restored.killChain).toBeUndefined();
+    expect(restored.yank).toBeUndefined();
+
+    const yankPop = reduceEditor(restored, {type: "yank-pop", now: 2}).state;
+    expect(yankPop.buffer.text).toBe("abc");
+
+    const killed = reduceEditor(restored, {
+      type: "kill",
+      target: "line-end",
+      now: 3,
+    }).state;
+    expect(killed.buffer.text).toBe("a");
+    expect(killed.killRing).toEqual(["bc", "saved"]);
   });
 });
