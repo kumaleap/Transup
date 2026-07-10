@@ -30,12 +30,35 @@ export function formatArgs(args: Record<string, unknown>): string {
     .slice(0, 120);
 }
 
-/** 工具结果 → 预览字符串（最多 3 行 + 总行数） */
+/** 工具结果 → 预览字符串（最多 3 行 + 剩余行数） */
 export function previewResult(content: string, streamed: boolean): string {
   const lines = content.split("\n");
   if (streamed) return `(已流式显示，共 ${lines.length} 行)`;
-  const head = lines.slice(0, 3).join("\n");
-  return lines.length > 3 ? `${head}\n… 共 ${lines.length} 行` : head;
+  // 只剩 1 行时直接显示，避免"… +1 行"的尴尬
+  if (lines.length <= 4) return content;
+  return `${lines.slice(0, 3).join("\n")}\n… +${lines.length - 3} 行`;
+}
+
+/** 消息/工具行左侧圆点（⏺ 垂直居中更好，但 Win/Linux 终端常缺字形） */
+export const DOT = process.platform === "darwin" ? "⏺" : "●";
+
+/**
+ * ⎿ 结果行：前缀恒 5 列（"  ⎿  "，dim），内容列自动折行，
+ * 续行对齐到第 6 列。所有工具子行统一走这里。
+ */
+function ResultLine({ children, color }: { children: string; color?: string }) {
+  return (
+    <Box>
+      <Box minWidth={5} flexShrink={0}>
+        <Text dimColor>{"  ⎿  "}</Text>
+      </Box>
+      <Box flexGrow={1} flexShrink={1}>
+        <Text dimColor={!color} color={color}>
+          {children}
+        </Text>
+      </Box>
+    </Box>
+  );
 }
 
 export function TranscriptItemView({ item }: { item: TranscriptItem }) {
@@ -45,32 +68,41 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
     case "user":
       return (
         <Box marginTop={1}>
-          <Text color={T.primary}>❯ </Text>
+          <Text dimColor>❯ </Text>
           <Text>{item.text}</Text>
         </Box>
       );
     case "assistant":
+      // ⏺ 占 2 列 gutter，内容折行后悬挂缩进对齐
       return (
         <Box marginTop={1}>
-          <Text>{renderMarkdown(item.text)}</Text>
+          <Box minWidth={2} flexShrink={0}>
+            <Text>{DOT}</Text>
+          </Box>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text>{renderMarkdown(item.text)}</Text>
+          </Box>
         </Box>
       );
     case "tool":
+      // 状态用圆点颜色表达（成功绿/失败红），工具名 bold、参数摘要在括号里
       return (
         <Box flexDirection="column" marginTop={1}>
-          <Text>
-            <Text color={T.secondary}>◆ {item.name}</Text>
-            <Text dimColor>({item.argSummary})</Text>
-          </Text>
+          <Box>
+            <Box minWidth={2} flexShrink={0}>
+              <Text color={item.isError ? T.danger : T.success}>{DOT}</Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text bold>{item.name}</Text>
+                {item.argSummary ? <Text>({item.argSummary})</Text> : null}
+              </Text>
+            </Box>
+          </Box>
           {item.preview && (
-            <Text>
-              <Text color={item.isError ? T.danger : undefined} dimColor={!item.isError}>
-                {"  ⎿ "}
-              </Text>
-              <Text dimColor color={item.isError ? T.danger : undefined}>
-                {item.preview.replace(/\n/g, "\n    ")}
-              </Text>
-            </Text>
+            <ResultLine color={item.isError ? T.danger : undefined}>
+              {item.preview}
+            </ResultLine>
           )}
         </Box>
       );
