@@ -328,16 +328,28 @@ describe("TUI", () => {
     harness.unmount();
   });
 
-  it("Escape clears a whitespace-only draft without saving it", () => {
+  it("Escape clears a whitespace-only draft and resets history navigation", async () => {
     const harness = renderController(() => 10);
+
+    harness.controller.handleEditorKey(stroke("first"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("latest"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("latest");
+
+    harness.controller.handleEditorKey(stroke("u", {ctrl: true}));
     harness.controller.handleEditorKey(stroke("   "));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
+    await flush();
 
     expect(harness.onHistoryEntry).not.toHaveBeenCalled();
     expect(harness.controller.view.value).toBe("");
     harness.controller.handleEditorKey(stroke("", {upArrow: true}));
-    expect(harness.controller.view.value).toBe("");
+    await flush();
+    expect(harness.controller.view.value).toBe("latest");
     harness.unmount();
   });
 

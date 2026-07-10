@@ -237,9 +237,9 @@ export function useInputController(options: InputControllerOptions): InputContro
             const draft = editorRef.current.buffer.text;
             if (draft.trim()) {
               historyRef.current.push(draft);
-              historyIndexRef.current = historyRef.current.length;
               optionsRef.current.onHistoryEntry?.(draft);
             }
+            historyIndexRef.current = historyRef.current.length;
             draftRef.current = "";
             replaceEditor();
           },
