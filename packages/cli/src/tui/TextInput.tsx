@@ -1,35 +1,84 @@
 /** 输入框展示层；编辑状态与终端事件由 App 级 controller 持有。 */
-import React from "react";
-import {Box, Text} from "./runtime/index.js";
+import React, {useRef} from "react";
+import {Box, Text, useBoxMetrics, useStdout, type DOMElement} from "./runtime/index.js";
 import { T } from "../theme.js";
 import type {InputViewState} from "./input/use-input-controller.js";
+import {measureText, type VisualRow} from "./input/measured-text.js";
+import {TextBuffer} from "./input/text-buffer.js";
 
 interface Props {
   view: InputViewState;
+  rootWidth?: number;
 }
 
-export function TextInput({view}: Props) {
+const PROMPT_WIDTH = 2;
+const CURSOR_RESERVE = 1;
+const OUTER_COLUMNS = 4;
+const MIN_ROOT_WIDTH = PROMPT_WIDTH + 2 + CURSOR_RESERVE;
+
+interface RowTextProps {
+  buffer: TextBuffer;
+  row: VisualRow;
+  showCursor: boolean;
+}
+
+function RowText({buffer, row, showCursor}: RowTextProps) {
+  if (!showCursor) return <Text>{buffer.text.slice(row.start, row.end)}</Text>;
+
+  const before = buffer.text.slice(row.start, buffer.cursor);
+  if (buffer.cursor === row.end) {
+    return (
+      <Text>
+        {before}
+        <Text inverse> </Text>
+      </Text>
+    );
+  }
+
+  const next = buffer.moveRight().cursor;
+  return (
+    <Text>
+      {before}
+      <Text inverse>{buffer.text.slice(buffer.cursor, next)}</Text>
+      {buffer.text.slice(next, row.end)}
+    </Text>
+  );
+}
+
+export function TextInput({view, rootWidth}: Props) {
+  const rootRef = useRef<DOMElement | null>(null);
+  const metrics = useBoxMetrics(rootRef);
+  const {stdout} = useStdout();
+  const fallbackWidth = Math.max(0, (stdout.columns ?? MIN_ROOT_WIDTH) - OUTER_COLUMNS);
+  const availableWidth = rootWidth ?? (metrics.hasMeasured ? metrics.width : fallbackWidth);
+
   if (!view.active) {
     return (
-      <Box>
+      <Box ref={rootRef} width="100%">
         <Text dimColor>❯ working… (ctrl+c to interrupt)</Text>
       </Box>
     );
   }
 
-  // 手动画光标：反色显示光标位置字符
-  const before = view.value.slice(0, view.cursor);
-  const at = view.value[view.cursor] ?? " ";
-  const after = view.value.slice(view.cursor + 1);
+  if (availableWidth < MIN_ROOT_WIDTH) {
+    return (
+      <Box ref={rootRef} width="100%">
+        <Text>…</Text>
+      </Box>
+    );
+  }
+
+  const buffer = TextBuffer.from(view.value, view.cursor);
+  const measured = measureText(buffer, availableWidth - PROMPT_WIDTH - CURSOR_RESERVE);
 
   return (
-    <Box>
-      <Text color={T.primary}>❯ </Text>
-      <Text>
-        {before}
-        <Text inverse>{at}</Text>
-        {after}
-      </Text>
+    <Box ref={rootRef} width="100%" flexDirection="column">
+      {measured.rows.map((row, index) => (
+        <Box key={`${row.start}:${index}`}>
+          <Text color={T.primary}>{index === 0 ? "❯ " : "  "}</Text>
+          <RowText buffer={buffer} row={row} showCursor={measured.cursor.row === index} />
+        </Box>
+      ))}
     </Box>
   );
 }

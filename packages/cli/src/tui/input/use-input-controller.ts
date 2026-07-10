@@ -1,5 +1,6 @@
 import {useCallback, useRef, useState} from "react";
 import type {Keystroke} from "./keybinding-router.js";
+import {TextBuffer} from "./text-buffer.js";
 
 export interface InputControllerOptions {
   active: boolean;
@@ -23,8 +24,7 @@ const PASTE_MARKER = /\[粘贴 #(\d+) · \d+ 行\]/g;
 export function useInputController(options: InputControllerOptions): InputController {
   const [snapshot, setSnapshot] = useState({value: "", cursor: 0});
   const optionsRef = useRef(options);
-  const valueRef = useRef("");
-  const cursorRef = useRef(0);
+  const bufferRef = useRef(TextBuffer.from());
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef(0);
   const draftRef = useRef("");
@@ -33,10 +33,9 @@ export function useInputController(options: InputControllerOptions): InputContro
 
   optionsRef.current = options;
 
-  const update = useCallback((value: string, cursor: number) => {
-    valueRef.current = value;
-    cursorRef.current = cursor;
-    setSnapshot({value, cursor});
+  const update = useCallback((buffer: TextBuffer) => {
+    bufferRef.current = buffer;
+    setSnapshot({value: buffer.text, cursor: buffer.cursor});
   }, []);
 
   const expandPastes = useCallback(
@@ -49,8 +48,9 @@ export function useInputController(options: InputControllerOptions): InputContro
     (stroke: Keystroke): boolean => {
       if (!optionsRef.current.active) return false;
 
-      const value = valueRef.current;
-      const cursor = cursorRef.current;
+      const buffer = bufferRef.current;
+      const value = buffer.text;
+      const cursor = buffer.cursor;
 
       if (stroke.name === "return") {
         const submitted = value.trim();
@@ -58,7 +58,7 @@ export function useInputController(options: InputControllerOptions): InputContro
         historyRef.current.push(submitted);
         historyIndexRef.current = historyRef.current.length;
         draftRef.current = "";
-        update("", 0);
+        update(TextBuffer.from());
         optionsRef.current.onSubmit(submitted, expandPastes(submitted));
         return true;
       }
@@ -69,7 +69,7 @@ export function useInputController(options: InputControllerOptions): InputContro
         if (historyIndexRef.current === history.length) draftRef.current = value;
         const index = --historyIndexRef.current;
         const recalled = history[index];
-        update(recalled, recalled.length);
+        update(TextBuffer.from(recalled));
         return true;
       }
 
@@ -78,39 +78,37 @@ export function useInputController(options: InputControllerOptions): InputContro
         if (historyIndexRef.current >= history.length) return true;
         const index = ++historyIndexRef.current;
         const recalled = index === history.length ? draftRef.current : history[index];
-        update(recalled, recalled.length);
+        update(TextBuffer.from(recalled));
         return true;
       }
 
       if (stroke.name === "left") {
-        update(value, Math.max(0, cursor - 1));
+        update(buffer.moveLeft());
         return true;
       }
 
       if (stroke.name === "right") {
-        update(value, Math.min(value.length, cursor + 1));
+        update(buffer.moveRight());
         return true;
       }
 
       if (stroke.name === "backspace" || stroke.name === "delete") {
-        if (cursor > 0) {
-          update(value.slice(0, cursor - 1) + value.slice(cursor), cursor - 1);
-        }
+        update(buffer.deleteBackward());
         return true;
       }
 
       if (stroke.ctrl && stroke.input === "u") {
-        update(value.slice(cursor), 0);
+        update(buffer.replace(0, cursor, ""));
         return true;
       }
 
       if (stroke.ctrl && stroke.input === "a") {
-        update(value, 0);
+        update(buffer.withCursor(0));
         return true;
       }
 
       if (stroke.ctrl && stroke.input === "e") {
-        update(value, value.length);
+        update(buffer.withCursor(value.length));
         return true;
       }
 
@@ -122,14 +120,11 @@ export function useInputController(options: InputControllerOptions): InputContro
         const id = ++pasteSequenceRef.current;
         pastesRef.current.set(id, full);
         const marker = `[粘贴 #${id} · ${lines} 行]`;
-        update(value.slice(0, cursor) + marker + value.slice(cursor), cursor + marker.length);
+        update(buffer.insert(marker));
         return true;
       }
 
-      update(
-        value.slice(0, cursor) + stroke.input + value.slice(cursor),
-        cursor + stroke.input.length,
-      );
+      update(buffer.insert(stroke.input));
       return true;
     },
     [expandPastes, update],

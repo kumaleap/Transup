@@ -16,6 +16,7 @@ import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import { App } from "../src/tui/App.js";
+import {TextInput} from "../src/tui/TextInput.js";
 
 /** 每轮回一段文本；可选带工具调用。usage 挂在 message_done 上。 */
 class MockProvider implements Provider {
@@ -106,6 +107,48 @@ describe("TUI", () => {
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(done).toContain("[粘贴 #1 · 3 行]"); // 记录区也是占位符
     expect(provider.lastUserContent).toContain("行1\n行2\n行3"); // 模型收到还原后的全文
+    unmount();
+  });
+
+  it("按字素移动并删除中日韩字符和带肤色 emoji", async () => {
+    const provider = new MockProvider([{content: "收到"}]);
+    const {stdin, unmount} = render(makeApp(provider));
+    await flush();
+
+    stdin.write("a你👍🏽b");
+    stdin.write("\x1b[D");
+    stdin.write("\x1b[D");
+    stdin.write("\x1b[C");
+    stdin.write("\x7f");
+    stdin.write("\x7f");
+    stdin.write("\r");
+
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    unmount();
+  });
+
+  it("按测量宽度换行且不拆分 ZWJ emoji", async () => {
+    const family = "👨‍👩‍👧‍👦";
+    const {lastFrame, unmount} = render(
+      <TextInput
+        rootWidth={5}
+        view={{value: `a${family}b`, cursor: 1, active: true}}
+      />,
+    );
+    await flush();
+
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame.split("\n")).toEqual([`❯ a`, `  ${family}`, "  b"]);
+    unmount();
+  });
+
+  it("根宽度不足五格时只显示省略号", async () => {
+    const {lastFrame, unmount} = render(
+      <TextInput rootWidth={4} view={{value: "保留原模型", cursor: 5, active: true}} />,
+    );
+    await flush();
+
+    expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toBe("…");
     unmount();
   });
 
