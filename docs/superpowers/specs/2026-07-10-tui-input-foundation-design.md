@@ -312,16 +312,41 @@ skips blank, malformed, unknown-version, or schema-invalid lines, and never
 executes data from the file.
 
 The directory and file are created with owner-only permissions where the
-platform supports POSIX modes. Append opens the file with mode `0600`. A single
-per-store promise queue serializes duplicate checks, appends, and compaction.
-When the file has more than 200 valid entries or exceeds 1 MiB, compaction runs
-in that same queue: it writes the newest 100 entries to a same-directory
-temporary file, syncs and closes it, renames it atomically, and best-effort
+platform supports POSIX modes. Append opens the file with mode `0600`. A
+per-store promise queue and a process-local queue keyed by the absolute history
+path serialize duplicate checks, appends, and compaction within one JavaScript
+module realm. When the file has more than 200 valid entries or exceeds 1 MiB,
+compaction runs in that same path queue: it writes the newest 100 entries to a
+same-directory temporary file, syncs and closes it, verifies that the source
+size has not changed, renames the temporary file atomically, and best-effort
 syncs the directory. Temporary files are removed after failed compaction
-without touching the original history. `flush()` resolves when the queue is
-drained. Normal application exit awaits it for at most 500 milliseconds, then
-exits even if storage is unavailable; external process termination retains
-normal filesystem best-effort semantics.
+without touching the original history. `flush()` resolves when the store queue
+is drained. Normal application exit awaits it for at most 500 milliseconds,
+then exits even if storage is unavailable; external process termination
+retains normal filesystem best-effort semantics.
+
+#### Known cross-process limitation
+
+Commit `1029ffd` does not provide cross-process serialization. Independent CLI
+processes, worker threads with separate module instances, and duplicate module
+realms do not share the process-local path queue. The source-size check reduces
+one common compaction race but is not a compare-and-swap operation: another
+process can append after the size check and before rename, after which the
+compaction rename can overwrite that append. Same-size replacement is also not
+detected, and large concurrent appends have no explicit cross-process framing
+lock. Cross-process persistence must therefore be described as best-effort,
+not lossless.
+
+Do not reintroduce a plain `${historyPath}.lock` file with stale-token deletion.
+The reviewed prototype could leave a permanent lock after a crash, its retry
+timer could outlive the 500 millisecond exit bound, and `read token -> unlink`
+cannot prevent a delayed reaper from deleting a new owner's lock. A follow-up
+must use a separately reviewed ownership protocol or a proven portable locking
+primitive and must include real child-process tests for concurrent append and
+compaction, forced owner termination, stale-owner recovery, delayed competing
+reapers, token-safe release, and bounded natural process exit. The test matrix
+must cover same-prompt duplicate suppression and records larger than one
+underlying write chunk on both Windows and POSIX.
 
 History reads and writes are best-effort at the UI boundary. A load failure
 starts with empty history. An append/compaction failure does not block prompt

@@ -804,6 +804,29 @@ git add packages/cli/src/tui/input/history-store.ts packages/cli/src/tui/input/u
 git commit -m "feat(tui): persist and navigate project prompt history"
 ```
 
+**Deferred cross-process follow-up (not completed by `1029ffd`):**
+
+- [ ] Design and review a portable ownership protocol before adding disk locks.
+- [ ] Serialize append, duplicate detection, and compaction across independent
+  CLI processes without a `stat -> rename` overwrite window.
+- [ ] Recover a forcibly terminated same-host owner without deleting or moving
+  a newer owner's lock; do not use plain `read token -> unlink` cleanup.
+- [ ] Preserve the 500 millisecond normal-exit bound without leaving ref'ed
+  retry timers or permanent crash locks.
+- [ ] Add real child-process tests for concurrent append/compaction, forced
+  termination, delayed competing recovery, token-safe release, and natural
+  process exit.
+- [ ] Cover same-prompt duplicate suppression and concurrent JSONL records
+  larger than one underlying write chunk on both Windows and POSIX.
+
+Until this follow-up is complete, the committed module-level absolute-path
+queue guarantees serialization only inside one JavaScript module realm. The
+compaction source-size check is a best-effort mitigation, not cross-process
+atomicity.
+
+This follow-up is tracked separately and does not block Tasks 7-9 unless
+cross-process losslessness becomes a release requirement for this phase.
+
 ---
 
 ### Task 7: Add Incremental Ctrl-R Search

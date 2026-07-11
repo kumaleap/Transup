@@ -2,9 +2,12 @@
 
 Date: 2026-07-10
 
-Status: Tasks 1-4 implemented; Task 4 formal review and Tasks 5-9 remain
+Last updated: 2026-07-12
 
-Estimated remaining agent time: 7-10 hours; 4-6 hours is the best case
+Status: Tasks 1-6 implemented and pushed; Tasks 7-9 remain
+
+Estimated remaining agent time: 3-6 hours for Tasks 7-9; cross-process history
+hardening is separately scoped
 
 ## Purpose
 
@@ -20,6 +23,48 @@ authoritative requirements:
 
 The checkboxes in the implementation plan are the original execution template,
 not the current status. Use this handoff and the commit history for status.
+
+## 2026-07-12 Checkpoint Update
+
+The current remote checkpoint is `1029ffd` on
+`origin/feature/tui-input-foundation`:
+
+```text
+439fade fix(tui): align readline history and undo state
+1f8e374 fix(tui): reset history position after draft clear
+b2479b2 fix(tui): complete readline review fixes
+6a22d8f feat(tui): fold and restore bracketed paste content
+1029ffd feat(tui): persist and navigate project prompt history
+```
+
+Task 5 and Task 6 are complete within their planned single-process scope. The
+recorded Task 6 verification at `1029ffd` is 26 test files and 282 tests, plus
+passing typecheck, build, and diff checks. The older checkpoint and remaining
+task sections below are retained as historical context; start new work at Task
+7, not Task 5.
+
+Task 6 has one explicit unresolved limitation: history writes are not lossless
+across independent OS processes. The implementation uses a module-level queue
+keyed by absolute history path, so multiple stores in one JavaScript module
+realm are serialized. Separate CLI processes do not share that queue. During
+compaction, the source-size check can detect an append that happens after the
+source snapshot and before the check, but an append between the final size
+check and rename can still be overwritten. Large simultaneous appends also
+have no explicit cross-process framing lock.
+
+An earlier plain lock-file prototype was intentionally removed before
+`1029ffd`: process termination left an orphan lock, ordinary retry timers could
+keep Node alive beyond the controller's 500 millisecond exit bound, and naive
+stale-token deletion had a delayed-reaper race that could remove a new owner's
+lock. Do not restore that prototype.
+
+The durable follow-up is recorded in the design specification and Task 6 plan.
+It requires a reviewed portable ownership protocol and real child-process
+tests covering concurrent append/compaction, forced termination, stale-owner
+recovery, delayed competing reapers, token-safe release, and bounded natural
+exit. The matrix must include same-prompt duplicate suppression, records larger
+than one underlying write chunk, and both Windows and POSIX. Until those checks
+pass, describe cross-process history as best-effort.
 
 ## Repository Checkpoint
 
