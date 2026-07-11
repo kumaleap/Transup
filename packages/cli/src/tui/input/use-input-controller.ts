@@ -175,7 +175,11 @@ export function useInputController(options: InputControllerOptions): InputContro
       armPending(
         "Ctrl-C",
         "Press Ctrl-C again to exit",
-        () => replaceEditor(),
+        () => {
+          historyIndexRef.current = historyRef.current.length;
+          draftRef.current = undefined;
+          replaceEditor();
+        },
         () => optionsRef.current.onExit?.(),
       );
       return true;

@@ -75,6 +75,22 @@ describe("keybinding router", () => {
     });
   });
 
+  it("normalizes the legacy terminal Ctrl+_ control byte", () => {
+    const stroke = normalizeKeystroke("\x1f", key());
+
+    expect(stroke).toEqual({
+      input: "_",
+      name: "text",
+      ctrl: true,
+      shift: false,
+      meta: false,
+    });
+    expect(editorActionForKeystroke(stroke, 17, 42)).toEqual({
+      type: "undo",
+      now: 42,
+    });
+  });
+
   it("stops after the first consumed layer", () => {
     const global = vi.fn(() => false);
     const permission = vi.fn(() => true);

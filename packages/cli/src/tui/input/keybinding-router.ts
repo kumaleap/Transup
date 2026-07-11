@@ -53,6 +53,16 @@ export interface RouteHandlers {
 }
 
 export function normalizeKeystroke(input: string, key: InputKey): Keystroke {
+  if (input === "\x1f") {
+    return {
+      input: "_",
+      name: "text",
+      ctrl: true,
+      shift: false,
+      meta: false,
+    };
+  }
+
   const name: Keystroke["name"] = key.upArrow
     ? "up"
     : key.downArrow

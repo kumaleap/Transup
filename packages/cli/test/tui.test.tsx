@@ -270,6 +270,16 @@ describe("TUI", () => {
     fusedNewline.unmount();
   });
 
+  it("routes the legacy terminal Ctrl+_ byte to undo", async () => {
+    const harness = renderController(() => 10);
+    harness.controller.handleEditorKey(stroke("draft"));
+    harness.controller.handleEditorKey(stroke("\x1f"));
+    await flush();
+
+    expect(harness.controller.view.value).toBe("");
+    harness.unmount();
+  });
+
   it("idle Ctrl+C clears the draft, arms a footer, and exits on a matching second press", async () => {
     let currentNow = 100;
     const harness = renderController(() => currentNow);
@@ -285,6 +295,28 @@ describe("TUI", () => {
     currentNow = 899;
     harness.controller.handleGlobalKey(stroke("c", {ctrl: true}));
     expect(harness.onExit).toHaveBeenCalledOnce();
+    harness.unmount();
+  });
+
+  it("idle Ctrl+C resets history navigation after clearing a recalled value", async () => {
+    const harness = renderController(() => 100);
+    harness.controller.handleEditorKey(stroke("first"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("latest"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("draft"));
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("latest");
+
+    harness.controller.handleGlobalKey(stroke("c", {ctrl: true}));
+    harness.controller.handleEditorKey(stroke("", {downArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("");
+
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("latest");
     harness.unmount();
   });
 
