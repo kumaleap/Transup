@@ -10,7 +10,7 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
@@ -26,6 +26,11 @@ import {
   useInputController,
   type InputController,
 } from "../src/tui/input/use-input-controller.js";
+import {
+  HistoryStore,
+  type HistoryEntry,
+} from "../src/tui/input/history-store.js";
+import {pasteMarker} from "../src/tui/input/paste-registry.js";
 
 /** 每轮回一段文本；可选带工具调用。usage 挂在 message_done 上。 */
 class MockProvider implements Provider {
@@ -57,7 +62,9 @@ class MockProvider implements Provider {
 class SlowProvider implements Provider {
   readonly id = "mock";
   readonly model = "test-model";
+  streamCalls = 0;
   async *stream(): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
     yield { type: "usage", usage: { inputTokens: 1200, outputTokens: 340 } };
     await new Promise((r) => setTimeout(r, 500));
     yield { type: "message_done", content: "ok", toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
@@ -65,8 +72,65 @@ class SlowProvider implements Provider {
 }
 
 const sessionDir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-"));
+const promptHistoryDir = mkdtempSync(join(tmpdir(), "transup-tui-history-"));
 
-function makeApp(provider: Provider) {
+function newHistoryPath(): string {
+  return join(
+    promptHistoryDir,
+    `${Math.random().toString(36).slice(2)}.jsonl`,
+  );
+}
+
+function pendingPromise(): {
+  promise: Promise<void>;
+  resolve: () => void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return {promise, resolve};
+}
+
+class ControlledHistoryStore extends HistoryStore {
+  constructor(private readonly flushResult: Promise<void>) {
+    super({filePath: newHistoryPath()});
+  }
+
+  override async load() {
+    return [];
+  }
+
+  override async append() {}
+
+  override flush() {
+    return this.flushResult;
+  }
+}
+
+class PendingLoadHistoryStore extends HistoryStore {
+  private readonly loaded: Promise<readonly HistoryEntry[]>;
+  private resolveLoaded!: (entries: readonly HistoryEntry[]) => void;
+
+  constructor() {
+    super({filePath: newHistoryPath()});
+    this.loaded = new Promise((resolve) => {
+      this.resolveLoaded = resolve;
+    });
+  }
+
+  completeLoad(entries: readonly HistoryEntry[]) {
+    this.resolveLoaded(entries);
+  }
+
+  override load() {
+    return this.loaded;
+  }
+
+  override async append() {}
+}
+
+function makeApp(provider: Provider, historyPath = newHistoryPath()) {
   return (
     <App
       provider={provider}
@@ -77,6 +141,7 @@ function makeApp(provider: Provider) {
       initialHistory={[]}
       mcpToolCount={0}
       sessionDir={sessionDir}
+      historyPath={historyPath}
     />
   );
 }
@@ -112,6 +177,9 @@ interface ControllerHarnessProps {
   onSubmit: (display: string, expanded: string) => void;
   onExit: () => void;
   onHistoryEntry: (draft: string) => void;
+  onHistoryError: (error: unknown) => void;
+  historyPath: string;
+  historyStore?: HistoryStore;
 }
 
 function ControllerHarness(props: ControllerHarnessProps) {
@@ -121,6 +189,9 @@ function ControllerHarness(props: ControllerHarnessProps) {
     onSubmit: props.onSubmit,
     onExit: props.onExit,
     onHistoryEntry: props.onHistoryEntry,
+    onHistoryError: props.onHistoryError,
+    historyPath: props.historyPath,
+    historyStore: props.historyStore,
   });
   props.expose(controller);
 
@@ -133,11 +204,15 @@ function ControllerHarness(props: ControllerHarnessProps) {
   );
 }
 
-function renderController(now: () => number) {
+function renderController(
+  now: () => number,
+  options: {historyPath?: string; historyStore?: HistoryStore} = {},
+) {
   let controller: InputController | undefined;
   const onSubmit = vi.fn();
   const onExit = vi.fn();
   const onHistoryEntry = vi.fn();
+  const onHistoryError = vi.fn();
   const instance = render(
     <ControllerHarness
       expose={(next) => {
@@ -147,6 +222,9 @@ function renderController(now: () => number) {
       onSubmit={onSubmit}
       onExit={onExit}
       onHistoryEntry={onHistoryEntry}
+      onHistoryError={onHistoryError}
+      historyPath={options.historyPath ?? newHistoryPath()}
+      historyStore={options.historyStore}
     />,
   );
 
@@ -159,6 +237,7 @@ function renderController(now: () => number) {
     onSubmit,
     onExit,
     onHistoryEntry,
+    onHistoryError,
   };
 }
 
@@ -230,6 +309,67 @@ describe("TUI", () => {
       content,
     );
     harness.unmount();
+  });
+
+  it("restores a folded paste from project history after remount", async () => {
+    const historyPath = newHistoryPath();
+    const content = "first\nsecond\nthird";
+    const firstProvider = new MockProvider([{content: "stored"}]);
+    const first = render(makeApp(firstProvider, historyPath));
+    await flush();
+    first.stdin.write(`\x1b[200~${content}\x1b[201~`);
+    first.stdin.write("\r");
+    await vi.waitFor(
+      () => expect(firstProvider.lastUserContent).toBe(content),
+      {timeout: 3000},
+    );
+    await vi.waitFor(
+      () => expect(readFileSync(historyPath, "utf8")).toContain("Pasted text #1"),
+      {timeout: 3000},
+    );
+    first.unmount();
+
+    const secondProvider = new MockProvider([{content: "recalled"}]);
+    const second = render(makeApp(secondProvider, historyPath));
+    await vi.waitFor(
+      () => {
+        second.stdin.write("\x1b[A");
+        expect(second.lastFrame()).toContain("[Pasted text #1 +2 lines]");
+      },
+      {timeout: 3000},
+    );
+    second.stdin.write("\r");
+    await vi.waitFor(
+      () => expect(secondProvider.lastUserContent).toBe(content),
+      {timeout: 3000},
+    );
+    second.unmount();
+  });
+
+  it("submits despite history I/O failure and reports it only once", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "transup-history-error-"));
+    const blockingFile = join(directory, "not-a-directory");
+    writeFileSync(blockingFile, "block");
+    const provider = new MockProvider([{content: "ok"}]);
+    const instance = render(
+      makeApp(provider, join(blockingFile, "history.jsonl")),
+    );
+    await flush();
+
+    instance.stdin.write("still runs");
+    instance.stdin.write("\r");
+    await vi.waitFor(
+      () => expect(provider.lastUserContent).toBe("still runs"),
+      {timeout: 3000},
+    );
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).toContain("Prompt history unavailable:"),
+      {timeout: 3000},
+    );
+
+    const frame = instance.lastFrame()!;
+    expect(frame.match(/Prompt history unavailable:/g)).toHaveLength(1);
+    instance.unmount();
   });
 
   it("按字素移动并删除中日韩字符和带肤色 emoji", async () => {
@@ -328,7 +468,7 @@ describe("TUI", () => {
 
     currentNow = 899;
     harness.controller.handleGlobalKey(stroke("c", {ctrl: true}));
-    expect(harness.onExit).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(harness.onExit).toHaveBeenCalledOnce());
     harness.unmount();
   });
 
@@ -354,6 +494,80 @@ describe("TUI", () => {
     harness.unmount();
   });
 
+  it("waits for history flush before completing a requested exit", async () => {
+    const pending = pendingPromise();
+    const harness = renderController(
+      () => 10,
+      {historyStore: new ControlledHistoryStore(pending.promise)},
+    );
+
+    harness.controller.requestExit();
+    expect(harness.onExit).not.toHaveBeenCalled();
+    harness.controller.handleEditorKey(stroke("ignored"));
+    expect(harness.controller.view.value).toBe("");
+    pending.resolve();
+
+    await vi.waitFor(() => expect(harness.onExit).toHaveBeenCalledOnce());
+    harness.controller.requestExit();
+    expect(harness.onExit).toHaveBeenCalledOnce();
+    harness.unmount();
+  });
+
+  it("bounds a hung history flush to 500ms", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      const harness = renderController(
+        () => 10,
+        {historyStore: new ControlledHistoryStore(new Promise(() => undefined))},
+      );
+
+      harness.controller.requestExit();
+      await vi.advanceTimersByTimeAsync(499);
+      expect(harness.onExit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.onExit).toHaveBeenCalledOnce();
+      harness.controller.requestExit();
+      expect(harness.onExit).toHaveBeenCalledOnce();
+      harness.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a pending exit timer when the controller unmounts", async () => {
+    vi.useFakeTimers({toFake: ["setTimeout", "clearTimeout"]});
+    try {
+      const harness = renderController(
+        () => 10,
+        {historyStore: new ControlledHistoryStore(new Promise(() => undefined))},
+      );
+
+      harness.controller.requestExit();
+      expect(vi.getTimerCount()).toBe(1);
+      harness.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.onExit).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a rejected history flush and still exits", async () => {
+    const failure = new Error("flush failed");
+    const harness = renderController(
+      () => 10,
+      {historyStore: new ControlledHistoryStore(Promise.reject(failure))},
+    );
+
+    harness.controller.requestExit();
+
+    await vi.waitFor(() => expect(harness.onExit).toHaveBeenCalledOnce());
+    expect(harness.onHistoryError).toHaveBeenCalledWith(failure);
+    harness.unmount();
+  });
+
   it("empty Ctrl+D shares the 800ms exit primitive and expiry rearms it", async () => {
     let currentNow = 0;
     const harness = renderController(() => currentNow);
@@ -368,7 +582,7 @@ describe("TUI", () => {
 
     currentNow = 1600;
     harness.controller.handleEditorKey(stroke("d", {ctrl: true}));
-    expect(harness.onExit).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(harness.onExit).toHaveBeenCalledOnce());
     harness.unmount();
   });
 
@@ -394,6 +608,30 @@ describe("TUI", () => {
     harness.unmount();
   });
 
+  it("persists an Escape-cleared folded paste with its structured reference", async () => {
+    const historyPath = newHistoryPath();
+    const harness = renderController(() => 10, {historyPath});
+    harness.controller.handlePaste("draft\ncontent");
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+    harness.controller.handleEditorKey(stroke("", {escape: true}));
+
+    await vi.waitFor(
+      () => expect(readFileSync(historyPath, "utf8")).toContain("draft\\ncontent"),
+      {timeout: 3000},
+    );
+    const persisted = JSON.parse(readFileSync(historyPath, "utf8").trim());
+    expect(persisted.display).toBe("[Pasted text #1 +1 lines]");
+    expect(persisted.pastes).toEqual([
+      {
+        id: 1,
+        content: "draft\ncontent",
+        start: 0,
+        end: persisted.display.length,
+      },
+    ]);
+    harness.unmount();
+  });
+
   it("Escape clears a whitespace-only draft and resets history navigation", async () => {
     const harness = renderController(() => 10);
 
@@ -405,7 +643,7 @@ describe("TUI", () => {
     await flush();
     expect(harness.controller.view.value).toBe("latest");
 
-    harness.controller.handleEditorKey(stroke("u", {ctrl: true}));
+    harness.controller.handleEditorKey(stroke("k", {ctrl: true}));
     harness.controller.handleEditorKey(stroke("   "));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
     harness.controller.handleEditorKey(stroke("", {escape: true}));
@@ -416,6 +654,167 @@ describe("TUI", () => {
     harness.controller.handleEditorKey(stroke("", {upArrow: true}));
     await flush();
     expect(harness.controller.view.value).toBe("latest");
+    harness.unmount();
+  });
+
+  it("restores the exact draft and paste data after history navigation", async () => {
+    const harness = renderController(() => 10);
+    harness.controller.handleEditorKey(stroke("saved"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handlePaste("draft\ncontent");
+    harness.controller.handleEditorKey(stroke("", {leftArrow: true}));
+    await flush();
+    const draftCursor = harness.controller.view.cursor;
+
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("saved");
+    expect(harness.controller.view.cursor).toBe(0);
+
+    harness.controller.handleEditorKey(stroke("", {downArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("[Pasted text #1 +1 lines]");
+    expect(harness.controller.view.cursor).toBe(draftCursor);
+
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    expect(harness.onSubmit).toHaveBeenLastCalledWith(
+      "[Pasted text #1 +1 lines]",
+      "draft\ncontent",
+    );
+    harness.unmount();
+  });
+
+  it("merges a late disk load without disturbing active session navigation", async () => {
+    const store = new PendingLoadHistoryStore();
+    const harness = renderController(() => 10, {historyStore: store});
+    harness.controller.handleEditorKey(stroke("session"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("draft"));
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("session");
+    expect(harness.controller.view.cursor).toBe(0);
+
+    store.completeLoad([
+      {
+        v: 1,
+        display: "disk",
+        pastes: [],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    await flush();
+    expect(harness.controller.view.value).toBe("session");
+    expect(harness.controller.view.cursor).toBe(0);
+
+    harness.controller.handleEditorKey(stroke("", {downArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("draft");
+    expect(harness.controller.view.cursor).toBe("draft".length);
+
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+    await flush();
+    expect(harness.controller.view.value).toBe("disk");
+    harness.unmount();
+  });
+
+  it("continues paste IDs after loading persisted history", async () => {
+    const historyPath = newHistoryPath();
+    const content = "old\npaste";
+    const marker = pasteMarker(7, content);
+    writeFileSync(
+      historyPath,
+      `${JSON.stringify({
+        v: 1,
+        display: marker,
+        pastes: [{id: 7, content, start: 0, end: marker.length}],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      })}\n`,
+    );
+    const harness = renderController(() => 10, {historyPath});
+    await vi.waitFor(() => {
+      harness.controller.handleEditorKey(stroke("", {upArrow: true}));
+      expect(harness.controller.view.value).toBe(marker);
+    });
+    harness.controller.handleEditorKey(stroke("", {downArrow: true}));
+    harness.controller.handlePaste("new\npaste");
+    await flush();
+
+    expect(harness.controller.view.value).toBe("[Pasted text #8 +1 lines]");
+    harness.unmount();
+  });
+
+  it("keeps the loaded paste ID floor after undo restores an older snapshot", async () => {
+    const store = new PendingLoadHistoryStore();
+    const harness = renderController(() => 10, {historyStore: store});
+    harness.controller.handleEditorKey(stroke("typed"));
+    const content = "old\npaste";
+    const marker = pasteMarker(7, content);
+    store.completeLoad([
+      {
+        v: 1,
+        display: marker,
+        pastes: [{id: 7, content, start: 0, end: marker.length}],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    await flush();
+
+    harness.controller.handleEditorKey(stroke("\x1f"));
+    harness.controller.handlePaste("new\npaste");
+    await flush();
+
+    expect(harness.controller.view.value).toBe("[Pasted text #8 +1 lines]");
+    harness.unmount();
+  });
+
+  it("scans paste IDs before capping merged history to 100 entries", async () => {
+    const store = new PendingLoadHistoryStore();
+    const harness = renderController(() => 10, {historyStore: store});
+    harness.controller.handleEditorKey(stroke("session"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    const content = "old\npaste";
+    const marker = pasteMarker(7, content);
+    const loaded: HistoryEntry[] = [
+      {
+        v: 1,
+        display: marker,
+        pastes: [{id: 7, content, start: 0, end: marker.length}],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      ...Array.from({length: 99}, (_, index): HistoryEntry => ({
+        v: 1,
+        display: `disk ${index}`,
+        pastes: [],
+        timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, index + 1)).toISOString(),
+      })),
+    ];
+    store.completeLoad(loaded);
+    await flush();
+
+    harness.controller.handlePaste("new\npaste");
+    await flush();
+
+    expect(harness.controller.view.value).toBe("[Pasted text #8 +1 lines]");
+    harness.unmount();
+  });
+
+  it("persists slash commands but not exit control commands", async () => {
+    const historyPath = newHistoryPath();
+    const harness = renderController(() => 10, {historyPath});
+    harness.controller.handleEditorKey(stroke("/help"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    harness.controller.handleEditorKey(stroke("exit"));
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+
+    await vi.waitFor(
+      () => expect(readFileSync(historyPath, "utf8")).toContain("/help"),
+      {timeout: 3000},
+    );
+    const lines = readFileSync(historyPath, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain("exit");
     harness.unmount();
   });
 
@@ -453,6 +852,49 @@ describe("TUI", () => {
     expect(frame).toContain("Press Ctrl-C again to exit");
     expect(frame).not.toContain("draft");
     unmount();
+  });
+
+  it("lets a second Ctrl+C exit after an aborted turn has settled", async () => {
+    const instance = render(makeApp(new SlowProvider()));
+    await flush();
+    instance.stdin.write("run");
+    instance.stdin.write("\r");
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+
+    instance.stdin.write("\x03");
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).not.toContain("working…"),
+      {timeout: 2000},
+    );
+    instance.stdin.write("\x03");
+    await flush();
+    instance.stdin.write("after exit");
+    await flush();
+
+    expect(instance.lastFrame()).not.toContain("after exit");
+    instance.unmount();
+  });
+
+  it("clears the running-abort exit arm after unrelated idle input", async () => {
+    const instance = render(makeApp(new SlowProvider()));
+    await flush();
+    instance.stdin.write("run");
+    instance.stdin.write("\r");
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+
+    instance.stdin.write("\x03");
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).not.toContain("working…"),
+      {timeout: 2000},
+    );
+    instance.stdin.write("draft");
+    instance.stdin.write("\x03");
+    await flush();
+
+    const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("Press Ctrl-C again to exit");
+    expect(frame).not.toContain("draft");
+    instance.unmount();
   });
 
   it("按测量宽度换行且不拆分 ZWJ emoji", async () => {
@@ -497,6 +939,24 @@ describe("TUI", () => {
     expect(frame).toContain("你好，这是回复");
     expect(frame).toContain("↑10"); // 状态栏 tokens
     unmount();
+  });
+
+  it("accepts only the first prompt from one synchronous stdin batch", async () => {
+    const provider = new SlowProvider();
+    const instance = render(makeApp(provider));
+    await flush();
+
+    instance.stdin.write("one");
+    instance.stdin.write("\r");
+    instance.stdin.write("two");
+    instance.stdin.write("\r");
+
+    await vi.waitFor(() => expect(provider.streamCalls).toBe(1));
+    await flush();
+    const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("❯ one");
+    expect(frame).not.toContain("❯ two");
+    instance.unmount();
   });
 
   it("写操作触发权限对话框，按 y 放行后执行", async () => {

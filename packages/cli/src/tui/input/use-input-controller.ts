@@ -11,6 +11,10 @@ import {
   type Keystroke,
 } from "./keybinding-router.js";
 import {
+  HistoryStore,
+  type HistoryEntry,
+} from "./history-store.js";
+import {
   expandPasteReferences,
   type PasteRegistryState,
 } from "./paste-registry.js";
@@ -20,6 +24,9 @@ export interface InputControllerOptions {
   onSubmit: (display: string, expanded: string) => void;
   onExit?: () => void;
   onHistoryEntry?: (draft: string) => void;
+  onHistoryError?: (error: unknown) => void;
+  historyPath?: string;
+  historyStore?: HistoryStore;
   now?: () => number;
 }
 
@@ -35,6 +42,7 @@ export interface InputController {
   handleGlobalKey: (stroke: Keystroke) => boolean;
   handleEditorKey: (stroke: Keystroke) => boolean;
   handlePaste: (text: string) => void;
+  requestExit: () => void;
   setContentWidth: (width: number) => void;
 }
 
@@ -46,21 +54,75 @@ type PendingPress =
   | undefined;
 
 const DOUBLE_PRESS_MS = 800;
-
-interface HistoryEntry {
-  display: string;
-  pastes: PasteRegistryState;
-}
+const EXIT_FLUSH_MS = 500;
+const HISTORY_LIMIT = 100;
 
 function monotonicNow(): number {
   return performance.now();
 }
 
-function clonePastes(pastes: PasteRegistryState): PasteRegistryState {
+function cloneHistoryEntry(entry: HistoryEntry): HistoryEntry {
   return {
-    nextId: pastes.nextId,
-    references: pastes.references.map((reference) => ({...reference})),
+    v: 1,
+    display: entry.display,
+    pastes: entry.pastes.map((reference) => ({...reference})),
+    timestamp: entry.timestamp,
   };
+}
+
+function sameHistoryPrompt(left: HistoryEntry, right: HistoryEntry): boolean {
+  if (left.display !== right.display || left.pastes.length !== right.pastes.length) {
+    return false;
+  }
+  return left.pastes.every((reference, index) => {
+    const other = right.pastes[index];
+    return other !== undefined &&
+      reference.id === other.id &&
+      reference.content === other.content &&
+      reference.start === other.start &&
+      reference.end === other.end;
+  });
+}
+
+function historyEntryFromEditor(
+  display: string,
+  pastes: PasteRegistryState,
+): HistoryEntry {
+  return {
+    v: 1,
+    display,
+    pastes: pastes.references.map((reference) => ({...reference})),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function registryForHistory(
+  current: PasteRegistryState,
+  entry: HistoryEntry,
+): PasteRegistryState {
+  const restored: PasteRegistryState = {
+    nextId: 1,
+    references: entry.pastes.map((reference) => ({...reference})),
+  };
+  return {
+    nextId: nextPasteId(current, restored),
+    references: restored.references,
+  };
+}
+
+function nextPasteIdForHistory(
+  current: number,
+  history: readonly HistoryEntry[],
+): number {
+  let next = current;
+  for (const entry of history) {
+    for (const reference of entry.pastes) {
+      next = reference.id >= Number.MAX_SAFE_INTEGER - 1
+        ? Number.MAX_SAFE_INTEGER
+        : Math.max(next, reference.id + 1);
+    }
+  }
+  return next;
 }
 
 function nextPasteId(
@@ -102,23 +164,44 @@ function freshEditor(
 
 export function useInputController(options: InputControllerOptions): InputController {
   const initialEditorRef = useRef<EditorState>(createEditorState());
+  const historyStoreRef = useRef<HistoryStore | null>(null);
+  if (historyStoreRef.current === null) {
+    historyStoreRef.current = options.historyStore ?? new HistoryStore({
+      filePath: options.historyPath,
+    });
+  }
   const [snapshot, setSnapshot] = useState({value: "", cursor: 0});
   const [footer, setFooter] = useState<string>();
   const optionsRef = useRef(options);
   const editorRef = initialEditorRef;
+  const pasteIdFloorRef = useRef(editorRef.current.pastes.nextId);
   const contentWidthRef = useRef(80);
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(0);
   const draftRef = useRef<EditorState | undefined>(undefined);
   const pendingRef = useRef<PendingPress>(undefined);
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const exitRequestedRef = useRef(false);
+  const historyErrorReportedRef = useRef(false);
+  const mountedRef = useRef(true);
   const previousActiveRef = useRef(options.active);
 
   optionsRef.current = options;
 
   const publish = useCallback((editor: EditorState) => {
-    editorRef.current = editor;
-    setSnapshot({value: editor.buffer.text, cursor: editor.buffer.cursor});
+    pasteIdFloorRef.current = Math.max(
+      pasteIdFloorRef.current,
+      editor.pastes.nextId,
+    );
+    const nextEditor = editor.pastes.nextId < pasteIdFloorRef.current
+      ? {
+          ...editor,
+          pastes: {...editor.pastes, nextId: pasteIdFloorRef.current},
+        }
+      : editor;
+    editorRef.current = nextEditor;
+    setSnapshot({value: nextEditor.buffer.text, cursor: nextEditor.buffer.cursor});
   }, []);
 
   const clearPending = useCallback(() => {
@@ -129,6 +212,58 @@ export function useInputController(options: InputControllerOptions): InputContro
     pendingRef.current = undefined;
     setFooter(undefined);
   }, []);
+
+  const reportHistoryError = useCallback((error: unknown) => {
+    if (!mountedRef.current || historyErrorReportedRef.current) return;
+    historyErrorReportedRef.current = true;
+    optionsRef.current.onHistoryError?.(error);
+  }, []);
+
+  const rememberHistory = useCallback((entry: HistoryEntry): boolean => {
+    const latest = historyRef.current[historyRef.current.length - 1];
+    if (latest && sameHistoryPrompt(latest, entry)) {
+      historyIndexRef.current = historyRef.current.length;
+      draftRef.current = undefined;
+      return false;
+    }
+
+    historyRef.current = [...historyRef.current, cloneHistoryEntry(entry)].slice(
+      -HISTORY_LIMIT,
+    );
+    historyIndexRef.current = historyRef.current.length;
+    draftRef.current = undefined;
+    return true;
+  }, []);
+
+  const persistHistory = useCallback(
+    (entry: HistoryEntry) => {
+      void historyStoreRef.current!.append(entry).catch(reportHistoryError);
+    },
+    [reportHistoryError],
+  );
+
+  const requestExit = useCallback(() => {
+    if (exitRequestedRef.current) return;
+    exitRequestedRef.current = true;
+    clearPending();
+
+    let finished = false;
+    const finish = () => {
+      if (finished || !mountedRef.current) return;
+      finished = true;
+      if (exitTimerRef.current !== undefined) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = undefined;
+      }
+      optionsRef.current.onExit?.();
+    };
+
+    exitTimerRef.current = setTimeout(finish, EXIT_FLUSH_MS);
+    void historyStoreRef.current!.flush().then(finish, (error) => {
+      reportHistoryError(error);
+      finish();
+    });
+  }, [clearPending, reportHistoryError]);
 
   const replaceEditor = useCallback(
     (
@@ -141,6 +276,26 @@ export function useInputController(options: InputControllerOptions): InputContro
     [publish],
   );
 
+  const restoreEditor = useCallback(
+    (editor: EditorState | undefined) => {
+      if (!editor) {
+        replaceEditor();
+        return;
+      }
+      publish({
+        ...editor,
+        pastes: {
+          nextId: Math.max(
+            editorRef.current.pastes.nextId,
+            editor.pastes.nextId,
+          ),
+          references: editor.pastes.references.map((reference) => ({...reference})),
+        },
+      });
+    },
+    [publish, replaceEditor],
+  );
+
   const dispatch = useCallback(
     (action: EditorAction) => {
       const result = reduceEditor(editorRef.current, action);
@@ -151,21 +306,24 @@ export function useInputController(options: InputControllerOptions): InputContro
   );
 
   const submit = useCallback(() => {
+    if (exitRequestedRef.current) return;
     const submitted = prepareEditorSubmission(editorRef.current);
     if (!submitted.display) return;
 
-    historyRef.current.push({
-      display: submitted.display,
-      pastes: clonePastes(submitted.pastes),
-    });
-    historyIndexRef.current = historyRef.current.length;
-    draftRef.current = undefined;
+    const isExit = submitted.display === "exit" || submitted.display === "quit";
+    const entry = historyEntryFromEditor(submitted.display, submitted.pastes);
+    const remembered = isExit ? false : rememberHistory(entry);
+    if (isExit) {
+      historyIndexRef.current = historyRef.current.length;
+      draftRef.current = undefined;
+    }
     replaceEditor();
     optionsRef.current.onSubmit(
       submitted.display,
       expandPasteReferences(submitted.display, submitted.pastes.references),
     );
-  }, [replaceEditor]);
+    if (remembered) persistHistory(entry);
+  }, [persistHistory, rememberHistory, replaceEditor]);
 
   const armPending = useCallback(
     (
@@ -199,6 +357,53 @@ export function useInputController(options: InputControllerOptions): InputContro
   );
 
   useEffect(() => {
+    let cancelled = false;
+    void historyStoreRef.current!.load().then((loaded) => {
+      if (cancelled || !mountedRef.current) return;
+
+      const session = historyRef.current;
+      const previousIndex = historyIndexRef.current;
+      const currentEntry = previousIndex < session.length
+        ? session[previousIndex]
+        : undefined;
+      const disk = loaded.map(cloneHistoryEntry);
+      if (
+        disk.length > 0 &&
+        session.length > 0 &&
+        sameHistoryPrompt(disk[disk.length - 1]!, session[0]!)
+      ) {
+        disk.pop();
+      }
+      const allHistory = [...disk, ...session];
+      const merged = allHistory.slice(-HISTORY_LIMIT);
+      historyRef.current = merged;
+
+      if (previousIndex === session.length) {
+        historyIndexRef.current = merged.length;
+      } else if (currentEntry) {
+        const mergedIndex = merged.indexOf(currentEntry);
+        historyIndexRef.current = mergedIndex >= 0 ? mergedIndex : merged.length;
+      }
+
+      const nextId = nextPasteIdForHistory(
+        editorRef.current.pastes.nextId,
+        allHistory,
+      );
+      pasteIdFloorRef.current = Math.max(pasteIdFloorRef.current, nextId);
+      editorRef.current = {
+        ...editorRef.current,
+        pastes: {...editorRef.current.pastes, nextId: pasteIdFloorRef.current},
+      };
+    }).catch((error) => {
+      if (!cancelled && mountedRef.current) reportHistoryError(error);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [reportHistoryError]);
+
+  useEffect(() => {
     if (previousActiveRef.current !== options.active) {
       editorRef.current = {...editorRef.current, insertGroup: undefined};
       clearPending();
@@ -207,18 +412,27 @@ export function useInputController(options: InputControllerOptions): InputContro
   }, [clearPending, options.active]);
 
   useLayoutEffect(
-    () => () => {
+    () => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
       if (pendingTimerRef.current !== undefined) {
         clearTimeout(pendingTimerRef.current);
         pendingTimerRef.current = undefined;
       }
+        if (exitTimerRef.current !== undefined) {
+          clearTimeout(exitTimerRef.current);
+          exitTimerRef.current = undefined;
+        }
       pendingRef.current = undefined;
+      };
     },
     [],
   );
 
   const handleGlobalKey = useCallback(
     (stroke: Keystroke): boolean => {
+      if (exitRequestedRef.current) return true;
       if (!optionsRef.current.active || !(stroke.ctrl && stroke.input === "c")) return false;
 
       armPending(
@@ -229,11 +443,11 @@ export function useInputController(options: InputControllerOptions): InputContro
           draftRef.current = undefined;
           replaceEditor();
         },
-        () => optionsRef.current.onExit?.(),
+        requestExit,
       );
       return true;
     },
-    [armPending, replaceEditor],
+    [armPending, replaceEditor, requestExit],
   );
 
   const recallHistory = useCallback(
@@ -247,8 +461,8 @@ export function useInputController(options: InputControllerOptions): InputContro
         const recalled = history[--historyIndexRef.current]!;
         replaceEditor(
           recalled.display,
-          recalled.display.length,
-          recalled.pastes,
+          0,
+          registryForHistory(editorRef.current.pastes, recalled),
         );
         return true;
       }
@@ -256,27 +470,23 @@ export function useInputController(options: InputControllerOptions): InputContro
       if (historyIndexRef.current >= history.length) return false;
       const index = ++historyIndexRef.current;
       if (index === history.length) {
-        const draft = draftRef.current;
-        replaceEditor(
-          draft?.buffer.text,
-          draft?.buffer.cursor,
-          draft?.pastes,
-        );
+        restoreEditor(draftRef.current);
       } else {
         const recalled = history[index]!;
         replaceEditor(
           recalled.display,
-          recalled.display.length,
-          recalled.pastes,
+          0,
+          registryForHistory(editorRef.current.pastes, recalled),
         );
       }
       return true;
     },
-    [replaceEditor],
+    [replaceEditor, restoreEditor],
   );
 
   const handleEditorKey = useCallback(
     (stroke: Keystroke): boolean => {
+      if (exitRequestedRef.current) return true;
       if (!optionsRef.current.active) return false;
 
       const unmodified = !stroke.ctrl && !stroke.meta && !stroke.shift;
@@ -325,14 +535,14 @@ export function useInputController(options: InputControllerOptions): InputContro
             const draft = editorRef.current;
             const display = draft.buffer.text;
             if (display.trim()) {
-              historyRef.current.push({
-                display,
-                pastes: clonePastes(draft.pastes),
-              });
+              const entry = historyEntryFromEditor(display, draft.pastes);
+              const remembered = rememberHistory(entry);
               optionsRef.current.onHistoryEntry?.(display);
+              if (remembered) persistHistory(entry);
+            } else {
+              historyIndexRef.current = historyRef.current.length;
+              draftRef.current = undefined;
             }
-            historyIndexRef.current = historyRef.current.length;
-            draftRef.current = undefined;
             replaceEditor();
           },
         );
@@ -344,7 +554,7 @@ export function useInputController(options: InputControllerOptions): InputContro
           "Ctrl-D",
           "Press Ctrl-D again to exit",
           () => undefined,
-          () => optionsRef.current.onExit?.(),
+          requestExit,
         );
         return true;
       }
@@ -380,12 +590,22 @@ export function useInputController(options: InputControllerOptions): InputContro
       }
       return true;
     },
-    [armPending, clearPending, dispatch, recallHistory, replaceEditor, submit],
+    [
+      armPending,
+      clearPending,
+      dispatch,
+      persistHistory,
+      recallHistory,
+      rememberHistory,
+      replaceEditor,
+      requestExit,
+      submit,
+    ],
   );
 
   const handlePaste = useCallback(
     (text: string) => {
-      if (!optionsRef.current.active) return;
+      if (exitRequestedRef.current || !optionsRef.current.active) return;
       clearPending();
       dispatch({
         type: "paste",
@@ -408,6 +628,7 @@ export function useInputController(options: InputControllerOptions): InputContro
     handleGlobalKey,
     handleEditorKey,
     handlePaste,
+    requestExit,
     setContentWidth,
   };
 }
