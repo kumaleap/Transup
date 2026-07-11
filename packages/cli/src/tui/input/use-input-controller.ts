@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useLayoutEffect, useRef, useState} from "react";
 import {
   createEditorState,
+  prepareEditorSubmission,
   reduceEditor,
   type EditorAction,
   type EditorState,
@@ -9,6 +10,10 @@ import {
   editorActionForKeystroke,
   type Keystroke,
 } from "./keybinding-router.js";
+import {
+  expandPasteReferences,
+  type PasteRegistryState,
+} from "./paste-registry.js";
 
 export interface InputControllerOptions {
   active: boolean;
@@ -29,6 +34,7 @@ export interface InputController {
   view: InputViewState;
   handleGlobalKey: (stroke: Keystroke) => boolean;
   handleEditorKey: (stroke: Keystroke) => boolean;
+  handlePaste: (text: string) => void;
   setContentWidth: (width: number) => void;
 }
 
@@ -40,16 +46,57 @@ type PendingPress =
   | undefined;
 
 const DOUBLE_PRESS_MS = 800;
-const PASTE_MARKER = /\[粘贴 #(\d+) · \d+ 行\]/g;
+
+interface HistoryEntry {
+  display: string;
+  pastes: PasteRegistryState;
+}
 
 function monotonicNow(): number {
   return performance.now();
 }
 
-function freshEditor(previous: EditorState, text = "", cursor = text.length): EditorState {
+function clonePastes(pastes: PasteRegistryState): PasteRegistryState {
+  return {
+    nextId: pastes.nextId,
+    references: pastes.references.map((reference) => ({...reference})),
+  };
+}
+
+function nextPasteId(
+  previous: PasteRegistryState,
+  restored?: PasteRegistryState,
+): number {
+  let afterReferences = 1;
+  for (const reference of restored?.references ?? []) {
+    if (!Number.isSafeInteger(reference.id) || reference.id <= 0) continue;
+    afterReferences = reference.id === Number.MAX_SAFE_INTEGER
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(afterReferences, reference.id + 1);
+  }
+  const previousNext = Number.isSafeInteger(previous.nextId) && previous.nextId > 0
+    ? previous.nextId
+    : 1;
+  const restoredNext =
+    restored && Number.isSafeInteger(restored.nextId) && restored.nextId > 0
+      ? restored.nextId
+      : 1;
+  return Math.max(previousNext, restoredNext, afterReferences);
+}
+
+function freshEditor(
+  previous: EditorState,
+  text = "",
+  cursor = text.length,
+  pastes?: PasteRegistryState,
+): EditorState {
   return {
     ...createEditorState(text, cursor),
     killRing: previous.killRing,
+    pastes: {
+      nextId: nextPasteId(previous.pastes, pastes),
+      references: pastes?.references.map((reference) => ({...reference})) ?? [],
+    },
   };
 }
 
@@ -60,11 +107,9 @@ export function useInputController(options: InputControllerOptions): InputContro
   const optionsRef = useRef(options);
   const editorRef = initialEditorRef;
   const contentWidthRef = useRef(80);
-  const historyRef = useRef<string[]>([]);
+  const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(0);
-  const draftRef = useRef("");
-  const pastesRef = useRef<Map<number, string>>(new Map());
-  const pasteSequenceRef = useRef(0);
+  const draftRef = useRef<EditorState | undefined>(undefined);
   const pendingRef = useRef<PendingPress>(undefined);
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const previousActiveRef = useRef(options.active);
@@ -86,8 +131,12 @@ export function useInputController(options: InputControllerOptions): InputContro
   }, []);
 
   const replaceEditor = useCallback(
-    (text = "", cursor = text.length) => {
-      publish(freshEditor(editorRef.current, text, cursor));
+    (
+      text = "",
+      cursor = text.length,
+      pastes?: PasteRegistryState,
+    ) => {
+      publish(freshEditor(editorRef.current, text, cursor, pastes));
     },
     [publish],
   );
@@ -101,22 +150,22 @@ export function useInputController(options: InputControllerOptions): InputContro
     [publish],
   );
 
-  const expandPastes = useCallback(
-    (text: string) =>
-      text.replace(PASTE_MARKER, (marker, id) => pastesRef.current.get(Number(id)) ?? marker),
-    [],
-  );
-
   const submit = useCallback(() => {
-    const submitted = editorRef.current.buffer.text.trim();
-    if (!submitted) return;
+    const submitted = prepareEditorSubmission(editorRef.current);
+    if (!submitted.display) return;
 
-    historyRef.current.push(submitted);
+    historyRef.current.push({
+      display: submitted.display,
+      pastes: clonePastes(submitted.pastes),
+    });
     historyIndexRef.current = historyRef.current.length;
-    draftRef.current = "";
+    draftRef.current = undefined;
     replaceEditor();
-    optionsRef.current.onSubmit(submitted, expandPastes(submitted));
-  }, [expandPastes, replaceEditor]);
+    optionsRef.current.onSubmit(
+      submitted.display,
+      expandPasteReferences(submitted.display, submitted.pastes.references),
+    );
+  }, [replaceEditor]);
 
   const armPending = useCallback(
     (
@@ -193,16 +242,34 @@ export function useInputController(options: InputControllerOptions): InputContro
       if (direction === "up") {
         if (history.length === 0 || historyIndexRef.current === 0) return false;
         if (historyIndexRef.current === history.length) {
-          draftRef.current = editorRef.current.buffer.text;
+          draftRef.current = editorRef.current;
         }
-        const recalled = history[--historyIndexRef.current];
-        replaceEditor(recalled);
+        const recalled = history[--historyIndexRef.current]!;
+        replaceEditor(
+          recalled.display,
+          recalled.display.length,
+          recalled.pastes,
+        );
         return true;
       }
 
       if (historyIndexRef.current >= history.length) return false;
       const index = ++historyIndexRef.current;
-      replaceEditor(index === history.length ? draftRef.current : history[index]);
+      if (index === history.length) {
+        const draft = draftRef.current;
+        replaceEditor(
+          draft?.buffer.text,
+          draft?.buffer.cursor,
+          draft?.pastes,
+        );
+      } else {
+        const recalled = history[index]!;
+        replaceEditor(
+          recalled.display,
+          recalled.display.length,
+          recalled.pastes,
+        );
+      }
       return true;
     },
     [replaceEditor],
@@ -212,7 +279,10 @@ export function useInputController(options: InputControllerOptions): InputContro
     (stroke: Keystroke): boolean => {
       if (!optionsRef.current.active) return false;
 
-      const fusedReturn = stroke.input.match(/^([^\r\n]+)\r$/);
+      const unmodified = !stroke.ctrl && !stroke.meta && !stroke.shift;
+      const fusedReturn = unmodified
+        ? stroke.input.match(/^([^\r\n]+)\r$/)
+        : null;
       if (fusedReturn) {
         clearPending();
         const text = fusedReturn[1]!;
@@ -228,6 +298,20 @@ export function useInputController(options: InputControllerOptions): InputContro
         return true;
       }
 
+      if (
+        unmodified &&
+        stroke.input.length > 1 &&
+        (/\r|\n/.test(stroke.input) || stroke.input.length > 800)
+      ) {
+        clearPending();
+        dispatch({
+          type: "paste",
+          text: stroke.input,
+          now: (optionsRef.current.now ?? monotonicNow)(),
+        });
+        return true;
+      }
+
       if (stroke.name === "escape") {
         if (!editorRef.current.buffer.text) {
           clearPending();
@@ -238,13 +322,17 @@ export function useInputController(options: InputControllerOptions): InputContro
           "Esc again to clear",
           () => undefined,
           () => {
-            const draft = editorRef.current.buffer.text;
-            if (draft.trim()) {
-              historyRef.current.push(draft);
-              optionsRef.current.onHistoryEntry?.(draft);
+            const draft = editorRef.current;
+            const display = draft.buffer.text;
+            if (display.trim()) {
+              historyRef.current.push({
+                display,
+                pastes: clonePastes(draft.pastes),
+              });
+              optionsRef.current.onHistoryEntry?.(display);
             }
             historyIndexRef.current = historyRef.current.length;
-            draftRef.current = "";
+            draftRef.current = undefined;
             replaceEditor();
           },
         );
@@ -279,15 +367,6 @@ export function useInputController(options: InputControllerOptions): InputContro
         return true;
       }
 
-      if (stroke.name === "text" && /[\r\n]/.test(stroke.input)) {
-        const full = stroke.input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const lines = full.replace(/\n+$/, "").split("\n").length;
-        const id = ++pasteSequenceRef.current;
-        pastesRef.current.set(id, full);
-        dispatch({type: "insert", text: `[粘贴 #${id} · ${lines} 行]`, now});
-        return true;
-      }
-
       const action = editorActionForKeystroke(stroke, contentWidthRef.current, now);
       if (!action) return false;
 
@@ -304,6 +383,19 @@ export function useInputController(options: InputControllerOptions): InputContro
     [armPending, clearPending, dispatch, recallHistory, replaceEditor, submit],
   );
 
+  const handlePaste = useCallback(
+    (text: string) => {
+      if (!optionsRef.current.active) return;
+      clearPending();
+      dispatch({
+        type: "paste",
+        text,
+        now: (optionsRef.current.now ?? monotonicNow)(),
+      });
+    },
+    [clearPending, dispatch],
+  );
+
   const setContentWidth = useCallback((width: number) => {
     contentWidthRef.current = Math.max(
       2,
@@ -315,6 +407,7 @@ export function useInputController(options: InputControllerOptions): InputContro
     view: {...snapshot, active: options.active, footer},
     handleGlobalKey,
     handleEditorKey,
+    handlePaste,
     setContentWidth,
   };
 }

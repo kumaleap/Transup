@@ -12,7 +12,7 @@
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import {Box, Static, Text, useApp, useInput} from "./runtime/index.js";
+import {Box, Static, Text, useApp, useInput, usePaste} from "./runtime/index.js";
 import {
   AgentEngine,
   SessionStore,
@@ -266,6 +266,10 @@ export function App(props: AppProps) {
       permission: handlePermissionKey,
       editor: inputController.handleEditorKey,
     });
+  });
+
+  usePaste(inputController.handlePaste, {
+    isActive: !running && !permission,
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────

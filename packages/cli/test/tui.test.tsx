@@ -180,22 +180,56 @@ describe("TUI", () => {
     unmount();
   });
 
-  it("多行粘贴折叠成占位符：输入框不刷屏、记录区显示占位符、模型收到全文", async () => {
+  it("folds official bracketed paste and submits its expanded content synchronously", async () => {
     const provider = new MockProvider([{ content: "收到" }]);
     const { stdin, lastFrame, unmount } = render(makeApp(provider));
     await flush();
-    // Ink 把整段粘贴作为单次 input 传入
-    stdin.write("行1\n行2\n行3");
-    await flush();
-    const framed = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(framed).toContain("[粘贴 #1 · 3 行]");
-    expect(framed).not.toContain("行2"); // 原文不刷进输入框
+
+    stdin.write("\x1b[200~e\u0301\n行2\n行3\x1b[201~");
     stdin.write("\r");
-    await flush(400);
+
+    await vi.waitFor(
+      () => expect(provider.lastUserContent).toBe("é\n行2\n行3"),
+      {timeout: 2000},
+    );
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(done).toContain("[粘贴 #1 · 3 行]"); // 记录区也是占位符
-    expect(provider.lastUserContent).toContain("行1\n行2\n行3"); // 模型收到还原后的全文
+    expect(done).toContain("[Pasted text #1 +2 lines]");
+    expect(done).not.toContain("行2");
     unmount();
+  });
+
+  it("keeps a plain multi-character single-line chunk inline", async () => {
+    const provider = new MockProvider([{content: "收到"}]);
+    const {stdin, lastFrame, unmount} = render(makeApp(provider));
+    await flush();
+
+    stdin.write("单行批量");
+    stdin.write("\r");
+
+    await vi.waitFor(
+      () => expect(provider.lastUserContent).toBe("单行批量"),
+      {timeout: 2000},
+    );
+    const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(done).toContain("单行批量");
+    expect(done).not.toContain("[Pasted text");
+    unmount();
+  });
+
+  it("folds an oversized single-line fallback chunk in the controller", async () => {
+    const harness = renderController(() => 10);
+    const content = "x".repeat(801);
+
+    harness.controller.handleEditorKey(stroke(content));
+    await flush();
+    expect(harness.controller.view.value).toBe("[Pasted text #1 +0 lines]");
+
+    harness.controller.handleEditorKey(stroke("", {return: true}));
+    expect(harness.onSubmit).toHaveBeenCalledWith(
+      "[Pasted text #1 +0 lines]",
+      content,
+    );
+    harness.unmount();
   });
 
   it("按字素移动并删除中日韩字符和带肤色 emoji", async () => {
@@ -454,7 +488,10 @@ describe("TUI", () => {
     stdin.write("测试一下");
     await flush();
     stdin.write("\r");
-    await flush(400);
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("你好，这是回复"),
+      {timeout: 3000},
+    );
     const frame = lastFrame()!;
     expect(frame).toContain("测试一下");
     expect(frame).toContain("你好，这是回复");
@@ -482,11 +519,17 @@ describe("TUI", () => {
     await flush();
     stdin.write("写个文件");
     stdin.write("\r");
-    await flush(400);
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("write_file"),
+      {timeout: 3000},
+    );
     expect(lastFrame()).toContain("write_file");
     expect(lastFrame()).toContain("允许吗?");
     stdin.write("y");
-    await flush(600);
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("写完了"),
+      {timeout: 3000},
+    );
     expect(lastFrame()).toContain("写完了");
     expect(readFileSync(target, "utf-8")).toBe("hi");
     unmount();
@@ -569,7 +612,10 @@ describe("TUI", () => {
     await flush();
     stdin.write("hi");
     stdin.write("\r");
-    await flush(250); // 此刻引擎还挂在 SlowProvider 里
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("↑1.2k"),
+      {timeout: 3000},
+    );
     const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(frame).toMatch(/Thinking|Responding/); // 英文状态词
     expect(frame).toMatch(/\d+s ·/); // 执行时长

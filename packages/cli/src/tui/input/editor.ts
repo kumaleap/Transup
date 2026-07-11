@@ -1,4 +1,9 @@
 import {measureText} from "./measured-text.js";
+import {
+  insertPaste,
+  transformPasteReferences,
+  type PasteRegistryState,
+} from "./paste-registry.js";
 import {TextBuffer} from "./text-buffer.js";
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, {granularity: "grapheme"});
@@ -9,6 +14,7 @@ const INSERT_GROUP_WINDOW_MS = 1000;
 
 export type EditorAction =
   | {type: "insert"; text: string; now: number}
+  | {type: "paste"; text: string; now: number}
   | {
       type: "move";
       direction:
@@ -31,6 +37,7 @@ export type EditorAction =
 export interface EditorSnapshot {
   text: string;
   cursor: number;
+  pastes: PasteRegistryState;
   desiredColumn?: number;
   killRing: readonly string[];
   killChain?: {index: number};
@@ -39,6 +46,7 @@ export interface EditorSnapshot {
 
 export interface EditorState {
   buffer: TextBuffer;
+  pastes: PasteRegistryState;
   desiredColumn?: number;
   killRing: readonly string[];
   killChain?: {index: number};
@@ -55,6 +63,7 @@ export interface EditorResult {
 export function createEditorState(text = "", cursor = text.length): EditorState {
   return {
     buffer: TextBuffer.from(text, cursor),
+    pastes: {nextId: 1, references: []},
     killRing: [],
     undo: [],
   };
@@ -68,10 +77,18 @@ function cloneYank(yank: EditorState["yank"]): EditorState["yank"] {
   return yank ? {...yank} : undefined;
 }
 
+function clonePastes(pastes: PasteRegistryState): PasteRegistryState {
+  return {
+    nextId: pastes.nextId,
+    references: pastes.references.map((reference) => ({...reference})),
+  };
+}
+
 function snapshot(state: EditorState): EditorSnapshot {
   return {
     text: state.buffer.text,
     cursor: state.buffer.cursor,
+    pastes: clonePastes(state.pastes),
     desiredColumn: state.desiredColumn,
     killRing: [...state.killRing],
     killChain: cloneChain(state.killChain),
@@ -91,6 +108,90 @@ function isSingleGrapheme(text: string): boolean {
 
 function changed(before: TextBuffer, after: TextBuffer): boolean {
   return before.text !== after.text || before.cursor !== after.cursor;
+}
+
+function replaceRange(
+  state: EditorState,
+  start: number,
+  end: number,
+  text: string,
+  rangeMode: "grapheme" | "exact" = "grapheme",
+): {buffer: TextBuffer; pastes: PasteRegistryState} {
+  const clampExact = (offset: number) => Math.max(
+    0,
+    Math.min(
+      state.buffer.text.length,
+      Number.isFinite(offset) ? Math.trunc(offset) : 0,
+    ),
+  );
+  const first = rangeMode === "grapheme"
+    ? state.buffer.withCursor(start).cursor
+    : clampExact(start);
+  const second = rangeMode === "grapheme"
+    ? state.buffer.withCursor(end).cursor
+    : clampExact(end);
+  const rangeStart = Math.min(first, second);
+  const rangeEnd = Math.max(first, second);
+  const inserted = text.replace(/\t/g, "    ");
+  const rawText =
+    state.buffer.text.slice(0, rangeStart) +
+    inserted +
+    state.buffer.text.slice(rangeEnd);
+  const buffer = TextBuffer.from(rawText, rangeStart + inserted.length);
+  const references = transformPasteReferences(
+    state.pastes.references,
+    rangeStart,
+    rangeEnd,
+    inserted.length,
+  );
+
+  return {
+    buffer,
+    pastes: {
+      nextId: state.pastes.nextId,
+      references: references.map((reference) => ({
+        ...reference,
+        start: rawText.slice(0, reference.start).normalize("NFC").length,
+        end: rawText.slice(0, reference.end).normalize("NFC").length,
+      })),
+    },
+  };
+}
+
+export interface EditorSubmission {
+  display: string;
+  pastes: PasteRegistryState;
+}
+
+export function prepareEditorSubmission(state: EditorState): EditorSubmission {
+  let prepared = state;
+  const trailingStart = prepared.buffer.text.trimEnd().length;
+  if (trailingStart < prepared.buffer.text.length) {
+    prepared = {
+      ...prepared,
+      ...replaceRange(
+        prepared,
+        trailingStart,
+        prepared.buffer.text.length,
+        "",
+        "exact",
+      ),
+    };
+  }
+
+  const trimmedStart = prepared.buffer.text.trimStart();
+  const leadingEnd = prepared.buffer.text.length - trimmedStart.length;
+  if (leadingEnd > 0) {
+    prepared = {
+      ...prepared,
+      ...replaceRange(prepared, 0, leadingEnd, "", "exact"),
+    };
+  }
+
+  return {
+    display: prepared.buffer.text,
+    pastes: clonePastes(prepared.pastes),
+  };
 }
 
 function cleanOrdinaryAction(
@@ -213,10 +314,12 @@ function reduceKill(
     killChain = {index: 0};
   }
 
+  const replacement = replaceRange(state, range.start, range.end, "");
+
   return {
     state: {
       ...state,
-      buffer: state.buffer.replace(range.start, range.end, ""),
+      ...replacement,
       desiredColumn: undefined,
       killRing,
       killChain,
@@ -231,7 +334,13 @@ function reduceInsert(
   state: EditorState,
   action: Extract<EditorAction, {type: "insert"}>,
 ): EditorResult {
-  const buffer = state.buffer.insert(action.text);
+  const replacement = replaceRange(
+    state,
+    state.buffer.cursor,
+    state.buffer.cursor,
+    action.text,
+  );
+  const {buffer} = replacement;
   if (!changed(state.buffer, buffer)) {
     return {state: cleanOrdinaryAction(state, {desiredColumn: undefined})};
   }
@@ -248,7 +357,7 @@ function reduceInsert(
   return {
     state: {
       ...state,
-      buffer,
+      ...replacement,
       desiredColumn: undefined,
       killChain: undefined,
       yank: undefined,
@@ -258,17 +367,61 @@ function reduceInsert(
   };
 }
 
+function reducePaste(
+  state: EditorState,
+  action: Extract<EditorAction, {type: "paste"}>,
+): EditorResult {
+  const inserted = insertPaste(
+    state.buffer.text,
+    state.buffer.cursor,
+    state.pastes,
+    action.text,
+  );
+  const buffer = TextBuffer.from(inserted.display, inserted.cursor);
+  if (!changed(state.buffer, buffer)) {
+    return {state: cleanOrdinaryAction(state, {desiredColumn: undefined})};
+  }
+
+  const pastes = buffer.text === inserted.display
+    ? inserted.state
+    : {
+        nextId: inserted.state.nextId,
+        references: inserted.state.references.map((reference) => ({
+          ...reference,
+          start: inserted.display.slice(0, reference.start).normalize("NFC").length,
+          end: inserted.display.slice(0, reference.end).normalize("NFC").length,
+        })),
+      };
+
+  return {
+    state: {
+      ...state,
+      buffer,
+      pastes,
+      desiredColumn: undefined,
+      killChain: undefined,
+      yank: undefined,
+      undo: appendUndo(state),
+      insertGroup: undefined,
+    },
+  };
+}
+
 function reduceDelete(
   state: EditorState,
   action: Extract<EditorAction, {type: "delete"}>,
 ): EditorResult {
-  const buffer =
-    action.direction === "backward"
-      ? state.buffer.deleteBackward()
-      : state.buffer.deleteForward();
+  const start = action.direction === "backward"
+    ? state.buffer.moveLeft().cursor
+    : state.buffer.cursor;
+  const end = action.direction === "backward"
+    ? state.buffer.cursor
+    : state.buffer.moveRight().cursor;
+  const replacement = replaceRange(state, start, end, "");
+  const {buffer} = replacement;
   return {
     state: cleanOrdinaryAction(state, {
-      buffer,
+      ...replacement,
       desiredColumn: undefined,
       undo: changed(state.buffer, buffer) ? appendUndo(state) : state.undo,
     }),
@@ -284,11 +437,12 @@ function reduceYank(
     if (!text) return {state: cleanOrdinaryAction(state, {desiredColumn: undefined})};
 
     const start = state.buffer.cursor;
-    const buffer = state.buffer.insert(text);
+    const replacement = replaceRange(state, start, start, text);
+    const {buffer} = replacement;
     return {
       state: {
         ...state,
-        buffer,
+        ...replacement,
         desiredColumn: undefined,
         killChain: undefined,
         yank: {start, end: buffer.cursor, ringIndex: 0},
@@ -310,15 +464,17 @@ function reduceYank(
   }
 
   const ringIndex = (state.yank.ringIndex + 1) % state.killRing.length;
-  const buffer = state.buffer.replace(
+  const replacement = replaceRange(
+    state,
     state.yank.start,
     state.yank.end,
     state.killRing[ringIndex]!,
   );
+  const {buffer} = replacement;
   return {
     state: {
       ...state,
-      buffer,
+      ...replacement,
       desiredColumn: undefined,
       killChain: undefined,
       yank: {start: state.yank.start, end: buffer.cursor, ringIndex},
@@ -335,6 +491,7 @@ function reduceUndo(state: EditorState): EditorResult {
   return {
     state: {
       buffer: TextBuffer.from(previous.text, previous.cursor),
+      pastes: clonePastes(previous.pastes),
       desiredColumn: previous.desiredColumn,
       killRing: [...previous.killRing],
       killChain: undefined,
@@ -349,6 +506,8 @@ export function reduceEditor(state: EditorState, action: EditorAction): EditorRe
   switch (action.type) {
     case "insert":
       return reduceInsert(state, action);
+    case "paste":
+      return reducePaste(state, action);
     case "move":
       return reduceMove(state, action);
     case "delete":
@@ -359,10 +518,15 @@ export function reduceEditor(state: EditorState, action: EditorAction): EditorRe
     case "yank-pop":
       return reduceYank(state, action);
     case "newline": {
-      const buffer = state.buffer.insert("\n");
+      const replacement = replaceRange(
+        state,
+        state.buffer.cursor,
+        state.buffer.cursor,
+        "\n",
+      );
       return {
         state: cleanOrdinaryAction(state, {
-          buffer,
+          ...replacement,
           desiredColumn: undefined,
           undo: appendUndo(state),
         }),
