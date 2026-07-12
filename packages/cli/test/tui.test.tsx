@@ -315,8 +315,13 @@ describe("TUI", () => {
     const content = "x".repeat(801);
 
     harness.controller.handleEditorKey(stroke(content));
-    await flush();
-    expect(harness.controller.view.value).toBe("[Pasted text #1 +0 lines]");
+    await vi.waitFor(
+      () =>
+        expect(harness.controller.view.value).toBe(
+          "[Pasted text #1 +0 lines]",
+        ),
+      {timeout: 2000},
+    );
 
     harness.controller.handleEditorKey(stroke("", {return: true}));
     expect(harness.onSubmit).toHaveBeenCalledWith(

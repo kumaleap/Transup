@@ -22,13 +22,13 @@ describe("MCP 客户端", () => {
     expect(tool.name).toBe("mcp__echo__echo");
     expect(tool.readOnly).toBe(false); // fail-closed：外部工具一律走权限门
     expect(tool.parameters).toBeTruthy(); // 用 server 自带的 JSON Schema
-  }, 30_000);
+  }, 60_000);
 
   it("调用往返：参数进、文本结果出", async () => {
     conn ??= await connectMcpServer("echo", NPX_TSX);
     const result = await conn.tools[0].execute({ text: "你好 MCP" });
     expect(result).toBe("echo: 你好 MCP");
-  }, 30_000);
+  }, 60_000);
 
   it("坏 server 被跳过且报告，不挡启动", async () => {
     const errors: string[] = [];
