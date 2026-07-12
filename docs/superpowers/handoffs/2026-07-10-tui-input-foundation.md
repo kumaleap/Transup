@@ -4,10 +4,10 @@ Date: 2026-07-10
 
 Last updated: 2026-07-12
 
-Status: Tasks 1-9 implemented and verified; feature branch is ready to merge
+Status: Tasks 1-9 implemented, verified, merged, and pushed to `main`
 
-Estimated remaining agent time: final branch push and merge only; cross-process
-history hardening is separately scoped
+Estimated remaining agent time: none for this phase; cross-process history
+hardening is separately scoped
 
 ## Purpose
 
@@ -26,8 +26,8 @@ Task 9. Use this handoff and the commit history for the latest status.
 
 ## 2026-07-12 Checkpoint Update
 
-Tasks 8-9 are complete on `feature/tui-cursor-placement`. The final audit added
-two narrowly scoped test-infrastructure fixes after the Task 8 implementation:
+Tasks 8-9 are complete and merged from `feature/tui-cursor-placement` to `main`.
+The final audit added narrowly scoped test-infrastructure fixes:
 
 ```text
 eb5e1f2 feat(tui): add incremental Ctrl-R history search
@@ -38,13 +38,17 @@ ebf3a75 docs(tui): record Task 7 completion and Task 8 start
 8012943 docs(tui): record Task 8 completion
 69a11d1 fix(test): exclude local worktrees from Vitest
 95634a6 test: stabilize load-sensitive integration checks
+80c398f docs(tui): record Task 9 completion
+cba19e4 Merge branch 'feature/tui-cursor-placement'
+1a5a65c test: stabilize streaming timeout termination check
 ```
 
 Task 9 ran a clean `npm ci` under Node `26.5.0`, then passed typecheck, 30 test
 files and 330 tests, build, `transup 0.1.0` version smoke, and diff checks. The
 PTY smoke was the only skip because Windows has no compatible system `script`
 driver. Independent requirement and code reviews found no Critical or Important
-behavior defects. Linux/macOS CI must still supply the real PTY pass evidence.
+behavior defects. The same suite passed after the merge and post-merge test
+review fix. Linux/macOS CI must still supply the real PTY pass evidence.
 
 Task 6 has one explicit unresolved limitation: history writes are not lossless
 across independent OS processes. The implementation uses a module-level queue
@@ -73,16 +77,17 @@ pass, describe cross-process history as best-effort.
 
 ```text
 Repository:                git@github.com:kumaleap/Transup.git
-Feature branch:            feature/tui-cursor-placement
+Merged feature branch:     feature/tui-cursor-placement @ 80c398f
 Base commit:               b81564e97222fed32747ea79f21d1cf457a4030f
-Latest task checkpoint:    95634a6
-Checkpoint subject:        test: stabilize load-sensitive integration checks
+Merge commit:              cba19e4
+Latest main checkpoint:    1a5a65c
+Checkpoint subject:        test: stabilize streaming timeout termination check
 ```
 
-On another computer, start from `origin/main` at or after `b81564e`, then use
-the newest remote tip of `feature/tui-cursor-placement` once it has been pushed.
-The product implementation through Task 8 ends at `7f31cb1`; Task 9 audit
-corrections end at `95634a6`.
+On another computer, start from `origin/main` at or after `1a5a65c`. The product
+implementation through Task 8 ends at `7f31cb1`; the feature branch ends at
+`80c398f`, was merged in `cba19e4`, and the verified main checkpoint is
+`1a5a65c`.
 
 Task commit history through the latest checkpoint:
 
@@ -108,6 +113,9 @@ ebf3a75 docs(tui): record Task 7 completion and Task 8 start
 8012943 docs(tui): record Task 8 completion
 69a11d1 fix(test): exclude local worktrees from Vitest
 95634a6 test: stabilize load-sensitive integration checks
+80c398f docs(tui): record Task 9 completion
+cba19e4 Merge branch 'feature/tui-cursor-placement'
+1a5a65c test: stabilize streaming timeout termination check
 ```
 
 `03723cd` is an external documentation commit. Preserve it. Do not rewrite or
@@ -383,7 +391,7 @@ feat(tui): declare measured terminal cursor placement
 - Add focused coordinate tests and a bounded production-input PTY smoke test.
 - Verify bracketed-paste enable/disable and cursor-position escape output.
 
-### Task 9: Final Audit (Completed: `95634a6`)
+### Task 9: Final Audit (Completed and merged: `1a5a65c`)
 
 - Run a clean Node 26 install, typecheck, full tests, build, and packaged CLI
   smoke.
@@ -404,7 +412,7 @@ instead of rewriting history to remove it.
 ## Remaining-Time Estimate
 
 ```text
-Feature branch merge      final integration action only
+This phase                complete
 ```
 
 No planned implementation task remains in this phase. Linux/macOS PTY evidence
@@ -422,21 +430,12 @@ git status --short --branch
 
 If it has unrelated local changes or an uncertain branch state, do not
 automatically stash, reset, or force-switch it. Use a separate clone. If it is
-clean, fetch the merged base and the completed feature branch:
+clean, fetch the verified main branch:
 
 ```bash
 git fetch --prune origin
 git switch main
 git merge --ff-only origin/main
-git switch feature/tui-cursor-placement
-git merge --ff-only origin/feature/tui-cursor-placement
-```
-
-If the local feature branch does not exist, track it after the fetch:
-
-```bash
-git switch --track -c feature/tui-cursor-placement \
-  origin/feature/tui-cursor-placement
 ```
 
 Then prepare and verify the runtime:
@@ -458,9 +457,8 @@ Separate-clone path for any uncertain existing checkout:
 
 ```bash
 cd /path/to/parent
-git clone --branch feature/tui-cursor-placement \
-  git@github.com:kumaleap/Transup.git Transup-cursor-placement
-cd Transup-cursor-placement
+git clone --branch main git@github.com:kumaleap/Transup.git Transup
+cd Transup
 git status --short --branch
 ```
 
@@ -476,8 +474,8 @@ git status --porcelain
 git log --oneline --decorate -12
 ```
 
-The branch must be `feature/tui-cursor-placement`, and the working tree should
-be clean. Its base must contain `b81564e`.
+The branch must be `main` at or after `1a5a65c`, and the tracked working tree
+should be clean.
 
 ## Environment Notes
 
