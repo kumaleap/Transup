@@ -4,8 +4,8 @@
 
 **Goal:** Replace the component-local prompt input with a grapheme-safe, multiline, persistent input foundation using official Ink 7.1, project history, and incremental `Ctrl+R` search.
 
-**Execution status:** Tasks 1-8 are complete; Task 9 is next on
-`feature/tui-cursor-placement`.
+**Execution status:** Tasks 1-9 are complete on
+`feature/tui-cursor-placement`; the branch is ready to merge.
 
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
@@ -827,8 +827,8 @@ queue guarantees serialization only inside one JavaScript module realm. The
 compaction source-size check is a best-effort mitigation, not cross-process
 atomicity.
 
-This follow-up is tracked separately and does not block Task 9 unless
-cross-process losslessness becomes a release requirement for this phase.
+This follow-up is tracked separately and did not block Task 9. Reopen it only
+if cross-process losslessness becomes a release requirement for this phase.
 
 ---
 
@@ -1004,7 +1004,7 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 
 ### Task 9: Final Requirement And Commit Audit
 
-**Status:** Next.
+**Status:** Completed through verification checkpoint `95634a6`.
 
 **Files:**
 - Inspect: `docs/superpowers/specs/2026-07-10-tui-input-foundation-design.md`
@@ -1014,7 +1014,7 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 - Consumes: completed implementation and commit history.
 - Produces: fresh verification evidence and an audit suitable for Claude review.
 
-- [ ] **Step 1: Run the full completion suite under Node 26**
+- [x] **Step 1: Run the full completion suite under Node 26**
 
 ```bash
 source "$HOME/.nvm/nvm.sh"
@@ -1028,7 +1028,7 @@ node packages/cli/dist/index.js --version
 
 Expected: clean install succeeds, all test files pass with zero failed tests, typecheck/build exit zero, and packaged CLI prints its version.
 
-- [ ] **Step 2: Audit the input-hook and persistence invariants**
+- [x] **Step 2: Audit the input-hook and persistence invariants**
 
 Run:
 
@@ -1039,9 +1039,9 @@ git diff --check main...HEAD
 git status --short --branch
 ```
 
-Expected: one `useInput()` and one `usePaste()` subscription, both rooted in App/runtime integration; all required features have source and tests; no whitespace errors; the only remaining untracked path is the user's `docs/claude-code-interactions/` directory.
+Expected: one `useInput()` and one `usePaste()` subscription, both rooted in App/runtime integration; all required features have source and tests; no whitespace errors; the only remaining untracked path is the user's `.claude/` local-worktree directory.
 
-- [ ] **Step 3: Audit atomic commits**
+- [x] **Step 3: Audit atomic commits**
 
 Run:
 
@@ -1052,6 +1052,19 @@ git diff --stat main...HEAD
 
 Expected: each commit has a Conventional Commit subject, contains the corresponding tests, and no commit includes `docs/claude-code-interactions/`.
 
-- [ ] **Step 4: Request an independent code review and resolve findings**
+- [x] **Step 4: Request an independent code review and resolve findings**
 
 Use `superpowers:requesting-code-review` with the design spec, this plan, `main` as base, and current `HEAD`. Apply valid findings through `superpowers:receiving-code-review`, rerun the complete suite, and use narrowly scoped `fix(tui): ...` commits for any corrections.
+
+Completion evidence on 2026-07-12 under Node `26.5.0`:
+
+- `npm ci`, typecheck, build, and packaged CLI version smoke passed.
+- The standard suite passed 30 files and 330 tests; the real PTY smoke was the
+  only skip because Windows has no compatible system `script` driver.
+- Source audit confirmed exactly one production `useInput()` and one
+  production `usePaste()`, both in `App.tsx`.
+- Independent requirement and code reviews found no Critical or Important
+  behavior defects.
+- `69a11d1` excludes untracked `.claude` worktrees from Vitest discovery, and
+  `95634a6` replaces a fixed render delay with a bounded condition wait while
+  allowing process-heavy MCP checks a 60-second test bound.

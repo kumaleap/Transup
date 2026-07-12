@@ -4,10 +4,10 @@ Date: 2026-07-10
 
 Last updated: 2026-07-12
 
-Status: Tasks 1-8 implemented, verified, and pushed; Task 9 remains
+Status: Tasks 1-9 implemented and verified; feature branch is ready to merge
 
-Estimated remaining agent time: 0.5-1.5 hours for Task 9; cross-process history
-hardening is separately scoped
+Estimated remaining agent time: final branch push and merge only; cross-process
+history hardening is separately scoped
 
 ## Purpose
 
@@ -22,12 +22,12 @@ authoritative requirements:
 - `docs/claude-code-interactions/01-输入系统.md`
 
 Completed task checkboxes in the implementation plan are synchronized through
-Task 7. Use this handoff and the commit history for the latest status.
+Task 9. Use this handoff and the commit history for the latest status.
 
 ## 2026-07-12 Checkpoint Update
 
-Task 8 is complete in atomic commit `7f31cb1` on
-`origin/feature/tui-cursor-placement`. It builds on Task 7 and merged `main`:
+Tasks 8-9 are complete on `feature/tui-cursor-placement`. The final audit added
+two narrowly scoped test-infrastructure fixes after the Task 8 implementation:
 
 ```text
 eb5e1f2 feat(tui): add incremental Ctrl-R history search
@@ -35,13 +35,16 @@ eb5e1f2 feat(tui): add incremental Ctrl-R history search
 b81564e Merge branch 'feature/tui-input-foundation'
 ebf3a75 docs(tui): record Task 7 completion and Task 8 start
 7f31cb1 feat(tui): declare measured terminal cursor placement
+8012943 docs(tui): record Task 8 completion
+69a11d1 fix(test): exclude local worktrees from Vitest
+95634a6 test: stabilize load-sensitive integration checks
 ```
 
-Task 8 verification under Node `26.5.0` passed 59 focused tests, with the PTY
-smoke explicitly skipped on Windows because the system `script` driver is not
-available. The full repository passed 30 files and 330 tests with that one
-platform skip, plus typecheck, build, `transup 0.1.0` version smoke, and diff
-checks. Linux/macOS CI must supply the real PTY pass evidence. Start Task 9 next.
+Task 9 ran a clean `npm ci` under Node `26.5.0`, then passed typecheck, 30 test
+files and 330 tests, build, `transup 0.1.0` version smoke, and diff checks. The
+PTY smoke was the only skip because Windows has no compatible system `script`
+driver. Independent requirement and code reviews found no Critical or Important
+behavior defects. Linux/macOS CI must still supply the real PTY pass evidence.
 
 Task 6 has one explicit unresolved limitation: history writes are not lossless
 across independent OS processes. The implementation uses a module-level queue
@@ -72,13 +75,14 @@ pass, describe cross-process history as best-effort.
 Repository:                git@github.com:kumaleap/Transup.git
 Feature branch:            feature/tui-cursor-placement
 Base commit:               b81564e97222fed32747ea79f21d1cf457a4030f
-Latest task checkpoint:    7f31cb1
-Checkpoint subject:        feat(tui): declare measured terminal cursor placement
+Latest task checkpoint:    95634a6
+Checkpoint subject:        test: stabilize load-sensitive integration checks
 ```
 
 On another computer, start from `origin/main` at or after `b81564e`, then use
 the newest remote tip of `feature/tui-cursor-placement` once it has been pushed.
-The product implementation through Task 8 ends at `7f31cb1`.
+The product implementation through Task 8 ends at `7f31cb1`; Task 9 audit
+corrections end at `95634a6`.
 
 Task commit history through the latest checkpoint:
 
@@ -101,6 +105,9 @@ b2479b2 fix(tui): complete readline review fixes
 eb5e1f2 feat(tui): add incremental Ctrl-R history search
 ebf3a75 docs(tui): record Task 7 completion and Task 8 start
 7f31cb1 feat(tui): declare measured terminal cursor placement
+8012943 docs(tui): record Task 8 completion
+69a11d1 fix(test): exclude local worktrees from Vitest
+95634a6 test: stabilize load-sensitive integration checks
 ```
 
 `03723cd` is an external documentation commit. Preserve it. Do not rewrite or
@@ -126,8 +133,7 @@ drop it while reorganizing the implementation commits.
 
 ## Completed Work
 
-Tasks 1-8 have complete implementation and verification evidence. Task 9 is
-the active final audit.
+Tasks 1-9 have complete implementation, verification, and review evidence.
 
 ### Task 1: Runtime Baseline
 
@@ -377,7 +383,7 @@ feat(tui): declare measured terminal cursor placement
 - Add focused coordinate tests and a bounded production-input PTY smoke test.
 - Verify bracketed-paste enable/disable and cursor-position escape output.
 
-### Task 9: Final Audit (Next)
+### Task 9: Final Audit (Completed: `95634a6`)
 
 - Run a clean Node 26 install, typecheck, full tests, build, and packaged CLI
   smoke.
@@ -398,11 +404,12 @@ instead of rewriting history to remove it.
 ## Remaining-Time Estimate
 
 ```text
-Task 9 final audit        0.5-1.5 h
+Feature branch merge      final integration action only
 ```
 
-The reliable remaining planning range is 0.5-1.5 hours for Task 9. Linux/macOS
-PTY evidence is the main outstanding platform check.
+No planned implementation task remains in this phase. Linux/macOS PTY evidence
+is the outstanding platform check, and cross-process history remains separately
+scoped.
 
 ## Resume On Another Computer
 
@@ -415,7 +422,7 @@ git status --short --branch
 
 If it has unrelated local changes or an uncertain branch state, do not
 automatically stash, reset, or force-switch it. Use a separate clone. If it is
-clean, fetch the merged base and the Task 8 branch:
+clean, fetch the merged base and the completed feature branch:
 
 ```bash
 git fetch --prune origin
@@ -425,7 +432,7 @@ git switch feature/tui-cursor-placement
 git merge --ff-only origin/feature/tui-cursor-placement
 ```
 
-If the local Task 8 branch does not exist, track it after the fetch:
+If the local feature branch does not exist, track it after the fetch:
 
 ```bash
 git switch --track -c feature/tui-cursor-placement \
@@ -457,7 +464,7 @@ cd Transup-cursor-placement
 git status --short --branch
 ```
 
-Expected Node output is `v26.5.0`. The Task 8 checkpoint has 30 passing test
+Expected Node output is `v26.5.0`. The Task 9 checkpoint has 30 passing test
 files, 330 passing tests, and one platform-skipped PTY file on Windows.
 
 Before editing, confirm:
@@ -479,8 +486,9 @@ be clean. Its base must contain `b81564e`.
 - In the managed sandbox, `/etc/hosts` localhost mappings may be unavailable.
   Vitest can then fail before collection with `getaddrinfo ENOTFOUND localhost`.
   This is an environment failure, not a valid feature RED.
-- Do not change repository Vitest configuration to work around that sandbox.
-  Run the tests in the normal local shell/outside the restricted sandbox.
+- Do not change repository Vitest configuration to work around localhost DNS.
+  The checked-in configuration excludes only `.claude/**` local worktrees; run
+  DNS-affected tests in the normal local shell/outside the restricted sandbox.
 - `.superpowers/` is ignored and contains local review artifacts only.
 - `.transup/` is ignored because it will contain project-local runtime history.
 
@@ -493,12 +501,12 @@ After every agent result, inspect the diff and run the relevant verification
 from the coordinating agent. Never accept an agent's success report as test
 evidence by itself.
 
-Task 9 audits the completed paste, history, search, cursor, and PTY work.
-Parallel agents may run independent read-only requirement and commit audits.
+Task 9 audited the completed paste, history, search, cursor, and PTY work through
+independent read-only requirement, code, and commit reviews.
 
 ## Atomic Commit Rules
 
-For every remaining task:
+For any future follow-up task:
 
 1. Read the task section and generate its task brief.
 2. Write the failing tests and observe a requirement-related RED.
