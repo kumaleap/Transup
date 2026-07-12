@@ -60,6 +60,32 @@ describe("renderMarkdown", () => {
     const out = renderMarkdown("```py\nx = a ** b  # `not inline`\n```");
     expect(strip(out)).toContain("x = a ** b  # `not inline`");
   });
+
+  it("标题去掉 # 号：H1 粗体+斜体+下划线，H2 只粗体", () => {
+    const h1 = renderMarkdown("# Title");
+    expect(strip(h1)).toBe("Title");
+    expect(h1).toContain("\x1b[1m");
+    expect(h1).toContain("\x1b[3m");
+    expect(h1).toContain("\x1b[4m");
+
+    const h2 = renderMarkdown("## Sub");
+    expect(strip(h2)).toBe("Sub");
+    expect(h2).toContain("\x1b[1m");
+    expect(h2).not.toContain("\x1b[3m");
+  });
+
+  it("引用块：dim ▎ 竖条 + 斜体正文", () => {
+    const out = renderMarkdown("> quoted words");
+    expect(strip(out)).toBe("▎ quoted words");
+    expect(out).toContain("\x1b[2m▎ \x1b[0m");
+    expect(out).toContain("\x1b[3m");
+  });
+
+  it("代码块内以 # 或 > 开头的行不当标题/引用处理", () => {
+    const out = renderMarkdown("```py\n# comment\n```\n```\n> not quote\n```");
+    expect(strip(out)).toContain("# comment");
+    expect(strip(out)).toContain("> not quote");
+  });
 });
 
 describe("highlightDiffLine", () => {

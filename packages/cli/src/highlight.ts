@@ -137,7 +137,9 @@ function renderInline(line: string): string {
 /**
  * 把 markdown 风格文本渲染为 ANSI 字符串：
  * - fenced code block：边框暗色，代码按语言高亮，diff 红绿
- * - 标题（#）加粗，inline `code` 青色，**bold** 加粗
+ * - 标题去掉 # 号：H1 粗体+斜体+下划线，H2+ 粗体
+ * - 引用块：dim 的 ▎ 竖条 + 斜体正文（正文不 dim——暗色主题下几乎看不见）
+ * - inline `code` 青色，**bold** 加粗
  * 未闭合的 fence（流式输出中常见）按已开启的代码块渲染。
  */
 export function renderMarkdown(text: string): string {
@@ -168,11 +170,24 @@ export function renderMarkdown(text: string): string {
       continue;
     }
 
-    if (/^\s*#{1,6}\s/.test(line)) {
-      out.push(color.bold(renderInline(line)));
-    } else {
-      out.push(renderInline(line));
+    const heading = line.match(/^\s*(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const title = renderInline(heading[2]);
+      out.push(
+        heading[1].length === 1
+          ? color.bold(color.italic(color.underline(title)))
+          : color.bold(title),
+      );
+      continue;
     }
+
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      out.push(color.dim("▎ ") + color.italic(renderInline(quote[1])));
+      continue;
+    }
+
+    out.push(renderInline(line));
   }
   return out.join("\n");
 }

@@ -19,7 +19,7 @@
  */
 import { homedir, userInfo } from "node:os";
 import { color } from "../ui.js";
-import { paint, rampAt, gradientText } from "../theme.js";
+import { paint } from "../theme.js";
 
 export interface BannerInfo {
   version: string;
@@ -140,10 +140,10 @@ function leftColumn(info: BannerInfo, width: number): Cell[] {
     blank,
     cell(name ? `欢迎回来，${name}！` : "欢迎！", (s) => color.bold(s)),
     blank,
-    // 字标自上而下：电光青 → 霓虹紫 的垂直渐变
-    ...LOGO.map((l, i) => cell(l, rampAt(i, LOGO.length))),
+    // 字标纯品牌绿：一屏一种彩色，极简
+    ...LOGO.map((l) => cell(l, (s) => paint.primary(s))),
     blank,
-    cell(TAGLINE, (s) => gradientText(s, { bold: true })),
+    cell(TAGLINE, (s) => color.dim(s)),
     blank,
     cell(`${info.model} · ${info.providerId}`, (s) => paint.primary(s)),
     cell(shortenPath(info.cwd, width), (s) => color.dim(s)),

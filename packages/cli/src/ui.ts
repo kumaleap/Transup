@@ -7,6 +7,8 @@ const codes = {
   reset: "\x1b[0m",
   dim: "\x1b[2m",
   bold: "\x1b[1m",
+  italic: "\x1b[3m",
+  underline: "\x1b[4m",
   cyan: "\x1b[36m",
   yellow: "\x1b[33m",
   green: "\x1b[32m",
@@ -17,6 +19,8 @@ const codes = {
 export const color = {
   dim: (s: string) => `${codes.dim}${s}${codes.reset}`,
   bold: (s: string) => `${codes.bold}${s}${codes.reset}`,
+  italic: (s: string) => `${codes.italic}${s}${codes.reset}`,
+  underline: (s: string) => `${codes.underline}${s}${codes.reset}`,
   cyan: (s: string) => `${codes.cyan}${s}${codes.reset}`,
   yellow: (s: string) => `${codes.yellow}${s}${codes.reset}`,
   green: (s: string) => `${codes.green}${s}${codes.reset}`,
