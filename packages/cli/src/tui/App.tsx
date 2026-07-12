@@ -287,9 +287,16 @@ export function App(props: AppProps) {
     if (!(stroke.ctrl && stroke.input === "c")) {
       abortExitArmedRef.current = false;
     }
-    routeKeystroke(stroke, permission ? "permission" : "editor", {
+    const inputContext = permissionRef.current
+      ? "permission"
+      : inputController.isHistorySearchActive()
+        ? "history-search"
+        : "editor";
+    routeKeystroke(stroke, inputContext, {
       global: handleGlobalKey,
       permission: handlePermissionKey,
+      historySearch: (searchStroke) =>
+        submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
       editor: (editorStroke) =>
         submitPendingRef.current || inputController.handleEditorKey(editorStroke),
     });

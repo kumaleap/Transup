@@ -15,6 +15,12 @@ import {
   type HistoryEntry,
 } from "./history-store.js";
 import {
+  nextHistoryMatch,
+  startHistorySearch,
+  updateHistoryQuery,
+  type HistorySearchState,
+} from "./history-search.js";
+import {
   expandPasteReferences,
   type PasteRegistryState,
 } from "./paste-registry.js";
@@ -35,11 +41,18 @@ export interface InputViewState {
   cursor: number;
   active: boolean;
   footer?: string;
+  historySearch?: {
+    query: string;
+    match?: {start: number; end: number};
+    hasMatch: boolean;
+  };
 }
 
 export interface InputController {
   view: InputViewState;
+  isHistorySearchActive: () => boolean;
   handleGlobalKey: (stroke: Keystroke) => boolean;
+  handleHistorySearchKey: (stroke: Keystroke) => boolean;
   handleEditorKey: (stroke: Keystroke) => boolean;
   handlePaste: (text: string) => void;
   requestExit: () => void;
@@ -172,6 +185,9 @@ export function useInputController(options: InputControllerOptions): InputContro
   }
   const [snapshot, setSnapshot] = useState({value: "", cursor: 0});
   const [footer, setFooter] = useState<string>();
+  const [historySearchView, setHistorySearchView] = useState<
+    InputViewState["historySearch"]
+  >();
   const optionsRef = useRef(options);
   const editorRef = initialEditorRef;
   const pasteIdFloorRef = useRef(editorRef.current.pastes.nextId);
@@ -179,6 +195,7 @@ export function useInputController(options: InputControllerOptions): InputContro
   const historyRef = useRef<HistoryEntry[]>([]);
   const historyIndexRef = useRef(0);
   const draftRef = useRef<EditorState | undefined>(undefined);
+  const historySearchRef = useRef<HistorySearchState | undefined>(undefined);
   const pendingRef = useRef<PendingPress>(undefined);
   const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const exitTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -377,6 +394,12 @@ export function useInputController(options: InputControllerOptions): InputContro
       const allHistory = [...disk, ...session];
       const merged = allHistory.slice(-HISTORY_LIMIT);
       historyRef.current = merged;
+      if (historySearchRef.current) {
+        historySearchRef.current = {
+          ...historySearchRef.current,
+          nextIndex: merged.length - 1,
+        };
+      }
 
       if (previousIndex === session.length) {
         historyIndexRef.current = merged.length;
@@ -435,6 +458,15 @@ export function useInputController(options: InputControllerOptions): InputContro
       if (exitRequestedRef.current) return true;
       if (!optionsRef.current.active || !(stroke.ctrl && stroke.input === "c")) return false;
 
+      const search = historySearchRef.current;
+      if (search) {
+        historySearchRef.current = undefined;
+        setHistorySearchView(undefined);
+        clearPending();
+        restoreEditor(search.original);
+        return true;
+      }
+
       armPending(
         "Ctrl-C",
         "Press Ctrl-C again to exit",
@@ -447,7 +479,100 @@ export function useInputController(options: InputControllerOptions): InputContro
       );
       return true;
     },
-    [armPending, replaceEditor, requestExit],
+    [armPending, clearPending, replaceEditor, requestExit, restoreEditor],
+  );
+
+  const publishHistorySearch = useCallback(
+    (search: HistorySearchState) => {
+      historySearchRef.current = search;
+      setHistorySearchView({
+        query: search.query.text,
+        match: search.match,
+        hasMatch: search.hasMatch,
+      });
+      publish(search.candidate);
+    },
+    [publish],
+  );
+
+  const finishHistorySearch = useCallback(
+    (restoreOriginal: boolean) => {
+      const search = historySearchRef.current;
+      if (!search) return;
+      historySearchRef.current = undefined;
+      setHistorySearchView(undefined);
+      if (restoreOriginal) {
+        restoreEditor(search.original);
+      } else {
+        historyIndexRef.current = historyRef.current.length;
+        draftRef.current = undefined;
+      }
+    },
+    [restoreEditor],
+  );
+
+  const isHistorySearchActive = useCallback(
+    () => historySearchRef.current !== undefined,
+    [],
+  );
+
+  const handleHistorySearchKey = useCallback(
+    (stroke: Keystroke): boolean => {
+      if (exitRequestedRef.current || !optionsRef.current.active) return false;
+      const search = historySearchRef.current;
+      if (!search) return false;
+
+      if (stroke.ctrl && stroke.input === "r") {
+        publishHistorySearch(nextHistoryMatch(search, historyRef.current));
+        return true;
+      }
+
+      if (stroke.name === "backspace") {
+        if (!search.query.text) {
+          finishHistorySearch(true);
+        } else {
+          publishHistorySearch(
+            updateHistoryQuery(
+              search,
+              historyRef.current,
+              search.query.deleteBackward(),
+            ),
+          );
+        }
+        return true;
+      }
+
+      if (stroke.name === "escape" || stroke.name === "tab") {
+        finishHistorySearch(false);
+        return true;
+      }
+
+      if (stroke.name === "return" && !stroke.shift && !stroke.meta) {
+        finishHistorySearch(false);
+        submit();
+        return true;
+      }
+
+      if (
+        stroke.name === "text" &&
+        stroke.input &&
+        !stroke.ctrl &&
+        !stroke.meta &&
+        !/[\r\n]/.test(stroke.input)
+      ) {
+        publishHistorySearch(
+          updateHistoryQuery(
+            search,
+            historyRef.current,
+            search.query.insert(stroke.input),
+          ),
+        );
+        return true;
+      }
+
+      return false;
+    },
+    [finishHistorySearch, publishHistorySearch, submit],
   );
 
   const recallHistory = useCallback(
@@ -488,6 +613,14 @@ export function useInputController(options: InputControllerOptions): InputContro
     (stroke: Keystroke): boolean => {
       if (exitRequestedRef.current) return true;
       if (!optionsRef.current.active) return false;
+
+      if (stroke.ctrl && stroke.input === "r") {
+        clearPending();
+        publishHistorySearch(
+          startHistorySearch(editorRef.current, historyRef.current),
+        );
+        return true;
+      }
 
       const unmodified = !stroke.ctrl && !stroke.meta && !stroke.shift;
       const fusedReturn = unmodified
@@ -595,6 +728,7 @@ export function useInputController(options: InputControllerOptions): InputContro
       clearPending,
       dispatch,
       persistHistory,
+      publishHistorySearch,
       recallHistory,
       rememberHistory,
       replaceEditor,
@@ -605,7 +739,11 @@ export function useInputController(options: InputControllerOptions): InputContro
 
   const handlePaste = useCallback(
     (text: string) => {
-      if (exitRequestedRef.current || !optionsRef.current.active) return;
+      if (
+        exitRequestedRef.current ||
+        !optionsRef.current.active ||
+        historySearchRef.current
+      ) return;
       clearPending();
       dispatch({
         type: "paste",
@@ -624,8 +762,15 @@ export function useInputController(options: InputControllerOptions): InputContro
   }, []);
 
   return {
-    view: {...snapshot, active: options.active, footer},
+    view: {
+      ...snapshot,
+      active: options.active,
+      footer,
+      historySearch: historySearchView,
+    },
+    isHistorySearchActive,
     handleGlobalKey,
+    handleHistorySearchKey,
     handleEditorKey,
     handlePaste,
     requestExit,

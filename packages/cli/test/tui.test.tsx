@@ -16,7 +16,8 @@ import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import { App } from "../src/tui/App.js";
-import {TextInput} from "../src/tui/TextInput.js";
+import {RowText, TextInput} from "../src/tui/TextInput.js";
+import {T} from "../src/theme.js";
 import {
   normalizeKeystroke,
   type InputKey,
@@ -31,6 +32,7 @@ import {
   type HistoryEntry,
 } from "../src/tui/input/history-store.js";
 import {pasteMarker} from "../src/tui/input/paste-registry.js";
+import {TextBuffer} from "../src/tui/input/text-buffer.js";
 
 /** 每轮回一段文本；可选带工具调用。usage 挂在 message_done 上。 */
 class MockProvider implements Provider {
@@ -239,6 +241,18 @@ function renderController(
     onHistoryEntry,
     onHistoryError,
   };
+}
+
+function routeControllerKey(
+  controller: InputController,
+  input: string,
+  patch: Partial<InputKey> = {},
+): boolean {
+  const key = stroke(input, patch);
+  if (controller.handleGlobalKey(key)) return true;
+  return controller.isHistorySearchActive()
+    ? controller.handleHistorySearchKey(key)
+    : controller.handleEditorKey(key);
 }
 
 describe("TUI", () => {
@@ -684,6 +698,121 @@ describe("TUI", () => {
     harness.unmount();
   });
 
+  it.each([
+    ["Escape", {escape: true}],
+    ["Tab", {tab: true}],
+  ] as const)(
+    "%s accepts an incremental history match without submitting it",
+    async (_label, acceptKey) => {
+      const harness = renderController(() => 10);
+      for (const prompt of [
+        "target old",
+        "target duplicate",
+        "unrelated",
+        "target duplicate",
+      ]) {
+        routeControllerKey(harness.controller, prompt);
+        routeControllerKey(harness.controller, "", {return: true});
+      }
+      const submissionsBeforeSearch = harness.onSubmit.mock.calls.length;
+
+      routeControllerKey(harness.controller, "r", {ctrl: true});
+      routeControllerKey(harness.controller, "target");
+      await flush();
+      expect(harness.controller.view.value).toBe("target duplicate");
+      expect(harness.lastFrame()).toContain("search prompts: target");
+
+      routeControllerKey(harness.controller, "z");
+      await flush();
+      expect(harness.controller.view.value).toBe("target duplicate");
+      expect(harness.lastFrame()).toContain("no matching prompt: targetz");
+
+      routeControllerKey(harness.controller, "", {backspace: true});
+      routeControllerKey(harness.controller, "r", {ctrl: true});
+      await flush();
+      expect(harness.controller.view.value).toBe("target old");
+
+      routeControllerKey(harness.controller, "", acceptKey);
+      await flush();
+      expect(harness.controller.isHistorySearchActive()).toBe(false);
+      expect(harness.controller.view.value).toBe("target old");
+      expect(harness.lastFrame()).not.toContain("search prompts:");
+      expect(harness.onSubmit).toHaveBeenCalledTimes(submissionsBeforeSearch);
+
+      routeControllerKey(harness.controller, "", {return: true});
+      expect(harness.onSubmit).toHaveBeenLastCalledWith("target old", "target old");
+      harness.unmount();
+    },
+  );
+
+  it.each([
+    ["Ctrl+C", "c", {ctrl: true}],
+    ["Backspace on an empty query", "", {backspace: true}],
+  ] as const)(
+    "%s cancels search and restores the exact editor snapshot",
+    async (_label, input, cancelKey) => {
+      const harness = renderController(() => 10);
+      routeControllerKey(harness.controller, "saved prompt");
+      routeControllerKey(harness.controller, "", {return: true});
+      harness.controller.handlePaste("draft\ncontent");
+      routeControllerKey(harness.controller, "", {leftArrow: true});
+      await flush();
+      const originalValue = harness.controller.view.value;
+      const originalCursor = harness.controller.view.cursor;
+
+      routeControllerKey(harness.controller, "r", {ctrl: true});
+      expect(harness.controller.isHistorySearchActive()).toBe(true);
+      routeControllerKey(harness.controller, input, cancelKey);
+      await flush();
+
+      expect(harness.controller.isHistorySearchActive()).toBe(false);
+      expect(harness.controller.view.value).toBe(originalValue);
+      expect(harness.controller.view.cursor).toBe(originalCursor);
+      expect(harness.lastFrame()).not.toContain("Press Ctrl-C again to exit");
+      expect(harness.onExit).not.toHaveBeenCalled();
+
+      routeControllerKey(harness.controller, "", {return: true});
+      expect(harness.onSubmit).toHaveBeenLastCalledWith(
+        "[Pasted text #1 +1 lines]",
+        "draft\ncontent",
+      );
+      harness.unmount();
+    },
+  );
+
+  it("keeps an active search stable across a late history load and uses it on the next query", async () => {
+    const store = new PendingLoadHistoryStore();
+    const harness = renderController(() => 10, {historyStore: store});
+    routeControllerKey(harness.controller, "draft");
+    routeControllerKey(harness.controller, "", {leftArrow: true});
+    await flush();
+    const originalCursor = harness.controller.view.cursor;
+
+    routeControllerKey(harness.controller, "r", {ctrl: true});
+    await flush();
+    expect(harness.controller.view.value).toBe("draft");
+    expect(harness.controller.view.cursor).toBe(originalCursor);
+    expect(harness.lastFrame()).toContain("no matching prompt:");
+
+    store.completeLoad([
+      {
+        v: 1,
+        display: "loaded target",
+        pastes: [],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    await flush();
+    expect(harness.controller.view.value).toBe("draft");
+    expect(harness.controller.view.cursor).toBe(originalCursor);
+
+    routeControllerKey(harness.controller, "r", {ctrl: true});
+    await flush();
+    expect(harness.controller.view.value).toBe("loaded target");
+    expect(harness.lastFrame()).toContain("search prompts:");
+    harness.unmount();
+  });
+
   it("merges a late disk load without disturbing active session navigation", async () => {
     const store = new PendingLoadHistoryStore();
     const harness = renderController(() => 10, {historyStore: store});
@@ -854,6 +983,101 @@ describe("TUI", () => {
     unmount();
   });
 
+  it("App cancels history search before applying idle Ctrl+C exit behavior", async () => {
+    const instance = render(makeApp(new MockProvider([])));
+    await flush();
+    instance.stdin.write("draft");
+    instance.stdin.write("\x1b[D");
+    instance.stdin.write("\x12");
+    await flush();
+    expect(instance.lastFrame()).toContain("no matching prompt:");
+
+    instance.stdin.write("\x03");
+    await flush();
+    let frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("draft");
+    expect(frame).not.toContain("search prompts:");
+    expect(frame).not.toContain("no matching prompt:");
+    expect(frame).not.toContain("Press Ctrl-C again to exit");
+
+    instance.stdin.write("\x03");
+    await flush();
+    frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("Press Ctrl-C again to exit");
+    expect(frame).not.toContain("draft");
+    instance.unmount();
+  });
+
+  it("searches persisted folded paste and submits it through synchronous App routing", async () => {
+    const historyPath = newHistoryPath();
+    const content = "stored\ncontent";
+    const marker = pasteMarker(7, content);
+    writeFileSync(
+      historyPath,
+      `${JSON.stringify({
+        v: 1,
+        display: marker,
+        pastes: [{id: 7, content, start: 0, end: marker.length}],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      })}\n`,
+    );
+    const provider = new MockProvider([{content: "received"}]);
+    const instance = render(makeApp(provider, historyPath));
+    await flush();
+
+    await vi.waitFor(() => {
+      instance.stdin.write("\x1b[A");
+      expect(instance.lastFrame()).toContain(marker);
+    });
+    instance.stdin.write("\x1b[B");
+    await flush();
+
+    instance.stdin.write("\x12");
+    instance.stdin.write("Pasted");
+    instance.stdin.write("\r");
+
+    await vi.waitFor(
+      () => expect(provider.lastUserContent).toBe(content),
+      {timeout: 2000},
+    );
+    expect(instance.lastFrame()).toContain(marker);
+    instance.unmount();
+  });
+
+  it("accepts a search with Tab and returns to editor routing in the same stdin batch", async () => {
+    const historyPath = newHistoryPath();
+    writeFileSync(
+      historyPath,
+      `${JSON.stringify({
+        v: 1,
+        display: "stored choice",
+        pastes: [],
+        timestamp: "2026-01-01T00:00:00.000Z",
+      })}\n`,
+    );
+    const provider = new MockProvider([{content: "received"}]);
+    const instance = render(makeApp(provider, historyPath));
+    await flush();
+
+    await vi.waitFor(() => {
+      instance.stdin.write("\x1b[A");
+      expect(instance.lastFrame()).toContain("stored choice");
+    });
+    instance.stdin.write("\x1b[B");
+    await flush();
+
+    instance.stdin.write("\x12");
+    instance.stdin.write("\t");
+    instance.stdin.write("!");
+    instance.stdin.write("\r");
+
+    await vi.waitFor(
+      () => expect(provider.lastUserContent).toBe("stored choice!"),
+      {timeout: 2000},
+    );
+    instance.unmount();
+  });
+
   it("lets a second Ctrl+C exit after an aborted turn has settled", async () => {
     const instance = render(makeApp(new SlowProvider()));
     await flush();
@@ -941,6 +1165,29 @@ describe("TUI", () => {
     unmount();
   });
 
+  it("colors only the history match and omits the inverse cursor while searching", () => {
+    const value = "before target after";
+    const start = value.indexOf("target");
+    const row = {start: 0, end: value.length, width: value.length, hardBreak: false};
+    const element = RowText({
+      buffer: TextBuffer.from(value, start + "target".length),
+      row,
+      showCursor: false,
+      match: {start, end: start + "target".length},
+    });
+    const children = React.Children.toArray(element.props.children);
+
+    expect(children[0]).toBe("before ");
+    const highlighted = children[1];
+    if (!React.isValidElement<{color?: string; inverse?: boolean; children?: React.ReactNode}>(highlighted)) {
+      throw new Error("history match did not render as a styled text span");
+    }
+    expect(highlighted.props.color).toBe(T.warn);
+    expect(highlighted.props.children).toBe("target");
+    expect(highlighted.props.inverse).toBeUndefined();
+    expect(children[2]).toBe(" after");
+  });
+
   it("accepts only the first prompt from one synchronous stdin batch", async () => {
     const provider = new SlowProvider();
     const instance = render(makeApp(provider));
@@ -1019,6 +1266,12 @@ describe("TUI", () => {
     stdin.write(pastedDraft);
     stdin.write("\r");
     await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 2000});
+
+    stdin.write("\x12");
+    await flush();
+    expect(lastFrame()).toContain("允许吗?");
+    expect(lastFrame()).not.toContain("search prompts:");
+    expect(lastFrame()).not.toContain("no matching prompt:");
 
     stdin.write("y");
     await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 2000});
