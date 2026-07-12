@@ -12,7 +12,16 @@
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import {Box, Static, Text, useApp, useInput, usePaste} from "./runtime/index.js";
+import {
+  Box,
+  Static,
+  Text,
+  useApp,
+  useBoxMetrics,
+  useInput,
+  usePaste,
+  type DOMElement,
+} from "./runtime/index.js";
 import {
   AgentEngine,
   SessionStore,
@@ -101,6 +110,12 @@ const TAIL_LINES = 6;
 
 export function App(props: AppProps) {
   const { exit } = useApp();
+  const appRootRef = useRef<DOMElement | null>(null);
+  const inputAreaRef = useRef<DOMElement | null>(null);
+  const inputBorderRef = useRef<DOMElement | null>(null);
+  const appRootMetrics = useBoxMetrics(appRootRef);
+  const inputAreaMetrics = useBoxMetrics(inputAreaRef);
+  const inputBorderMetrics = useBoxMetrics(inputBorderRef);
 
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
@@ -556,7 +571,7 @@ export function App(props: AppProps) {
   const meter = `${elapsedSec}s · ↑${fmtTokens(liveUsage.current.input)} ↓${fmtTokens(liveUsage.current.output)}`;
 
   return (
-    <Box flexDirection="column">
+    <Box ref={appRootRef} flexDirection="column">
       <Static items={items}>
         {(item) => <TranscriptItemView key={item.id} item={item} />}
       </Static>
@@ -590,14 +605,24 @@ export function App(props: AppProps) {
         </Box>
       )}
 
-      <Box flexDirection="column" marginTop={1}>
+      <Box ref={inputAreaRef} flexDirection="column" marginTop={1}>
         {permission ? (
           <PermissionDialog request={permission} />
         ) : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
-          <Box borderStyle="round" borderColor={T.border} paddingX={1}>
+          <Box
+            ref={inputBorderRef}
+            borderStyle="round"
+            borderColor={T.border}
+            paddingX={1}
+          >
             <TextInput
               view={inputController.view}
+              ancestorMetrics={{
+                appRoot: appRootMetrics,
+                inputArea: inputAreaMetrics,
+                border: inputBorderMetrics,
+              }}
               onContentWidthChange={inputController.setContentWidth}
             />
           </Box>

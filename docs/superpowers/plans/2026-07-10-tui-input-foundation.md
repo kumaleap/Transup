@@ -4,13 +4,16 @@
 
 **Goal:** Replace the component-local prompt input with a grapheme-safe, multiline, persistent input foundation using official Ink 7.1, project history, and incremental `Ctrl+R` search.
 
+**Execution status:** Tasks 1-9 are complete on
+`feature/tui-cursor-placement`; the branch is ready to merge.
+
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
 **Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, string-width 8.2.2, Vitest 3.2.7, ink-testing-library 4.0.0.
 
 ## Global Constraints
 
-- Work only on branch `feature/tui-input-foundation`.
+- Work on branch `feature/tui-cursor-placement` for Tasks 8-9.
 - Use official Ink 7.1.0; do not copy, translate, or derive Claude's private renderer.
 - Pin `.nvmrc` to `26.5.0`; root and CLI engines require Node `>=26`.
 - Keep React at stable `19.2.7`, `@types/react` at `19.2.17`, and TypeScript at `6.0.3`.
@@ -824,12 +827,14 @@ queue guarantees serialization only inside one JavaScript module realm. The
 compaction source-size check is a best-effort mitigation, not cross-process
 atomicity.
 
-This follow-up is tracked separately and does not block Tasks 7-9 unless
-cross-process losslessness becomes a release requirement for this phase.
+This follow-up is tracked separately and did not block Task 9. Reopen it only
+if cross-process losslessness becomes a release requirement for this phase.
 
 ---
 
 ### Task 7: Add Incremental Ctrl-R Search
+
+**Status:** Completed in `eb5e1f2` and merged to `main` in `b81564e`.
 
 **Files:**
 - Create: `packages/cli/src/tui/input/history-search.ts`
@@ -843,7 +848,7 @@ cross-process losslessness becomes a release requirement for this phase.
 - Consumes: latest-100 in-memory `HistoryEntry[]`, editor snapshot, and history-search context routing.
 - Produces: pure `HistorySearchState`, candidate/match range, accept/cancel/submit effects, and search footer/highlight.
 
-- [ ] **Step 1: Write failing search-state tests**
+- [x] **Step 1: Write failing search-state tests**
 
 Use this API:
 
@@ -875,17 +880,17 @@ export function nextHistoryMatch(
 
 Test that empty query immediately selects newest, matching is case-sensitive and uses the last occurrence, repeated `Ctrl+R` skips duplicate display values and moves older, query edit resets at newest, no-match keeps last candidate, never-matched keeps original, Chinese/multiline entries match, and paste references follow the candidate.
 
-- [ ] **Step 2: Run search tests and confirm the red state**
+- [x] **Step 2: Run search tests and confirm the red state**
 
 Run: `npx vitest run packages/cli/test/tui-input/history-search.test.ts`
 
 Expected: module resolution fails because `history-search.ts` does not exist.
 
-- [ ] **Step 3: Implement the pure state transitions**
+- [x] **Step 3: Implement the pure state transitions**
 
 Search from `history.length - 1` downward. For each unseen display containing the query, clone an editor candidate from the history entry, set the cursor to `lastIndexOf(query) + query.length`, and remember the span. On no match, set `hasMatch=false` without changing `candidate`. Query changes reset `seen` and `nextIndex`.
 
-- [ ] **Step 4: Integrate the search context**
+- [x] **Step 4: Integrate the search context**
 
 The controller enters search on `Ctrl+R` only while idle. While active:
 
@@ -900,11 +905,11 @@ Ctrl+C          restore exact original snapshot
 
 Mirror context state in a ref before returning from each handler so a following event in the same stdin batch uses the new context. `App` passes `history-search` to `routeKeystroke` while active.
 
-- [ ] **Step 5: Render and test search feedback**
+- [x] **Step 5: Render and test search feedback**
 
 `TextInput` renders `search prompts: <query>` or `no matching prompt: <query>` below the input. Hide the normal inverse cursor during search and color only the matched span with `T.warn`. Add App integration cases for enter, escape, tab, cancel, repeat, no-match, persisted-history search, and permission/global priority.
 
-- [ ] **Step 6: Verify and commit incremental search**
+- [x] **Step 6: Verify and commit incremental search**
 
 Run:
 
@@ -924,6 +929,8 @@ git commit -m "feat(tui): add incremental Ctrl-R history search"
 
 ### Task 8: Declare Measured Terminal Cursor Placement
 
+**Status:** Completed in `7f31cb1` on `feature/tui-cursor-placement`.
+
 **Files:**
 - Create: `packages/cli/test/fixtures/pty-input-app.tsx`
 - Create: `packages/cli/test/tui-input/text-input.test.tsx`
@@ -936,7 +943,7 @@ git commit -m "feat(tui): add incremental Ctrl-R history search"
 - Consumes: `MeasuredText.cursor`, Ink 7.1 `useBoxMetrics`, `useCursor`, `useStdout`, and ancestor Box refs.
 - Produces: resize-aware wrap width, output-root-relative cursor coordinates, IME cursor declaration, narrow-terminal fallback, and PTY evidence.
 
-- [ ] **Step 1: Write failing component coordinate tests**
+- [x] **Step 1: Write failing component coordinate tests**
 
 Render a focused `TextInput` under nested boxes with deterministic widths. Assert first render uses injected/root fallback width, measured resize changes wrapping, search/inactive/narrow states hide the cursor, and the calculated point equals:
 
@@ -947,13 +954,13 @@ const y = root.top + inputArea.top + border.top + textInput.top + cursor.row;
 
 Mock only the adapter exports, not Ink internals, so the test freezes Transup's coordinate calculation.
 
-- [ ] **Step 2: Run the component test and confirm the red state**
+- [x] **Step 2: Run the component test and confirm the red state**
 
 Run: `npx vitest run packages/cli/test/tui-input/text-input.test.tsx`
 
 Expected: assertions fail because `TextInput` does not yet declare a terminal cursor or consume ancestor offsets.
 
-- [ ] **Step 3: Implement measured width and cursor declaration**
+- [x] **Step 3: Implement measured width and cursor declaration**
 
 Put refs on the App root, input-area box, border box, and TextInput root. Call `useBoxMetrics` for each tracked box and pass ancestor metrics into `TextInput`. Use `hasMeasured ? textInput.width : stdout.columns - 4` as the root-width source, then subtract prompt width two and cursor reserve one for wrapping.
 
@@ -965,13 +972,13 @@ setCursorPosition(showCursor ? {x: absoluteX, y: absoluteY} : undefined);
 
 Never call it from a passive effect. When any required ancestor is unmeasured, use the known fallback root origin only if the App root is at `(0, 0)`; otherwise hide the terminal cursor until the next measured render.
 
-- [ ] **Step 4: Add bracketed-paste and cursor PTY smoke**
+- [x] **Step 4: Add bracketed-paste and cursor PTY smoke**
 
 Create `packages/cli/test/fixtures/pty-input-app.tsx` as a self-contained Ink harness that mounts the production input controller/router/TextInput, writes `SUBMITTED:<expanded>` after submit, and requests exit after the callback. Use the system `script` command when present to launch that fixture through the workspace `tsx` binary, send bracketed paste followed by Enter, and assert the captured stream contains the folded marker, `SUBMITTED:` with full content, bracketed-paste enable/disable escapes, and a cursor-position escape. On macOS invoke `script -q /dev/null <command...>`; on Linux invoke `script -qefc "<quoted command>" /dev/null`. On hosts without a compatible `script`, mark only this test skipped with a reason string.
 
 The test must have a bounded process timeout and terminate the child in cleanup so it cannot leave a running TUI session.
 
-- [ ] **Step 5: Verify on Node 26 and commit cursor placement**
+- [x] **Step 5: Verify on Node 26 and commit cursor placement**
 
 Run:
 
@@ -997,6 +1004,8 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 
 ### Task 9: Final Requirement And Commit Audit
 
+**Status:** Completed through verification checkpoint `95634a6`.
+
 **Files:**
 - Inspect: `docs/superpowers/specs/2026-07-10-tui-input-foundation-design.md`
 - Inspect: all files changed since `60ed32c`
@@ -1005,7 +1014,7 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 - Consumes: completed implementation and commit history.
 - Produces: fresh verification evidence and an audit suitable for Claude review.
 
-- [ ] **Step 1: Run the full completion suite under Node 26**
+- [x] **Step 1: Run the full completion suite under Node 26**
 
 ```bash
 source "$HOME/.nvm/nvm.sh"
@@ -1019,7 +1028,7 @@ node packages/cli/dist/index.js --version
 
 Expected: clean install succeeds, all test files pass with zero failed tests, typecheck/build exit zero, and packaged CLI prints its version.
 
-- [ ] **Step 2: Audit the input-hook and persistence invariants**
+- [x] **Step 2: Audit the input-hook and persistence invariants**
 
 Run:
 
@@ -1030,9 +1039,9 @@ git diff --check main...HEAD
 git status --short --branch
 ```
 
-Expected: one `useInput()` and one `usePaste()` subscription, both rooted in App/runtime integration; all required features have source and tests; no whitespace errors; the only remaining untracked path is the user's `docs/claude-code-interactions/` directory.
+Expected: one `useInput()` and one `usePaste()` subscription, both rooted in App/runtime integration; all required features have source and tests; no whitespace errors; the only remaining untracked path is the user's `.claude/` local-worktree directory.
 
-- [ ] **Step 3: Audit atomic commits**
+- [x] **Step 3: Audit atomic commits**
 
 Run:
 
@@ -1043,6 +1052,19 @@ git diff --stat main...HEAD
 
 Expected: each commit has a Conventional Commit subject, contains the corresponding tests, and no commit includes `docs/claude-code-interactions/`.
 
-- [ ] **Step 4: Request an independent code review and resolve findings**
+- [x] **Step 4: Request an independent code review and resolve findings**
 
 Use `superpowers:requesting-code-review` with the design spec, this plan, `main` as base, and current `HEAD`. Apply valid findings through `superpowers:receiving-code-review`, rerun the complete suite, and use narrowly scoped `fix(tui): ...` commits for any corrections.
+
+Completion evidence on 2026-07-12 under Node `26.5.0`:
+
+- `npm ci`, typecheck, build, and packaged CLI version smoke passed.
+- The standard suite passed 30 files and 330 tests; the real PTY smoke was the
+  only skip because Windows has no compatible system `script` driver.
+- Source audit confirmed exactly one production `useInput()` and one
+  production `usePaste()`, both in `App.tsx`.
+- Independent requirement and code reviews found no Critical or Important
+  behavior defects.
+- `69a11d1` excludes untracked `.claude` worktrees from Vitest discovery, and
+  `95634a6` replaces a fixed render delay with a bounded condition wait while
+  allowing process-heavy MCP checks a 60-second test bound.

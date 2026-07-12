@@ -18,6 +18,7 @@ import { builtinTools } from "@transup/core";
 import { App } from "../src/tui/App.js";
 import {RowText, TextInput} from "../src/tui/TextInput.js";
 import {T} from "../src/theme.js";
+import {Box} from "../src/tui/runtime/index.js";
 import {
   normalizeKeystroke,
   type InputKey,
@@ -314,8 +315,13 @@ describe("TUI", () => {
     const content = "x".repeat(801);
 
     harness.controller.handleEditorKey(stroke(content));
-    await flush();
-    expect(harness.controller.view.value).toBe("[Pasted text #1 +0 lines]");
+    await vi.waitFor(
+      () =>
+        expect(harness.controller.view.value).toBe(
+          "[Pasted text #1 +0 lines]",
+        ),
+      {timeout: 2000},
+    );
 
     harness.controller.handleEditorKey(stroke("", {return: true}));
     expect(harness.onSubmit).toHaveBeenCalledWith(
@@ -1124,10 +1130,12 @@ describe("TUI", () => {
   it("按测量宽度换行且不拆分 ZWJ emoji", async () => {
     const family = "👨‍👩‍👧‍👦";
     const {lastFrame, unmount} = render(
-      <TextInput
-        rootWidth={5}
-        view={{value: `a${family}b`, cursor: 1, active: true}}
-      />,
+      <Box width={5}>
+        <TextInput
+          rootWidth={5}
+          view={{value: `a${family}b`, cursor: 1, active: true}}
+        />
+      </Box>,
     );
     await flush();
 
@@ -1138,7 +1146,9 @@ describe("TUI", () => {
 
   it("根宽度不足五格时只显示省略号", async () => {
     const {lastFrame, unmount} = render(
-      <TextInput rootWidth={4} view={{value: "保留原模型", cursor: 5, active: true}} />,
+      <Box width={4}>
+        <TextInput rootWidth={4} view={{value: "保留原模型", cursor: 5, active: true}} />
+      </Box>,
     );
     await flush();
 

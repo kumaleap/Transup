@@ -1,14 +1,36 @@
 /** 输入框展示层；编辑状态与终端事件由 App 级 controller 持有。 */
 import React, {useEffect, useRef} from "react";
-import {Box, Text, useBoxMetrics, useStdout, type DOMElement} from "./runtime/index.js";
+import {
+  Box,
+  Text,
+  useBoxMetrics,
+  useCursor,
+  useStdout,
+  type DOMElement,
+} from "./runtime/index.js";
 import { T } from "../theme.js";
 import type {InputViewState} from "./input/use-input-controller.js";
 import {measureText, type VisualRow} from "./input/measured-text.js";
 import {TextBuffer} from "./input/text-buffer.js";
 
+export interface LayoutMetrics {
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+  hasMeasured: boolean;
+}
+
+export interface CursorAncestorMetrics {
+  appRoot: LayoutMetrics;
+  inputArea: LayoutMetrics;
+  border: LayoutMetrics;
+}
+
 interface Props {
   view: InputViewState;
   rootWidth?: number;
+  ancestorMetrics?: CursorAncestorMetrics;
   onContentWidthChange?: (width: number) => void;
 }
 
@@ -59,16 +81,60 @@ export function RowText({buffer, row, showCursor, match}: RowTextProps) {
   );
 }
 
-export function TextInput({view, rootWidth, onContentWidthChange}: Props) {
+function measuredCursorOrigin(
+  ancestorMetrics: CursorAncestorMetrics | undefined,
+  inputMetrics: LayoutMetrics,
+): {x: number; y: number} | undefined {
+  if (!inputMetrics.hasMeasured) return undefined;
+  if (!ancestorMetrics) return undefined;
+
+  const {appRoot, inputArea, border} = ancestorMetrics;
+  const hasKnownRootOrigin =
+    appRoot.hasMeasured || (appRoot.left === 0 && appRoot.top === 0);
+  if (!hasKnownRootOrigin || !inputArea.hasMeasured || !border.hasMeasured) {
+    return undefined;
+  }
+
+  return {
+    x: appRoot.left + inputArea.left + border.left + inputMetrics.left,
+    y: appRoot.top + inputArea.top + border.top + inputMetrics.top,
+  };
+}
+
+export function TextInput({
+  view,
+  rootWidth,
+  ancestorMetrics,
+  onContentWidthChange,
+}: Props) {
   const rootRef = useRef<DOMElement | null>(null);
   const metrics = useBoxMetrics(rootRef);
+  const {setCursorPosition} = useCursor();
   const {stdout} = useStdout();
   const fallbackWidth = Math.max(0, (stdout.columns ?? MIN_ROOT_WIDTH) - OUTER_COLUMNS);
-  const availableWidth = rootWidth ?? (metrics.hasMeasured ? metrics.width : fallbackWidth);
+  const availableWidth = rootWidth ?? (
+    metrics.hasMeasured ? metrics.width : fallbackWidth
+  );
   const contentWidth = Math.max(2, availableWidth - PROMPT_WIDTH - CURSOR_RESERVE);
   const footer = view.historySearch
     ? `${view.historySearch.hasMatch ? "search prompts" : "no matching prompt"}: ${view.historySearch.query}`
     : view.footer;
+  const buffer = TextBuffer.from(view.value, view.cursor);
+  const measured = measureText(buffer, contentWidth);
+  const origin = measuredCursorOrigin(ancestorMetrics, metrics);
+  const showTerminalCursor =
+    view.active &&
+    !view.historySearch &&
+    availableWidth >= MIN_ROOT_WIDTH &&
+    origin !== undefined;
+  setCursorPosition(
+    showTerminalCursor
+      ? {
+          x: origin.x + PROMPT_WIDTH + measured.cursor.column,
+          y: origin.y + measured.cursor.row,
+        }
+      : undefined,
+  );
 
   useEffect(() => {
     onContentWidthChange?.(contentWidth);
@@ -90,9 +156,6 @@ export function TextInput({view, rootWidth, onContentWidthChange}: Props) {
       </Box>
     );
   }
-
-  const buffer = TextBuffer.from(view.value, view.cursor);
-  const measured = measureText(buffer, contentWidth);
 
   return (
     <Box ref={rootRef} width="100%" flexDirection="column">
