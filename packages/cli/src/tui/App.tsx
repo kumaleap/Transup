@@ -48,6 +48,15 @@ import {
   type Keystroke,
 } from "./input/keybinding-router.js";
 import {useInputController} from "./input/use-input-controller.js";
+import { frameAt } from "./activity/frames.js";
+import { sampleVerb } from "./activity/verbs.js";
+import { statusParts } from "./activity/status-line.js";
+import {
+  createStallTracker,
+  interpolateColor,
+  type StallTracker,
+} from "./activity/stall.js";
+import { visibleStreamLines } from "./activity/line-commit.js";
 
 export interface AppProps {
   provider: Provider;
@@ -84,11 +93,6 @@ function newSessionId(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-/** 紧凑 token 数：1234 → 1.2k，12345 → 12k */
-function fmtTokens(n: number): string {
-  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(n);
-}
-
 interface ActiveTool {
   name: string;
   argSummary: string;
@@ -107,7 +111,10 @@ export function App(props: AppProps) {
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
   const [permission, setPermission] = useState<PermissionRequest | null>(null);
   const [running, setRunning] = useState(false);
-  const [spinnerTick, setSpinnerTick] = useState(0);
+  // 每轮开始时随机取一次的 spinner 动词（turn 内不轮换）
+  const [turnVerb, setTurnVerb] = useState("");
+  // 心跳计数只为触发每帧重渲染，帧内容由 elapsedMs 推导
+  const [, setFrameTick] = useState(0);
 
   const nextId = useRef(0);
   const engineRef = useRef<AgentEngine | null>(null);
@@ -122,6 +129,11 @@ export function App(props: AppProps) {
   // 本轮起始时间戳与实时累计用量 —— 渲染时读取，展示执行时长 / tokens
   const turnStartRef = useRef(0);
   const liveUsage = useRef({ input: 0, output: 0 });
+  // 停滞检测：text_delta / 工具活动时 observeProgress，心跳里 tick 出平滑强度
+  const stallTrackerRef = useRef<StallTracker | null>(null);
+  const stallIntensityRef = useRef(0);
+  // 心跳回调里需要读"是否有活动工具"，state 闭包会过期，用 ref 镜像
+  const activeToolRef = useRef<ActiveTool | null>(null);
 
   const [status, setStatus] = useState<StatusInfo>({
     providerId: props.provider.id,
@@ -221,11 +233,18 @@ export function App(props: AppProps) {
   }, []);
 
   // ── 运行期心跳 ────────────────────────────────────────────
-  // 整轮运行期间跑一个 120ms 心跳：驱动 spinner 动画，同时让执行时长与
-  // 实时 tokens 每帧重渲染（覆盖 思考 / 工具执行 / 流式 三个子状态）。
+  // 整轮运行期间跑一个 50ms 心跳（对齐 Claude Code 的动画时钟）：
+  // 驱动帧动画与停滞变红的平滑插值，同时让状态括号每帧重渲染。
+  // 帧切换间隔由 frameAt 内部按 120ms 取整，与心跳频率解耦。
   useEffect(() => {
     if (!running) return;
-    const t = setInterval(() => setSpinnerTick((n) => n + 1), 120);
+    const t = setInterval(() => {
+      const tracker = stallTrackerRef.current;
+      if (tracker) {
+        stallIntensityRef.current = tracker.tick(Date.now(), activeToolRef.current !== null);
+      }
+      setFrameTick((n) => n + 1);
+    }, 50);
     return () => clearInterval(t);
   }, [running]);
 
@@ -386,6 +405,10 @@ export function App(props: AppProps) {
     runningRef.current = true;
     turnStartRef.current = Date.now();
     liveUsage.current = { input: 0, output: 0 };
+    // 每轮一个全新的停滞追踪器与随机动词（turn 内不轮换）
+    stallTrackerRef.current = createStallTracker();
+    stallIntensityRef.current = 0;
+    setTurnVerb(sampleVerb());
     setRunning(true);
 
     // 流式文本用 ref 累积（setState 是异步的，flush 时要拿到最新值）
@@ -403,10 +426,12 @@ export function App(props: AppProps) {
         await props.trace?.record(ev);
         switch (ev.type) {
           case "text_delta":
+            stallTrackerRef.current?.observeProgress(Date.now());
             stream += ev.text;
             setStreamText(stream);
             break;
           case "tool_start":
+            stallTrackerRef.current?.observeProgress(Date.now());
             flushStream();
             tool = {
               name: ev.call.name,
@@ -414,17 +439,21 @@ export function App(props: AppProps) {
               tail: [],
               streamed: false,
             };
+            activeToolRef.current = tool;
             setActiveTool(tool);
             break;
           case "tool_progress":
             if (tool) {
+              stallTrackerRef.current?.observeProgress(Date.now());
               tool.streamed = true;
               const lines = (tool.tail.join("\n") + ev.chunk).split("\n");
               tool.tail = lines.slice(-TAIL_LINES);
+              activeToolRef.current = tool;
               setActiveTool({ ...tool });
             }
             break;
           case "tool_end": {
+            stallTrackerRef.current?.observeProgress(Date.now());
             const streamed = tool?.streamed ?? false;
             push({
               kind: "tool",
@@ -434,6 +463,7 @@ export function App(props: AppProps) {
               isError: ev.isError,
             });
             tool = null;
+            activeToolRef.current = null;
             setActiveTool(null);
             break;
           }
@@ -472,8 +502,12 @@ export function App(props: AppProps) {
             break;
           case "turn_end":
             if (ev.reason === "max_iterations") info("已达到单轮最大迭代次数，强制停止。", "red");
-            else if (ev.reason === "aborted") info("任务已中断。", "yellow");
-            else if (ev.reason === "loop_detected")
+            else if (ev.reason === "aborted") {
+              // 先把已流出的部分文本固化进记录，再补一行 dim 提示（对齐
+              // Claude Code 的 "Interrupted · What should Claude do instead?"）
+              flushStream();
+              info("已中断 · 接下来要我做什么?");
+            } else if (ev.reason === "loop_detected")
               info("检测到模型在重复相同的调用（循环空转），已强制停止本轮。", "red");
             break;
         }
@@ -482,6 +516,7 @@ export function App(props: AppProps) {
       info(`API 错误: ${err.message}`, "red");
     } finally {
       flushStream();
+      activeToolRef.current = null;
       setActiveTool(null);
 
       const t = totals.current;
@@ -543,17 +578,17 @@ export function App(props: AppProps) {
   }
 
   // ── 渲染 ──────────────────────────────────────────────────
-  // 扫描式 spinner：一个光点在轨道上来回，比转圈更"仪器感"
-  const SPINNER = ["▰▱▱▱▱", "▱▰▱▱▱", "▱▱▰▱▱", "▱▱▱▰▱", "▱▱▱▱▰", "▱▱▱▰▱", "▱▱▰▱▱", "▱▰▱▱▱"];
-
-  // 运行期活动状态：英文状态词 + 执行时长 + 实时累计 tokens
-  const elapsedSec = running ? Math.max(0, Math.floor((Date.now() - turnStartRef.current) / 1000)) : 0;
-  const statusWord = activeTool
-    ? `Running ${activeTool.name}`
-    : streamText
-      ? "Responding"
-      : "Thinking";
-  const meter = `${elapsedSec}s · ↑${fmtTokens(liveUsage.current.input)} ↓${fmtTokens(liveUsage.current.output)}`;
+  // 运行期活动行：呼吸帧符号 + 每轮随机动词 + "…"；停滞时从品牌绿渐变到红。
+  // 状态括号（耗时 + 实时 tokens）由 statusParts 控制 30s 门槛。
+  const elapsedMs = running ? Math.max(0, Date.now() - turnStartRef.current) : 0;
+  const spinnerColor = interpolateColor(T.primary, T.danger, stallIntensityRef.current);
+  const spinnerStatus = statusParts({
+    elapsedMs,
+    inputTokens: liveUsage.current.input,
+    outputTokens: liveUsage.current.output,
+  });
+  // 流式文本按整行上屏：最后一个换行之后的半行先藏着，落满一行才出现
+  const visibleStream = visibleStreamLines(streamText);
 
   return (
     <Box flexDirection="column">
@@ -561,9 +596,9 @@ export function App(props: AppProps) {
         {(item) => <TranscriptItemView key={item.id} item={item} />}
       </Static>
 
-      {streamText && (
+      {visibleStream && (
         <Box marginTop={1}>
-          <Text>{renderMarkdown(streamText)}</Text>
+          <Text>{renderMarkdown(visibleStream)}</Text>
         </Box>
       )}
 
@@ -583,10 +618,13 @@ export function App(props: AppProps) {
 
       {running && (
         <Box marginTop={1}>
-          <Text color={T.primary}>{SPINNER[spinnerTick % SPINNER.length]} </Text>
-          <Text dimColor>
-            {statusWord}… · {meter}
+          {/* 帧符号占 2 列（字符 + 空格）；有 activeTool 时动词行保持不变 */}
+          <Text color={spinnerColor}>
+            {frameAt(elapsedMs)} {turnVerb}…
           </Text>
+          {spinnerStatus.length > 0 && (
+            <Text dimColor> ({spinnerStatus.join(" · ")})</Text>
+          )}
         </Box>
       )}
 

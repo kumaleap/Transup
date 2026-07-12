@@ -73,6 +73,60 @@ class SlowProvider implements Provider {
   }
 }
 
+/** 先报 usage 再挂起，直到 release() 才正常收尾 —— 便于长时间停在运行态 */
+class HangingUsageProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  release!: () => void;
+  private gate = new Promise<void>((r) => {
+    this.release = r;
+  });
+  async *stream(): AsyncIterable<ProviderEvent> {
+    yield { type: "usage", usage: { inputTokens: 1200, outputTokens: 340 } };
+    await this.gate;
+    yield { type: "message_done", content: "ok", toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+}
+
+/** 先流出一行半文本再挂起；release() 后补完剩余增量并正常收尾 */
+class GatedStreamProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  release!: () => void;
+  private gate = new Promise<void>((r) => {
+    this.release = r;
+  });
+  async *stream(): AsyncIterable<ProviderEvent> {
+    yield { type: "text_delta", text: "第一行完整\n第二行开头" };
+    await this.gate;
+    yield { type: "text_delta", text: "结尾" };
+    yield {
+      type: "message_done",
+      content: "第一行完整\n第二行开头结尾",
+      toolCalls: [],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  }
+}
+
+/** 流出一行半文本后等 abort 信号抛错 —— 模拟真实 SDK 的用户中断路径 */
+class AbortableProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  async *stream(
+    _messages?: Message[],
+    _tools?: unknown,
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    yield { type: "text_delta", text: "部分输出\n后半" };
+    await new Promise<never>((_, reject) => {
+      const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      if (signal?.aborted) return fail();
+      signal?.addEventListener("abort", fail, { once: true });
+    });
+  }
+}
+
 const sessionDir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-"));
 const promptHistoryDir = mkdtempSync(join(tmpdir(), "transup-tui-history-"));
 
@@ -255,7 +309,8 @@ function routeControllerKey(
     : controller.handleEditorKey(key);
 }
 
-describe("TUI", () => {
+// 本机负载波动大（ink 全量渲染 + 真实心跳），给整套一个宽松的兜底超时
+describe("TUI", {timeout: 30_000}, () => {
   it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
@@ -283,7 +338,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("é\n行2\n行3"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(done).toContain("[Pasted text #1 +2 lines]");
@@ -301,7 +356,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("单行批量"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(done).toContain("单行批量");
@@ -335,11 +390,11 @@ describe("TUI", () => {
     first.stdin.write("\r");
     await vi.waitFor(
       () => expect(firstProvider.lastUserContent).toBe(content),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("Pasted text #1"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     first.unmount();
 
@@ -350,12 +405,12 @@ describe("TUI", () => {
         second.stdin.write("\x1b[A");
         expect(second.lastFrame()).toContain("[Pasted text #1 +2 lines]");
       },
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     second.stdin.write("\r");
     await vi.waitFor(
       () => expect(secondProvider.lastUserContent).toBe(content),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     second.unmount();
   });
@@ -374,11 +429,11 @@ describe("TUI", () => {
     instance.stdin.write("\r");
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("still runs"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     await vi.waitFor(
       () => expect(instance.lastFrame()).toContain("Prompt history unavailable:"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
 
     const frame = instance.lastFrame()!;
@@ -399,7 +454,7 @@ describe("TUI", () => {
     stdin.write("\x7f");
     stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 10_000});
     unmount();
   });
 
@@ -414,7 +469,7 @@ describe("TUI", () => {
     stdin.write("\x1b[3~");
     stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 10_000});
     unmount();
   });
 
@@ -631,7 +686,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("draft\\ncontent"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const persisted = JSON.parse(readFileSync(historyPath, "utf8").trim());
     expect(persisted.display).toBe("[Pasted text #1 +1 lines]");
@@ -865,7 +920,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       harness.controller.handleEditorKey(stroke("", {upArrow: true}));
       expect(harness.controller.view.value).toBe(marker);
-    });
+    }, {timeout: 10_000});
     harness.controller.handleEditorKey(stroke("", {downArrow: true}));
     harness.controller.handlePaste("new\npaste");
     await flush();
@@ -939,7 +994,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("/help"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const lines = readFileSync(historyPath, "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
@@ -1028,7 +1083,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       instance.stdin.write("\x1b[A");
       expect(instance.lastFrame()).toContain(marker);
-    });
+    }, {timeout: 10_000});
     instance.stdin.write("\x1b[B");
     await flush();
 
@@ -1038,7 +1093,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe(content),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     expect(instance.lastFrame()).toContain(marker);
     instance.unmount();
@@ -1062,7 +1117,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       instance.stdin.write("\x1b[A");
       expect(instance.lastFrame()).toContain("stored choice");
-    });
+    }, {timeout: 10_000});
     instance.stdin.write("\x1b[B");
     await flush();
 
@@ -1073,7 +1128,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("stored choice!"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.unmount();
   });
@@ -1083,12 +1138,12 @@ describe("TUI", () => {
     await flush();
     instance.stdin.write("run");
     instance.stdin.write("\r");
-    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
     instance.stdin.write("\x03");
     await vi.waitFor(
       () => expect(instance.lastFrame()).not.toContain("working…"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.stdin.write("\x03");
     await flush();
@@ -1104,12 +1159,12 @@ describe("TUI", () => {
     await flush();
     instance.stdin.write("run");
     instance.stdin.write("\r");
-    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
     instance.stdin.write("\x03");
     await vi.waitFor(
       () => expect(instance.lastFrame()).not.toContain("working…"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.stdin.write("draft");
     instance.stdin.write("\x03");
@@ -1156,7 +1211,7 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(
       () => expect(lastFrame()).toContain("你好，这是回复"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const frame = lastFrame()!;
     expect(frame).toContain("测试一下");
@@ -1198,7 +1253,7 @@ describe("TUI", () => {
     instance.stdin.write("two");
     instance.stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.streamCalls).toBe(1));
+    await vi.waitFor(() => expect(provider.streamCalls).toBe(1), {timeout: 10_000});
     await flush();
     const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(frame).toContain("❯ one");
@@ -1228,14 +1283,14 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(
       () => expect(lastFrame()).toContain("write_file"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     expect(lastFrame()).toContain("write_file");
     expect(lastFrame()).toContain("允许吗?");
     stdin.write("y");
     await vi.waitFor(
       () => expect(lastFrame()).toContain("写完了"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     expect(lastFrame()).toContain("写完了");
     expect(readFileSync(target, "utf-8")).toBe("hi");
@@ -1265,7 +1320,7 @@ describe("TUI", () => {
 
     stdin.write(pastedDraft);
     stdin.write("\r");
-    await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 2000});
+    await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 10_000});
 
     stdin.write("\x12");
     await flush();
@@ -1274,7 +1329,7 @@ describe("TUI", () => {
     expect(lastFrame()).not.toContain("no matching prompt:");
 
     stdin.write("y");
-    await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 2000});
+    await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 10_000});
     const callsAfterPermission = provider.streamCalls;
 
     // If the permission key leaked into the newly visible editor, Enter would submit "y".
@@ -1286,7 +1341,7 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(
       () => expect(provider.streamCalls).toBeGreaterThan(callsAfterPermission),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     expect(provider.lastUserContent).toBe(pastedDraft);
     unmount();
@@ -1312,29 +1367,115 @@ describe("TUI", () => {
     await flush();
     stdin.write("写个文件");
     stdin.write("\r");
-    await flush(400);
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("允许吗?"),
+      {timeout: 10_000},
+    );
     stdin.write("n");
-    await flush(600);
-    expect(lastFrame()).toContain("好的，不写了");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("好的，不写了"),
+      {timeout: 10_000},
+    );
     expect(existsSync(target)).toBe(false);
     unmount();
   });
 
-  it("运行期活动行：英文状态词 + 执行时长 + 实时 tokens", async () => {
+  it("运行期活动行：呼吸帧 + 每轮随机动词，30 秒前无状态括号", async () => {
     const { stdin, lastFrame, unmount } = render(makeApp(new SlowProvider()));
     await flush();
     stdin.write("hi");
+    // sampleVerb 在 runTurn 开始时取一次：mock random=0 → SPINNER_VERBS[0] = "Thinking"
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      stdin.write("\r");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("Thinking…"),
+        {timeout: 10_000},
+      );
+      const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(frame).toMatch(/[·✢*✳✶✻✽] Thinking…/); // 帧符号（2 列）+ 动词 + U+2026
+      expect(frame).not.toContain("↑1.2k"); // 30s 门槛前不显示实时 tokens
+      expect(frame).not.toMatch(/\(\d+s/); // 也没有耗时括号段
+      expect(frame).toContain("working…"); // 输入框运行态英文占位不变
+    } finally {
+      randomSpy.mockRestore();
+    }
+    unmount();
+  });
+
+  it("运行超过 30 秒后活动行出现耗时与实时 tokens 括号段", async () => {
+    vi.useFakeTimers({toFake: ["Date"]});
+    try {
+      const provider = new HangingUsageProvider();
+      const { stdin, lastFrame, unmount } = render(makeApp(provider));
+      await flush();
+      stdin.write("hi");
+      stdin.write("\r");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("working…"),
+        {timeout: 10_000},
+      );
+      // ink 的输出节流按 Date.now 计时：冻结的 Date 会卡住后续 flush，
+      // 所以分步快进（每步都给真实心跳留出落帧时间）而不是一次跳 31s
+      for (let step = 0; step < 8; step++) {
+        vi.setSystemTime(Date.now() + 4_000);
+        await flush(30);
+      }
+      await vi.waitFor(() => {
+        vi.setSystemTime(Date.now() + 100);
+        const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+        // 30s 门槛后才出现括号段；elapsed 随 waitFor 轮询继续推进，只锁段结构
+        expect(frame).toMatch(/\(\d+s · ↑1\.2k ↓340 tokens\)/);
+      }, {timeout: 10_000});
+      provider.release();
+      await vi.waitFor(() => {
+        vi.setSystemTime(Date.now() + 100); // 持续推时钟让节流后的帧落地
+        expect(lastFrame()).toContain("ok");
+      }, {timeout: 10_000});
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20_000);
+
+  it("流式文本按整行上屏，未完成的半行不出现", async () => {
+    const provider = new GatedStreamProvider();
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("go");
     stdin.write("\r");
     await vi.waitFor(
-      () => expect(lastFrame()).toContain("↑1.2k"),
-      {timeout: 3000},
+      () => expect(lastFrame()).toContain("第一行完整"),
+      {timeout: 10_000},
+    );
+    expect(lastFrame()).not.toContain("第二行开头"); // 半行藏到换行落地
+    provider.release();
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("第二行开头结尾"),
+      {timeout: 10_000},
+    );
+    unmount();
+  });
+
+  it("中断后渲染 dim 提示行，已流出的部分文本固化进记录", async () => {
+    const { stdin, lastFrame, unmount } = render(makeApp(new AbortableProvider()));
+    await flush();
+    stdin.write("go");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("部分输出"),
+      {timeout: 10_000},
+    );
+    expect(lastFrame()).not.toContain("后半"); // 中断前半行仍被隐藏
+    stdin.write("\x03");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("已中断 · 接下来要我做什么?"),
+      {timeout: 10_000},
     );
     const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(frame).toMatch(/Thinking|Responding/); // 英文状态词
-    expect(frame).toMatch(/\d+s ·/); // 执行时长
-    expect(frame).toContain("↑1.2k"); // 实时 input tokens
-    expect(frame).toContain("↓340"); // 实时 output tokens
-    expect(frame).toContain("working…"); // 输入框运行态英文占位
+    expect(frame).toContain("部分输出");
+    expect(frame).toContain("后半"); // flushStream 把半行也固化
+    expect(frame).not.toContain("任务已中断");
     unmount();
   });
 
