@@ -4,8 +4,8 @@
 
 **Goal:** Replace the component-local prompt input with a grapheme-safe, multiline, persistent input foundation using official Ink 7.1, project history, and incremental `Ctrl+R` search.
 
-**Execution status:** Tasks 1-9 are complete on
-`feature/tui-cursor-placement`; the branch is ready to merge.
+**Execution status:** Tasks 1-9 are complete and merged to `main` through
+verified checkpoint `1a5a65c`.
 
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
@@ -1004,7 +1004,7 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 
 ### Task 9: Final Requirement And Commit Audit
 
-**Status:** Completed through verification checkpoint `95634a6`.
+**Status:** Completed and merged through verification checkpoint `1a5a65c`.
 
 **Files:**
 - Inspect: `docs/superpowers/specs/2026-07-10-tui-input-foundation-design.md`
@@ -1068,3 +1068,5 @@ Completion evidence on 2026-07-12 under Node `26.5.0`:
 - `69a11d1` excludes untracked `.claude` worktrees from Vitest discovery, and
   `95634a6` replaces a fixed render delay with a bounded condition wait while
   allowing process-heavy MCP checks a 60-second test bound.
+- Post-merge review extended the streaming timeout sentinel beyond its test
+  bound in `1a5a65c`, preserving termination-failure coverage under load.
