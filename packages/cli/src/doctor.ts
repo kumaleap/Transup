@@ -28,8 +28,8 @@ export function collectDoctorDiagnostics(opts: DoctorOptions = {}): DoctorCheck[
   const major = Number(/^v?(\d+)/.exec(nodeVersion)?.[1] ?? 0);
   checks.push({
     name: "Node",
-    status: major >= 20 ? "ok" : "fail",
-    detail: major >= 20 ? `${nodeVersion} satisfies >=20` : `${nodeVersion} is below required >=20`,
+    status: major >= 26 ? "ok" : "fail",
+    detail: major >= 26 ? `${nodeVersion} satisfies >=26` : `${nodeVersion} is below required >=26`,
   });
 
   const provider =

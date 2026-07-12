@@ -4,7 +4,7 @@
  * 记录的一部分（写入真实滚动缓冲，往上翻还能看到）。
  */
 import React from "react";
-import { Text } from "ink";
+import {Text} from "./runtime/index.js";
 import { renderBanner, type BannerInfo } from "./banner-render.js";
 
 export type { BannerInfo };

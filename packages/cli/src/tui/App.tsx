@@ -12,7 +12,7 @@
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Static, Text, useApp, useInput } from "ink";
+import {Box, Static, Text, useApp, useInput, usePaste} from "./runtime/index.js";
 import {
   AgentEngine,
   SessionStore,
@@ -36,8 +36,18 @@ import {
   type TranscriptItem,
 } from "./Transcript.js";
 import { TextInput } from "./TextInput.js";
-import { PermissionDialog, type PermissionRequest } from "./PermissionDialog.js";
+import {
+  PermissionDialog,
+  type PermissionDecision,
+  type PermissionRequest,
+} from "./PermissionDialog.js";
 import { StatusBar, type StatusInfo } from "./StatusBar.js";
+import {
+  normalizeKeystroke,
+  routeKeystroke,
+  type Keystroke,
+} from "./input/keybinding-router.js";
+import {useInputController} from "./input/use-input-controller.js";
 
 export interface AppProps {
   provider: Provider;
@@ -54,6 +64,8 @@ export interface AppProps {
   };
   /** 会话持久化目录覆盖（测试用）；不传用默认目录 */
   sessionDir?: string;
+  /** 项目提示历史文件覆盖（测试用）；不传写入 cwd/.transup/history.jsonl */
+  historyPath?: string;
 }
 
 const HELP = `命令：
@@ -101,6 +113,9 @@ export function App(props: AppProps) {
   const engineRef = useRef<AgentEngine | null>(null);
   const sessionIdRef = useRef(props.initialSessionId);
   const controllerRef = useRef<AbortController | null>(null);
+  const runningRef = useRef(false);
+  const submitPendingRef = useRef(false);
+  const abortExitArmedRef = useRef(false);
   const sessionAllowed = useRef(new Set<string>());
   const totals = useRef({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   const permissionRef = useRef<PermissionRequest | null>(null);
@@ -214,18 +229,84 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
-  // ── Ctrl+C：运行中先中断任务，空闲时退出 ──────────────────
-  useInput((input, key) => {
-    if (!(key.ctrl && input === "c")) return;
-    if (running) {
-      if (controllerRef.current?.signal.aborted) exit();
-      // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
-      permissionRef.current?.resolve("no");
-      info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
-      controllerRef.current?.abort();
-    } else {
-      exit();
+  const inputController = useInputController({
+    active: !running,
+    historyPath: props.historyPath,
+    onSubmit,
+    onExit: exit,
+    onHistoryError: (error) => {
+      const detail = error instanceof Error ? error.message : String(error);
+      info(`Prompt history unavailable: ${detail}`, "yellow");
+    },
+  });
+
+  const resolveCurrentPermission = (decision: PermissionDecision): boolean => {
+    const request = permissionRef.current;
+    if (!request) return false;
+    permissionRef.current = null;
+    request.resolve(decision);
+    return true;
+  };
+
+  // ── 全局输入与交互上下文路由 ──────────────────────────────
+  const handleGlobalKey = (stroke: Keystroke): boolean => {
+    if (!(stroke.ctrl && stroke.input === "c")) return false;
+    if (abortExitArmedRef.current) {
+      inputController.requestExit();
+      return true;
     }
+    if (!runningRef.current) return inputController.handleGlobalKey(stroke);
+
+    if (controllerRef.current?.signal.aborted) {
+      abortExitArmedRef.current = true;
+      inputController.requestExit();
+      return true;
+    }
+    // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
+    resolveCurrentPermission("no");
+    info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
+    abortExitArmedRef.current = true;
+    controllerRef.current?.abort();
+    return true;
+  };
+
+  const handlePermissionKey = (stroke: Keystroke): boolean => {
+    if (stroke.input === "y" || stroke.name === "return") {
+      return resolveCurrentPermission("yes");
+    }
+    if (stroke.input === "n" || stroke.name === "escape") {
+      return resolveCurrentPermission("no");
+    }
+    if (stroke.input === "a") return resolveCurrentPermission("session");
+    if (stroke.input === "A") return resolveCurrentPermission("always");
+    return false;
+  };
+
+  useInput((input, key) => {
+    const stroke = normalizeKeystroke(input, key);
+    if (!(stroke.ctrl && stroke.input === "c")) {
+      abortExitArmedRef.current = false;
+    }
+    const inputContext = permissionRef.current
+      ? "permission"
+      : inputController.isHistorySearchActive()
+        ? "history-search"
+        : "editor";
+    routeKeystroke(stroke, inputContext, {
+      global: handleGlobalKey,
+      permission: handlePermissionKey,
+      historySearch: (searchStroke) =>
+        submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
+      editor: (editorStroke) =>
+        submitPendingRef.current || inputController.handleEditorKey(editorStroke),
+    });
+  });
+
+  usePaste((text) => {
+    abortExitArmedRef.current = false;
+    if (!submitPendingRef.current) inputController.handlePaste(text);
+  }, {
+    isActive: !running && !permission,
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -244,6 +325,7 @@ export function App(props: AppProps) {
         return true;
       }
       case "/compact": {
+        runningRef.current = true;
         setRunning(true);
         try {
           for await (const ev of engineRef.current!.compactNow()) {
@@ -255,6 +337,7 @@ export function App(props: AppProps) {
           const { percent } = engineRef.current!.contextUsage();
           setStatus((s) => ({ ...s, contextPercent: percent }));
         } finally {
+          runningRef.current = false;
           setRunning(false);
         }
         return true;
@@ -299,6 +382,8 @@ export function App(props: AppProps) {
     const input = expandFileRefs(raw);
     const controller = new AbortController();
     controllerRef.current = controller;
+    abortExitArmedRef.current = false;
+    runningRef.current = true;
     turnStartRef.current = Date.now();
     liveUsage.current = { input: 0, output: 0 };
     setRunning(true);
@@ -414,6 +499,8 @@ export function App(props: AppProps) {
       }));
 
       controllerRef.current = null;
+      runningRef.current = false;
+      submitPendingRef.current = false;
       setRunning(false);
     }
   }
@@ -421,13 +508,38 @@ export function App(props: AppProps) {
   // display：可见串（大段粘贴已折叠成占位符），进记录区与斜杠命令解析；
   // expanded：占位符还原后的全文，真正喂给引擎
   async function onSubmit(display: string, expanded: string) {
+    if (submitPendingRef.current) return;
+    submitPendingRef.current = true;
+    abortExitArmedRef.current = false;
+
     if (display === "exit" || display === "quit") {
-      exit();
+      inputController.requestExit();
       return;
     }
     push({ kind: "user", text: display });
-    if (await handleSlashCommand(display)) return;
-    void runTurn(expanded);
+    const startTurn = () => {
+      void runTurn(expanded).catch((error) => {
+        submitPendingRef.current = false;
+        const detail = error instanceof Error ? error.message : String(error);
+        info(`API 错误: ${detail}`, "red");
+      });
+    };
+    if (!display.startsWith("/")) {
+      startTurn();
+      return;
+    }
+
+    try {
+      if (await handleSlashCommand(display)) {
+        submitPendingRef.current = false;
+        return;
+      }
+      startTurn();
+    } catch (error) {
+      submitPendingRef.current = false;
+      const detail = error instanceof Error ? error.message : String(error);
+      info(`命令错误: ${detail}`, "red");
+    }
   }
 
   // ── 渲染 ──────────────────────────────────────────────────
@@ -484,7 +596,10 @@ export function App(props: AppProps) {
         ) : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box borderStyle="round" borderColor={T.border} paddingX={1}>
-            <TextInput onSubmit={onSubmit} active={!running} />
+            <TextInput
+              view={inputController.view}
+              onContentWidthChange={inputController.setContentWidth}
+            />
           </Box>
         )}
         <StatusBar status={status} />

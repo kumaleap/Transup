@@ -7,7 +7,7 @@
  * 比一个百分比数字更早引起注意。
  */
 import React from "react";
-import { Box, Text } from "ink";
+import {Box, Text} from "./runtime/index.js";
 import { T } from "../theme.js";
 
 export interface StatusInfo {

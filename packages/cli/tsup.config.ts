@@ -11,7 +11,7 @@ export default defineConfig({
   entry: { index: "src/index.ts" },
   format: ["esm"],
   platform: "node",
-  target: "node20",
+  target: "node26",
   banner: { js: "#!/usr/bin/env node" },
   noExternal: [/^@transup\/core/],
   clean: true,

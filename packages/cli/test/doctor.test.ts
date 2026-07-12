@@ -5,7 +5,7 @@ describe("doctor diagnostics", () => {
   it("fails fast when the default OpenAI-compatible provider lacks an API key", async () => {
     const checks = collectDoctorDiagnostics({
       env: { PROVIDER: "openai", MODEL: "deepseek-chat" },
-      nodeVersion: "v22.0.0",
+      nodeVersion: "v26.0.0",
       cwd: "/repo",
       stdinIsTTY: true,
       settings: {},
@@ -22,7 +22,7 @@ describe("doctor diagnostics", () => {
     let out = "";
     const code = await runDoctor({
       env: { PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-test", ANTHROPIC_MODEL: "claude-test" },
-      nodeVersion: "v22.0.0",
+      nodeVersion: "v26.0.0",
       cwd: "/repo",
       stdinIsTTY: true,
       settings: { permissions: { allow: ["write_file"] } },
@@ -44,7 +44,7 @@ describe("doctor diagnostics", () => {
         OPENAI_API_KEY: "sk-test",
         MODEL: "gpt-5.5",
       },
-      nodeVersion: "v22.0.0",
+      nodeVersion: "v26.0.0",
       cwd: "/repo",
       stdinIsTTY: true,
       settings: {},
@@ -54,6 +54,38 @@ describe("doctor diagnostics", () => {
       name: "Provider",
       status: "ok",
       detail: "PROVIDER=openai-responses wire=responses model=gpt-5.5 base=https://sub2api.transup.ai effective=https://sub2api.transup.ai/v1",
+    });
+  });
+
+  it("rejects Node versions below 26", () => {
+    const node = collectDoctorDiagnostics({
+      env: { OPENAI_API_KEY: "test" },
+      nodeVersion: "v25.9.0",
+      cwd: "/repo",
+      stdinIsTTY: true,
+      settings: {},
+    }).find((check) => check.name === "Node");
+
+    expect(node).toEqual({
+      name: "Node",
+      status: "fail",
+      detail: "v25.9.0 is below required >=26",
+    });
+  });
+
+  it("accepts Node 26", () => {
+    const node = collectDoctorDiagnostics({
+      env: { OPENAI_API_KEY: "test" },
+      nodeVersion: "v26.5.0",
+      cwd: "/repo",
+      stdinIsTTY: true,
+      settings: {},
+    }).find((check) => check.name === "Node");
+
+    expect(node).toEqual({
+      name: "Node",
+      status: "ok",
+      detail: "v26.5.0 satisfies >=26",
     });
   });
 });
