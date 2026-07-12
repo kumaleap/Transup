@@ -47,12 +47,12 @@ describe("bash 流式输出", () => {
     const reg = new ToolRegistry();
     const r = await reg.execute(
       "1", "bash",
-      JSON.stringify({ command: "sleep 10", timeout_seconds: 0.2 }),
+      JSON.stringify({ command: "sleep 60", timeout_seconds: 0.2 }),
       allow,
     );
     expect(r.isError).toBe(true);
     expect(r.content).toContain("超时");
-  });
+  }, 15_000);
 
   it("引擎层：tool_progress 事件夹在 tool_start 与 tool_end 之间", async () => {
     // mock provider：先要求跑一条会产生输出的 bash，再收尾
