@@ -4,9 +4,9 @@ Date: 2026-07-10
 
 Last updated: 2026-07-12
 
-Status: Tasks 1-7 implemented, verified, pushed, and merged; Tasks 8-9 remain
+Status: Tasks 1-8 implemented, verified, and pushed; Task 9 remains
 
-Estimated remaining agent time: 2-4 hours for Tasks 8-9; cross-process history
+Estimated remaining agent time: 0.5-1.5 hours for Task 9; cross-process history
 hardening is separately scoped
 
 ## Purpose
@@ -26,21 +26,22 @@ Task 7. Use this handoff and the commit history for the latest status.
 
 ## 2026-07-12 Checkpoint Update
 
-Task 7 is complete in atomic commit `eb5e1f2` on
-`origin/feature/tui-input-foundation`. Both completed feature branches are now
-merged and pushed to `origin/main` at `b81564e`:
+Task 8 is complete in atomic commit `7f31cb1` on
+`origin/feature/tui-cursor-placement`. It builds on Task 7 and merged `main`:
 
 ```text
 eb5e1f2 feat(tui): add incremental Ctrl-R history search
 160c828 Merge branch 'feature/tui-message-format'
 b81564e Merge branch 'feature/tui-input-foundation'
+ebf3a75 docs(tui): record Task 7 completion and Task 8 start
+7f31cb1 feat(tui): declare measured terminal cursor placement
 ```
 
-Task 7 verification under Node `26.5.0` passed 106 focused tests and 299 tests
-on the input-foundation branch, plus typecheck and build. After merging the
-message-format branch, `main` passed 29 files and 319 tests, typecheck, and
-build. The older checkpoint sections below are retained as historical context;
-start new work at Task 8, not Task 4 or Task 5.
+Task 8 verification under Node `26.5.0` passed 59 focused tests, with the PTY
+smoke explicitly skipped on Windows because the system `script` driver is not
+available. The full repository passed 30 files and 330 tests with that one
+platform skip, plus typecheck, build, `transup 0.1.0` version smoke, and diff
+checks. Linux/macOS CI must supply the real PTY pass evidence. Start Task 9 next.
 
 Task 6 has one explicit unresolved limitation: history writes are not lossless
 across independent OS processes. The implementation uses a module-level queue
@@ -71,14 +72,13 @@ pass, describe cross-process history as best-effort.
 Repository:                git@github.com:kumaleap/Transup.git
 Feature branch:            feature/tui-cursor-placement
 Base commit:               b81564e97222fed32747ea79f21d1cf457a4030f
-Latest task checkpoint:    eb5e1f227788d139598251a34fafbaf0e62345dd
-Checkpoint subject:        feat(tui): add incremental Ctrl-R history search
+Latest task checkpoint:    7f31cb1
+Checkpoint subject:        feat(tui): declare measured terminal cursor placement
 ```
 
 On another computer, start from `origin/main` at or after `b81564e`, then use
 the newest remote tip of `feature/tui-cursor-placement` once it has been pushed.
-The product implementation through Task 7 ends at `eb5e1f2`; the two merge
-commits above combine it with the message-format branch.
+The product implementation through Task 8 ends at `7f31cb1`.
 
 Task commit history through the latest checkpoint:
 
@@ -99,6 +99,8 @@ b2479b2 fix(tui): complete readline review fixes
 1029ffd feat(tui): persist and navigate project prompt history
 2192553 docs(tui): record cross-process history limitation
 eb5e1f2 feat(tui): add incremental Ctrl-R history search
+ebf3a75 docs(tui): record Task 7 completion and Task 8 start
+7f31cb1 feat(tui): declare measured terminal cursor placement
 ```
 
 `03723cd` is an external documentation commit. Preserve it. Do not rewrite or
@@ -124,8 +126,8 @@ drop it while reorganizing the implementation commits.
 
 ## Completed Work
 
-Tasks 1-7 have complete implementation and verification evidence. Task 8 is
-the active implementation task; Task 9 is the final audit.
+Tasks 1-8 have complete implementation and verification evidence. Task 9 is
+the active final audit.
 
 ### Task 1: Runtime Baseline
 
@@ -359,7 +361,7 @@ feat(tui): add incremental Ctrl-R history search
 - Backspace on an already empty query cancels.
 - Render `search prompts: <query>` or `no matching prompt: <query>`.
 
-### Task 8: Real Cursor And PTY Smoke (In Progress)
+### Task 8: Real Cursor And PTY Smoke (Completed: `7f31cb1`)
 
 Planned commit:
 
@@ -375,7 +377,7 @@ feat(tui): declare measured terminal cursor placement
 - Add focused coordinate tests and a bounded production-input PTY smoke test.
 - Verify bracketed-paste enable/disable and cursor-position escape output.
 
-### Task 9: Final Audit (Pending)
+### Task 9: Final Audit (Next)
 
 - Run a clean Node 26 install, typecheck, full tests, build, and packaged CLI
   smoke.
@@ -396,12 +398,11 @@ instead of rewriting history to remove it.
 ## Remaining-Time Estimate
 
 ```text
-Task 8 cursor and PTY     1.5-2.5 h
 Task 9 final audit        0.5-1.5 h
 ```
 
-The reliable remaining planning range is 2-4 hours. Cross-platform PTY behavior
-is the main uncertainty.
+The reliable remaining planning range is 0.5-1.5 hours for Task 9. Linux/macOS
+PTY evidence is the main outstanding platform check.
 
 ## Resume On Another Computer
 
@@ -456,8 +457,8 @@ cd Transup-cursor-placement
 git status --short --branch
 ```
 
-Expected Node output is `v26.5.0`. The merged pre-Task-8 baseline is 29 test
-files and 319 tests. Counts will increase during Task 8.
+Expected Node output is `v26.5.0`. The Task 8 checkpoint has 30 passing test
+files, 330 passing tests, and one platform-skipped PTY file on Windows.
 
 Before editing, confirm:
 
@@ -492,9 +493,8 @@ After every agent result, inspect the diff and run the relevant verification
 from the coordinating agent. Never accept an agent's success report as test
 evidence by itself.
 
-Task 8 consumes the completed paste, history, and search work. Parallel agents
-can prepare tests, audit requirements, and review completed diffs, but one
-integration writer must own the shared App/TextInput changes.
+Task 9 audits the completed paste, history, search, cursor, and PTY work.
+Parallel agents may run independent read-only requirement and commit audits.
 
 ## Atomic Commit Rules
 

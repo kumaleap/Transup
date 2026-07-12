@@ -4,8 +4,8 @@
 
 **Goal:** Replace the component-local prompt input with a grapheme-safe, multiline, persistent input foundation using official Ink 7.1, project history, and incremental `Ctrl+R` search.
 
-**Execution status:** Tasks 1-7 are complete; Task 8 is active on
-`feature/tui-cursor-placement` from `main` checkpoint `b81564e`.
+**Execution status:** Tasks 1-8 are complete; Task 9 is next on
+`feature/tui-cursor-placement`.
 
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
@@ -13,7 +13,7 @@
 
 ## Global Constraints
 
-- Work on branch `feature/tui-cursor-placement` for Task 8.
+- Work on branch `feature/tui-cursor-placement` for Tasks 8-9.
 - Use official Ink 7.1.0; do not copy, translate, or derive Claude's private renderer.
 - Pin `.nvmrc` to `26.5.0`; root and CLI engines require Node `>=26`.
 - Keep React at stable `19.2.7`, `@types/react` at `19.2.17`, and TypeScript at `6.0.3`.
@@ -827,7 +827,7 @@ queue guarantees serialization only inside one JavaScript module realm. The
 compaction source-size check is a best-effort mitigation, not cross-process
 atomicity.
 
-This follow-up is tracked separately and does not block Tasks 8-9 unless
+This follow-up is tracked separately and does not block Task 9 unless
 cross-process losslessness becomes a release requirement for this phase.
 
 ---
@@ -929,8 +929,7 @@ git commit -m "feat(tui): add incremental Ctrl-R history search"
 
 ### Task 8: Declare Measured Terminal Cursor Placement
 
-**Status:** In progress on `feature/tui-cursor-placement`, based on merged
-`main` checkpoint `b81564e`.
+**Status:** Completed in `7f31cb1` on `feature/tui-cursor-placement`.
 
 **Files:**
 - Create: `packages/cli/test/fixtures/pty-input-app.tsx`
@@ -944,7 +943,7 @@ git commit -m "feat(tui): add incremental Ctrl-R history search"
 - Consumes: `MeasuredText.cursor`, Ink 7.1 `useBoxMetrics`, `useCursor`, `useStdout`, and ancestor Box refs.
 - Produces: resize-aware wrap width, output-root-relative cursor coordinates, IME cursor declaration, narrow-terminal fallback, and PTY evidence.
 
-- [ ] **Step 1: Write failing component coordinate tests**
+- [x] **Step 1: Write failing component coordinate tests**
 
 Render a focused `TextInput` under nested boxes with deterministic widths. Assert first render uses injected/root fallback width, measured resize changes wrapping, search/inactive/narrow states hide the cursor, and the calculated point equals:
 
@@ -955,13 +954,13 @@ const y = root.top + inputArea.top + border.top + textInput.top + cursor.row;
 
 Mock only the adapter exports, not Ink internals, so the test freezes Transup's coordinate calculation.
 
-- [ ] **Step 2: Run the component test and confirm the red state**
+- [x] **Step 2: Run the component test and confirm the red state**
 
 Run: `npx vitest run packages/cli/test/tui-input/text-input.test.tsx`
 
 Expected: assertions fail because `TextInput` does not yet declare a terminal cursor or consume ancestor offsets.
 
-- [ ] **Step 3: Implement measured width and cursor declaration**
+- [x] **Step 3: Implement measured width and cursor declaration**
 
 Put refs on the App root, input-area box, border box, and TextInput root. Call `useBoxMetrics` for each tracked box and pass ancestor metrics into `TextInput`. Use `hasMeasured ? textInput.width : stdout.columns - 4` as the root-width source, then subtract prompt width two and cursor reserve one for wrapping.
 
@@ -973,13 +972,13 @@ setCursorPosition(showCursor ? {x: absoluteX, y: absoluteY} : undefined);
 
 Never call it from a passive effect. When any required ancestor is unmeasured, use the known fallback root origin only if the App root is at `(0, 0)`; otherwise hide the terminal cursor until the next measured render.
 
-- [ ] **Step 4: Add bracketed-paste and cursor PTY smoke**
+- [x] **Step 4: Add bracketed-paste and cursor PTY smoke**
 
 Create `packages/cli/test/fixtures/pty-input-app.tsx` as a self-contained Ink harness that mounts the production input controller/router/TextInput, writes `SUBMITTED:<expanded>` after submit, and requests exit after the callback. Use the system `script` command when present to launch that fixture through the workspace `tsx` binary, send bracketed paste followed by Enter, and assert the captured stream contains the folded marker, `SUBMITTED:` with full content, bracketed-paste enable/disable escapes, and a cursor-position escape. On macOS invoke `script -q /dev/null <command...>`; on Linux invoke `script -qefc "<quoted command>" /dev/null`. On hosts without a compatible `script`, mark only this test skipped with a reason string.
 
 The test must have a bounded process timeout and terminate the child in cleanup so it cannot leave a running TUI session.
 
-- [ ] **Step 5: Verify on Node 26 and commit cursor placement**
+- [x] **Step 5: Verify on Node 26 and commit cursor placement**
 
 Run:
 
@@ -1004,6 +1003,8 @@ git commit -m "feat(tui): declare measured terminal cursor placement"
 ---
 
 ### Task 9: Final Requirement And Commit Audit
+
+**Status:** Next.
 
 **Files:**
 - Inspect: `docs/superpowers/specs/2026-07-10-tui-input-foundation-design.md`
