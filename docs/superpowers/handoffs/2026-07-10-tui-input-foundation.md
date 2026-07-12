@@ -4,9 +4,9 @@ Date: 2026-07-10
 
 Last updated: 2026-07-12
 
-Status: Tasks 1-6 implemented and pushed; Tasks 7-9 remain
+Status: Tasks 1-7 implemented, verified, pushed, and merged; Tasks 8-9 remain
 
-Estimated remaining agent time: 3-6 hours for Tasks 7-9; cross-process history
+Estimated remaining agent time: 2-4 hours for Tasks 8-9; cross-process history
 hardening is separately scoped
 
 ## Purpose
@@ -21,27 +21,26 @@ authoritative requirements:
 - `docs/superpowers/plans/2026-07-10-tui-input-foundation.md`
 - `docs/claude-code-interactions/01-输入系统.md`
 
-The checkboxes in the implementation plan are the original execution template,
-not the current status. Use this handoff and the commit history for status.
+Completed task checkboxes in the implementation plan are synchronized through
+Task 7. Use this handoff and the commit history for the latest status.
 
 ## 2026-07-12 Checkpoint Update
 
-The current remote checkpoint is `1029ffd` on
-`origin/feature/tui-input-foundation`:
+Task 7 is complete in atomic commit `eb5e1f2` on
+`origin/feature/tui-input-foundation`. Both completed feature branches are now
+merged and pushed to `origin/main` at `b81564e`:
 
 ```text
-439fade fix(tui): align readline history and undo state
-1f8e374 fix(tui): reset history position after draft clear
-b2479b2 fix(tui): complete readline review fixes
-6a22d8f feat(tui): fold and restore bracketed paste content
-1029ffd feat(tui): persist and navigate project prompt history
+eb5e1f2 feat(tui): add incremental Ctrl-R history search
+160c828 Merge branch 'feature/tui-message-format'
+b81564e Merge branch 'feature/tui-input-foundation'
 ```
 
-Task 5 and Task 6 are complete within their planned single-process scope. The
-recorded Task 6 verification at `1029ffd` is 26 test files and 282 tests, plus
-passing typecheck, build, and diff checks. The older checkpoint and remaining
-task sections below are retained as historical context; start new work at Task
-7, not Task 5.
+Task 7 verification under Node `26.5.0` passed 106 focused tests and 299 tests
+on the input-foundation branch, plus typecheck and build. After merging the
+message-format branch, `main` passed 29 files and 319 tests, typecheck, and
+build. The older checkpoint sections below are retained as historical context;
+start new work at Task 8, not Task 4 or Task 5.
 
 Task 6 has one explicit unresolved limitation: history writes are not lossless
 across independent OS processes. The implementation uses a module-level queue
@@ -70,18 +69,18 @@ pass, describe cross-process history as best-effort.
 
 ```text
 Repository:                git@github.com:kumaleap/Transup.git
-Feature branch:            feature/tui-input-foundation
-Base commit:               3980e96
-Implementation checkpoint: 7a647361b4b8ddc36beef3598d3396b4a3496d49
-Checkpoint subject:        feat(tui): integrate multiline readline editing
+Feature branch:            feature/tui-cursor-placement
+Base commit:               b81564e97222fed32747ea79f21d1cf457a4030f
+Latest task checkpoint:    eb5e1f227788d139598251a34fafbaf0e62345dd
+Checkpoint subject:        feat(tui): add incremental Ctrl-R history search
 ```
 
-On the other computer, use the newest remote tip of
-`origin/feature/tui-input-foundation`. The product implementation through Task
-4 ends at `7a64736`; later commits may contain this handoff or narrowly scoped
-review fixes.
+On another computer, start from `origin/main` at or after `b81564e`, then use
+the newest remote tip of `feature/tui-cursor-placement` once it has been pushed.
+The product implementation through Task 7 ends at `eb5e1f2`; the two merge
+commits above combine it with the message-format branch.
 
-Commit history through the implementation checkpoint:
+Task commit history through the latest checkpoint:
 
 ```text
 60ed32c docs: specify the TUI input foundation
@@ -92,6 +91,14 @@ f736329 chore(tui): upgrade Ink to 7.1 and require Node 26
 df18c2c refactor(tui): centralize terminal input routing
 5df669f feat(tui): integrate a grapheme-aware text model
 7a64736 feat(tui): integrate multiline readline editing
+8f14ac2 docs: add TUI input foundation handoff
+439fade fix(tui): align readline history and undo state
+1f8e374 fix(tui): reset history position after draft clear
+b2479b2 fix(tui): complete readline review fixes
+6a22d8f feat(tui): fold and restore bracketed paste content
+1029ffd feat(tui): persist and navigate project prompt history
+2192553 docs(tui): record cross-process history limitation
+eb5e1f2 feat(tui): add incremental Ctrl-R history search
 ```
 
 `03723cd` is an external documentation commit. Preserve it. Do not rewrite or
@@ -117,9 +124,8 @@ drop it while reorganizing the implementation commits.
 
 ## Completed Work
 
-Tasks 1-3 have completed their independent task reviews. Task 4 has complete
-implementation and verification evidence but still needs its independent
-task-scoped review.
+Tasks 1-7 have complete implementation and verification evidence. Task 8 is
+the active implementation task; Task 9 is the final audit.
 
 ### Task 1: Runtime Baseline
 
@@ -156,10 +162,11 @@ task-scoped review.
   visual rows, nearest offsets, and desired columns.
 - Roots narrower than five cells render `…` without discarding editor state.
 
-### Task 4: Multiline Readline Editing
+### Task 4: Multiline Readline Editing (Completed)
 
-Implementation is complete in `7a64736`. A task-scoped formal review is still
-required before starting Task 5.
+The initial implementation landed in `7a64736`; the subsequent Task 4 fixes are
+listed in the checkpoint history above. The original review evidence remains
+below as audit history.
 
 - Pure `EditorState` / `EditorAction` reducer.
 - Hard-line Home/End and `Ctrl+A`/`Ctrl+E`.
@@ -191,11 +198,9 @@ packages/cli/test/tui-input/keybinding-router.test.ts
 packages/cli/test/tui.test.tsx
 ```
 
-The authoritative Task 4 plan lists only six of those paths. `App.tsx` and
-`keybinding-router.test.ts` are actual scope deviations: they were used for App
-integration and direct coverage of the expanded mapping, but the handoff does
-not pre-approve them. The independent reviewer must decide whether both extra
-paths were necessary to satisfy Task 4 and record that verdict.
+The authoritative Task 4 plan listed only six of those paths. `App.tsx` and
+`keybinding-router.test.ts` were recorded scope deviations used for App
+integration and direct coverage of the expanded mapping.
 
 Recorded verification at `7a64736` under Node `26.5.0`:
 
@@ -231,11 +236,11 @@ Recorded Task 4 TDD evidence for the reconstructed implementer report:
   React 19 ref declarations. Initializing and widening those refs produced
   final typecheck GREEN.
 
-## Immediate Resume Step: Review Task 4
+## Historical Task 4 Review Notes
 
-Do not start Task 5 until a task-scoped review finds no Critical or Important
-defects. The `.superpowers/` directory is ignored and will not transfer through
-Git, so regenerate the brief and diff package on the other computer:
+This section records the earlier Task 4 review procedure for audit history. It
+is not the current resume step. The `.superpowers/` directory is ignored and
+will not transfer through Git:
 
 ```bash
 /Users/kuma/.codex/plugins/cache/claude-plugins-official/superpowers/6.1.1/skills/subagent-driven-development/scripts/task-brief \
@@ -287,9 +292,9 @@ Resolve valid Critical or Important findings in a narrowly scoped
 `fix(tui): ...` commit, rerun Task 4 verification, and review the fix before
 continuing.
 
-## Remaining Tasks
+## Task Status Summary
 
-### Task 5: Official Paste And Structured References
+### Task 5: Official Paste And Structured References (Completed: `6a22d8f`)
 
 Planned commit:
 
@@ -315,7 +320,7 @@ Start with this RED command:
 npx vitest run packages/cli/test/tui-input/paste-registry.test.ts
 ```
 
-### Task 6: Persistent Project History
+### Task 6: Persistent Project History (Completed: `1029ffd`)
 
 Planned commit:
 
@@ -336,7 +341,7 @@ feat(tui): persist and navigate project prompt history
   prompt submission.
 - Normal exit waits at most 500 ms for `flush()`.
 
-### Task 7: Incremental Ctrl+R Search
+### Task 7: Incremental Ctrl+R Search (Completed: `eb5e1f2`)
 
 Planned commit:
 
@@ -354,7 +359,7 @@ feat(tui): add incremental Ctrl-R history search
 - Backspace on an already empty query cancels.
 - Render `search prompts: <query>` or `no matching prompt: <query>`.
 
-### Task 8: Real Cursor And PTY Smoke
+### Task 8: Real Cursor And PTY Smoke (In Progress)
 
 Planned commit:
 
@@ -370,7 +375,7 @@ feat(tui): declare measured terminal cursor placement
 - Add focused coordinate tests and a bounded production-input PTY smoke test.
 - Verify bracketed-paste enable/disable and cursor-position escape output.
 
-### Task 9: Final Audit
+### Task 9: Final Audit (Pending)
 
 - Run a clean Node 26 install, typecheck, full tests, build, and packaged CLI
   smoke.
@@ -391,18 +396,12 @@ instead of rewriting history to remove it.
 ## Remaining-Time Estimate
 
 ```text
-Task 4 formal review       0.5-1.0 h
-Task 5 structured paste   1.0-1.5 h
-Task 6 persistent history 2.0-3.0 h
-Task 7 Ctrl+R search      1.0-1.5 h
 Task 8 cursor and PTY     1.5-2.5 h
 Task 9 final audit        0.5-1.5 h
 ```
 
-The reliable planning range is 7-10 hours. A 4-6 hour finish is possible only
-when all implementations and reviews pass on the first attempt. History
-failure paths and cross-platform PTY behavior are the main uncertainties; the
-upper range can reach 10-12 hours if either produces Important review findings.
+The reliable remaining planning range is 2-4 hours. Cross-platform PTY behavior
+is the main uncertainty.
 
 ## Resume On Another Computer
 
@@ -414,26 +413,22 @@ git status --short --branch
 ```
 
 If it has unrelated local changes or an uncertain branch state, do not
-automatically stash, reset, or force-switch it. Use the separate-clone path
-below. If it is clean and the local feature branch already exists, run this
-block as one unit; `&&` prevents a failed switch from merging into the previous
-branch:
+automatically stash, reset, or force-switch it. Use a separate clone. If it is
+clean, fetch the merged base and the Task 8 branch:
 
 ```bash
-git fetch --prune origin \
-  refs/heads/feature/tui-input-foundation:refs/remotes/origin/feature/tui-input-foundation
-git switch feature/tui-input-foundation && \
-  git merge --ff-only origin/feature/tui-input-foundation
+git fetch --prune origin
+git switch main
+git merge --ff-only origin/main
+git switch feature/tui-cursor-placement
+git merge --ff-only origin/feature/tui-cursor-placement
 ```
 
-If the checkout is clean but the local feature branch does not exist, use this
-mutually exclusive block instead of the preceding switch/merge block:
+If the local Task 8 branch does not exist, track it after the fetch:
 
 ```bash
-git fetch --prune origin \
-  refs/heads/feature/tui-input-foundation:refs/remotes/origin/feature/tui-input-foundation
-git switch --track -c feature/tui-input-foundation \
-  origin/feature/tui-input-foundation
+git switch --track -c feature/tui-cursor-placement \
+  origin/feature/tui-cursor-placement
 ```
 
 Then prepare and verify the runtime:
@@ -455,14 +450,14 @@ Separate-clone path for any uncertain existing checkout:
 
 ```bash
 cd /path/to/parent
-git clone --branch feature/tui-input-foundation \
-  git@github.com:kumaleap/Transup.git Transup-input-foundation
-cd Transup-input-foundation
+git clone --branch feature/tui-cursor-placement \
+  git@github.com:kumaleap/Transup.git Transup-cursor-placement
+cd Transup-cursor-placement
 git status --short --branch
 ```
 
-Expected Node output is `v26.5.0`. The expected implementation-checkpoint
-baseline is 24 test files and 202 tests. Counts will increase after later tasks.
+Expected Node output is `v26.5.0`. The merged pre-Task-8 baseline is 29 test
+files and 319 tests. Counts will increase during Task 8.
 
 Before editing, confirm:
 
@@ -473,9 +468,8 @@ git status --porcelain
 git log --oneline --decorate -12
 ```
 
-The branch must be `feature/tui-input-foundation`, and the working tree should
-be clean. The exact tip may be newer than `7a64736` because this handoff is a
-separate documentation commit.
+The branch must be `feature/tui-cursor-placement`, and the working tree should
+be clean. Its base must contain `b81564e`.
 
 ## Environment Notes
 
@@ -498,11 +492,9 @@ After every agent result, inspect the diff and run the relevant verification
 from the coordinating agent. Never accept an agent's success report as test
 evidence by itself.
 
-Tasks 5-8 have a real dependency chain: history consumes structured paste
-references, search consumes persisted history, and cursor/PTY coverage consumes
-paste and search states. Parallel agents can prepare tests, audit requirements,
-and review completed diffs, but the shared integration edits should proceed in
-task order.
+Task 8 consumes the completed paste, history, and search work. Parallel agents
+can prepare tests, audit requirements, and review completed diffs, but one
+integration writer must own the shared App/TextInput changes.
 
 ## Atomic Commit Rules
 

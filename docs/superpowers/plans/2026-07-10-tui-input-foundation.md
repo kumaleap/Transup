@@ -4,13 +4,16 @@
 
 **Goal:** Replace the component-local prompt input with a grapheme-safe, multiline, persistent input foundation using official Ink 7.1, project history, and incremental `Ctrl+R` search.
 
+**Execution status:** Tasks 1-7 are complete; Task 8 is active on
+`feature/tui-cursor-placement` from `main` checkpoint `b81564e`.
+
 **Architecture:** Pure text, measurement, editor, paste, history, and search modules sit behind an App-level input controller. `App` owns the only Ink input and paste subscriptions and routes normalized keystrokes through one synchronous context router; `TextInput` and `PermissionDialog` become presentations. Filesystem history is isolated behind a serialized JSONL store.
 
 **Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, string-width 8.2.2, Vitest 3.2.7, ink-testing-library 4.0.0.
 
 ## Global Constraints
 
-- Work only on branch `feature/tui-input-foundation`.
+- Work on branch `feature/tui-cursor-placement` for Task 8.
 - Use official Ink 7.1.0; do not copy, translate, or derive Claude's private renderer.
 - Pin `.nvmrc` to `26.5.0`; root and CLI engines require Node `>=26`.
 - Keep React at stable `19.2.7`, `@types/react` at `19.2.17`, and TypeScript at `6.0.3`.
@@ -824,12 +827,14 @@ queue guarantees serialization only inside one JavaScript module realm. The
 compaction source-size check is a best-effort mitigation, not cross-process
 atomicity.
 
-This follow-up is tracked separately and does not block Tasks 7-9 unless
+This follow-up is tracked separately and does not block Tasks 8-9 unless
 cross-process losslessness becomes a release requirement for this phase.
 
 ---
 
 ### Task 7: Add Incremental Ctrl-R Search
+
+**Status:** Completed in `eb5e1f2` and merged to `main` in `b81564e`.
 
 **Files:**
 - Create: `packages/cli/src/tui/input/history-search.ts`
@@ -843,7 +848,7 @@ cross-process losslessness becomes a release requirement for this phase.
 - Consumes: latest-100 in-memory `HistoryEntry[]`, editor snapshot, and history-search context routing.
 - Produces: pure `HistorySearchState`, candidate/match range, accept/cancel/submit effects, and search footer/highlight.
 
-- [ ] **Step 1: Write failing search-state tests**
+- [x] **Step 1: Write failing search-state tests**
 
 Use this API:
 
@@ -875,17 +880,17 @@ export function nextHistoryMatch(
 
 Test that empty query immediately selects newest, matching is case-sensitive and uses the last occurrence, repeated `Ctrl+R` skips duplicate display values and moves older, query edit resets at newest, no-match keeps last candidate, never-matched keeps original, Chinese/multiline entries match, and paste references follow the candidate.
 
-- [ ] **Step 2: Run search tests and confirm the red state**
+- [x] **Step 2: Run search tests and confirm the red state**
 
 Run: `npx vitest run packages/cli/test/tui-input/history-search.test.ts`
 
 Expected: module resolution fails because `history-search.ts` does not exist.
 
-- [ ] **Step 3: Implement the pure state transitions**
+- [x] **Step 3: Implement the pure state transitions**
 
 Search from `history.length - 1` downward. For each unseen display containing the query, clone an editor candidate from the history entry, set the cursor to `lastIndexOf(query) + query.length`, and remember the span. On no match, set `hasMatch=false` without changing `candidate`. Query changes reset `seen` and `nextIndex`.
 
-- [ ] **Step 4: Integrate the search context**
+- [x] **Step 4: Integrate the search context**
 
 The controller enters search on `Ctrl+R` only while idle. While active:
 
@@ -900,11 +905,11 @@ Ctrl+C          restore exact original snapshot
 
 Mirror context state in a ref before returning from each handler so a following event in the same stdin batch uses the new context. `App` passes `history-search` to `routeKeystroke` while active.
 
-- [ ] **Step 5: Render and test search feedback**
+- [x] **Step 5: Render and test search feedback**
 
 `TextInput` renders `search prompts: <query>` or `no matching prompt: <query>` below the input. Hide the normal inverse cursor during search and color only the matched span with `T.warn`. Add App integration cases for enter, escape, tab, cancel, repeat, no-match, persisted-history search, and permission/global priority.
 
-- [ ] **Step 6: Verify and commit incremental search**
+- [x] **Step 6: Verify and commit incremental search**
 
 Run:
 
@@ -923,6 +928,9 @@ git commit -m "feat(tui): add incremental Ctrl-R history search"
 ---
 
 ### Task 8: Declare Measured Terminal Cursor Placement
+
+**Status:** In progress on `feature/tui-cursor-placement`, based on merged
+`main` checkpoint `b81564e`.
 
 **Files:**
 - Create: `packages/cli/test/fixtures/pty-input-app.tsx`
