@@ -281,19 +281,40 @@ function truncateWidth(s: string, max: number): string {
  * 基础版 Markdown 表格 → 盒线全边框。
  * - 单元格两侧 1 空格 padding；表头居中，数据按对齐标记（默认左）
  * - 列宽 = 内容最宽（displayWidth，CJK 算 2 列）；数据行之间也画 ├┼┤
- * - 超过 MAX_TABLE_WIDTH 时按比例压缩列宽（下限 3），溢出格截断加 …
+ * - 超过 MAX_TABLE_WIDTH 时按比例压缩列宽（下限通常为 3，必要时降至 1），溢出格截断加 …
+ * - 连 1 列内容宽也放不下全部列时，保留前部列并以末尾 … 列表示省略
  *   （规格里的折行/垂直格式回退不做——纯字符串渲染器拿不到终端宽度，
  *   截断已能保证不撕裂）
  */
 function renderTable(rawRows: string[]): string {
-  const headerCells = splitTableRow(rawRows[0]);
-  const aligns: CellAlign[] = splitTableRow(rawRows[1]).map((c) => {
+  const columnFrameWidth = 3; // 左分隔符 + 两侧 padding；整行另有收尾分隔符
+  const minimumColumnWidth = 1;
+  const preferredMinimumWidth = 3;
+  const rawHeaderCells = splitTableRow(rawRows[0]);
+  const rawAligns: CellAlign[] = splitTableRow(rawRows[1]).map((c) => {
     const l = c.startsWith(":");
     const r = c.endsWith(":");
     return l && r ? "center" : r ? "right" : "left";
   });
-  const dataRows = rawRows.slice(2).map(splitTableRow);
-  const cols = Math.max(headerCells.length, aligns.length, 1, ...dataRows.map((r) => r.length));
+  const rawDataRows = rawRows.slice(2).map(splitTableRow);
+  const sourceCols = Math.max(
+    rawHeaderCells.length,
+    rawAligns.length,
+    1,
+    ...rawDataRows.map((r) => r.length),
+  );
+  const maxVisibleCols = Math.floor(
+    (MAX_TABLE_WIDTH - 1) / (columnFrameWidth + minimumColumnWidth),
+  );
+  const cols = Math.min(sourceCols, maxVisibleCols);
+  const omitsColumns = sourceCols > cols;
+  const visibleCells = (cells: string[]) =>
+    Array.from({ length: cols }, (_, c) => (omitsColumns && c === cols - 1 ? "…" : cells[c]));
+  const headerCells = visibleCells(rawHeaderCells);
+  const aligns: CellAlign[] = Array.from({ length: cols }, (_, c) =>
+    omitsColumns && c === cols - 1 ? "center" : (rawAligns[c] ?? "left"),
+  );
+  const dataRows = rawDataRows.map(visibleCells);
 
   // 每格预渲染 inline 样式；宽度按剥掉控制序列后的可见文本算
   const mk = (raw: string | undefined) => {
@@ -307,10 +328,13 @@ function renderTable(rawRows: string[]): string {
   let widths = Array.from({ length: cols }, (_, c) =>
     Math.max(1, head[c].width, ...body.map((r) => r[c].width)),
   );
-  const budget = MAX_TABLE_WIDTH - (3 * cols + 1); // 每列占 "│ … " 3 列 + 收尾 │
+  const budget = MAX_TABLE_WIDTH - (columnFrameWidth * cols + 1);
   const total = widths.reduce((a, b) => a + b, 0);
-  const minWidth = 3;
-  if (total > budget && budget > cols * minWidth) {
+  const minWidth = Math.max(
+    minimumColumnWidth,
+    Math.min(preferredMinimumWidth, Math.floor(budget / cols)),
+  );
+  if (total > budget) {
     const remainingBudget = budget - cols * minWidth;
     const extraWidths = widths.map((w) => Math.max(0, w - minWidth));
     const extraTotal = extraWidths.reduce((a, b) => a + b, 0);

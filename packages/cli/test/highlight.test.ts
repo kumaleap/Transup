@@ -262,6 +262,30 @@ describe("renderMarkdown", () => {
     }
   });
 
+  it("14 列表格降低最小列宽后仍不超过 80 列", () => {
+    const headers = Array.from({ length: 14 }, (_, i) => `H${i + 1}`);
+    const separator = headers.map(() => "---");
+    const values = ["x".repeat(120), ...Array.from({ length: 13 }, () => "y")];
+    const row = (cells: string[]) => `| ${cells.join(" | ")} |`;
+    const out = strip(renderMarkdown([row(headers), row(separator), row(values)].join("\n")));
+    for (const line of out.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+    expect(out).toContain("…");
+  });
+
+  it("超过最大可见列数时省略尾部列且不超过 80 列", () => {
+    const headers = Array.from({ length: 20 }, (_, i) => String.fromCharCode(65 + i));
+    const separator = headers.map(() => "---");
+    const values = headers.map((header) => header.toLowerCase());
+    const row = (cells: string[]) => `| ${cells.join(" | ")} |`;
+    const out = strip(renderMarkdown([row(headers), row(separator), row(values)].join("\n")));
+    for (const line of out.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+    expect(out).toContain("…");
+  });
+
   it("没有分隔行的 | 行按普通段落处理", () => {
     const out = strip(renderMarkdown("a | b | c"));
     expect(out).toBe("a | b | c");
