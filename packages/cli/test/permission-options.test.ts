@@ -126,6 +126,63 @@ describe("buildPermissionView", () => {
     ).toBe("allow");
   });
 
+  it("bash：精确规则统一忽略命令外层空白，且不改变命令正文", () => {
+    for (const [command, normalized] of [
+      ["  echo ok && printf done  ", "echo ok && printf done"],
+      ["echo ok\nprintf done\n", "echo ok\nprintf done"],
+      ['  echo "  body  " && printf done  ', 'echo "  body  " && printf done'],
+    ] as const) {
+      const view = buildPermissionView(confirmOf("bash", { command }));
+      const scoped = view.options.find((option) => option.value === "yes-prefix");
+      expect(scoped?.input?.value, command).toBe(normalized);
+
+      const updates = scoped!.input!.buildUpdates(scoped!.input!.value);
+      expect(updates, command).toEqual([
+        {
+          type: "addRule",
+          list: "allow",
+          rule: `bash(${normalized})`,
+          destination: "localSettings",
+        },
+      ]);
+      const update = updates[0];
+      if (update.type !== "addRule") throw new Error("expected addRule update");
+      expect(
+        evaluatePermission(
+          { mode: "default", rules: normalizeRules({ allow: [update.rule] }) },
+          { toolName: "bash", args: { command }, readOnly: false },
+        ).behavior,
+        command,
+      ).toBe("allow");
+    }
+  });
+
+  it("bash：回车是命令内容而不是可忽略外层空白", () => {
+    const command = "echo\r";
+    const view = buildPermissionView(confirmOf("bash", { command }));
+    const scoped = view.options.find((option) => option.value === "yes-prefix");
+    expect(scoped?.input?.value).toBe(command);
+
+    const updates = scoped!.input!.buildUpdates(scoped!.input!.value);
+    expect(updates).toEqual([
+      { type: "addRule", list: "allow", rule: `bash(${command})`, destination: "localSettings" },
+    ]);
+    const update = updates[0];
+    if (update.type !== "addRule") throw new Error("expected addRule update");
+    expect(
+      evaluatePermission(
+        { mode: "default", rules: normalizeRules({ allow: [update.rule] }) },
+        { toolName: "bash", args: { command }, readOnly: false },
+      ).behavior,
+    ).toBe("allow");
+    expect(
+      evaluatePermission(
+        { mode: "default", rules: normalizeRules({ allow: ["bash(echo)"] }) },
+        { toolName: "bash", args: { command }, readOnly: false },
+      ).behavior,
+    ).toBe("ask");
+  });
+
   it("bash：解释器安全询问不提供无法生效的持久化选项", () => {
     const command = "node -e 'console.log(1)'";
     const verdict = evaluatePermission(

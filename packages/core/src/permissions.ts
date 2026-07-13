@@ -1,5 +1,5 @@
-import { realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 /**
  * 权限判定 —— 一次工具调用能不能跑，由谁说了算
@@ -85,6 +85,10 @@ function parseContentRule(rule: string): { tool: string; pattern: string } | und
   return match === null ? undefined : { tool: match[1], pattern: match[2] };
 }
 
+function normalizeBashOuterWhitespace(command: string): string {
+  return command.replace(/^[ \t\n]+|[ \t\n]+$/g, "");
+}
+
 type BashToken = { kind: "word" | "operator"; value: string };
 
 interface BashAnalysis {
@@ -162,7 +166,7 @@ function tokenizeBash(command: string): { tokens: BashToken[]; unsafe: boolean }
   for (let i = 0; i < command.length; i += 1) {
     const char = command[i];
 
-    if (char === " " || char === "\t" || char === "\r") {
+    if (char === " " || char === "\t") {
       pushWord();
       continue;
     }
@@ -412,23 +416,94 @@ function bashPrefixMayMatch(rule: string, command: string): boolean {
   );
 }
 
+function splitPathSegments(value: string): string[] {
+  const separator = process.platform === "win32" ? /[\\/]+/ : /\/+/;
+  return value.split(separator).filter((segment) => segment !== "");
+}
+
+function foldMissingPath(current: string, segments: string[]): string {
+  let folded = current;
+  for (const segment of segments) {
+    if (segment === ".") continue;
+    folded = segment === ".." ? dirname(folded) : join(folded, segment);
+  }
+  return folded;
+}
+
 function canonicalPath(value: string): string | undefined {
-  // Keep `..` segments intact until realpath resolves any preceding symlink.
-  // Lexically normalizing first can point at a different file than the tool opens.
-  let current = value;
+  const initial = parse(value);
+  let current: string;
+  let pending: string[];
+
+  try {
+    if (isAbsolute(value)) {
+      current = realpathSync.native(initial.root);
+      pending = splitPathSegments(value.slice(initial.root.length));
+    } else {
+      current = realpathSync.native(process.cwd());
+      pending = splitPathSegments(value);
+    }
+  } catch {
+    return undefined;
+  }
+
+  let followedLinks = 0;
   const missing: string[] = [];
-  for (;;) {
+  while (pending.length > 0) {
+    const segment = pending.shift()!;
+    if (segment === ".") continue;
+    if (segment === "..") {
+      if (missing.length > 0) missing.pop();
+      else current = dirname(current);
+      continue;
+    }
+    if (missing.length > 0) {
+      missing.push(segment);
+      continue;
+    }
+
+    const candidate = join(current, segment);
+    let stat: ReturnType<typeof lstatSync>;
     try {
-      return resolve(realpathSync.native(current), ...missing);
+      stat = lstatSync(candidate);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
-      const parent = dirname(current);
-      if (parent === current) return undefined;
-      missing.unshift(basename(current));
-      current = parent;
+      if (code !== "ENOENT") return undefined;
+      missing.push(segment);
+      continue;
+    }
+
+    if (!stat.isSymbolicLink()) {
+      if (pending.length > 0 && !stat.isDirectory()) return undefined;
+      try {
+        current = realpathSync.native(candidate);
+      } catch {
+        return undefined;
+      }
+      continue;
+    }
+
+    followedLinks += 1;
+    if (followedLinks > 40) return undefined;
+    try {
+      const target = readlinkSync(candidate);
+      if (!isAbsolute(target)) {
+        pending.unshift(...splitPathSegments(target));
+        continue;
+      }
+
+      const targetRoot = parse(target).root;
+      try {
+        current = realpathSync.native(targetRoot);
+      } catch {
+        return undefined;
+      }
+      pending.unshift(...splitPathSegments(target.slice(targetRoot.length)));
+    } catch {
+      return undefined;
     }
   }
+  return missing.length === 0 ? current : foldMissingPath(current, missing);
 }
 
 function pathIsDescendant(prefix: string, content: string): boolean {
@@ -473,14 +548,16 @@ function ruleMatchesWithPolicy(
   if (content === undefined) return false;
   if (toolName === "bash") {
     if (pattern.endsWith(":*")) return bashPrefixMatches(pattern.slice(0, -2), content);
-    return content === pattern;
+    return normalizeBashOuterWhitespace(content) === normalizeBashOuterWhitespace(pattern);
   }
   if (pattern.endsWith(":*")) {
     return pathPrefixMatches(pattern.slice(0, -2), content, conservativePaths);
   }
   const realContent = canonicalPath(content);
   const realPattern = canonicalPath(pattern);
-  return realContent !== undefined && realPattern !== undefined && realContent === realPattern;
+  const canonicalMatch =
+    realContent !== undefined && realPattern !== undefined && realContent === realPattern;
+  return canonicalMatch || (conservativePaths && resolve(content) === resolve(pattern));
 }
 
 /** 单条规则是否命中（工具级 or 内容级）；文件 scope 使用授权所需的真实路径语义。 */
@@ -511,10 +588,13 @@ function findMatch(
 }
 
 function hasExactBashContentRule(rules: string[], command: string): boolean {
+  const normalizedCommand = normalizeBashOuterWhitespace(command);
   return rules.some((rule) => {
     const parsed = parseContentRule(rule);
     return (
-      parsed?.tool === "bash" && !parsed.pattern.endsWith(":*") && parsed.pattern === command
+      parsed?.tool === "bash" &&
+      !parsed.pattern.endsWith(":*") &&
+      normalizeBashOuterWhitespace(parsed.pattern) === normalizedCommand
     );
   });
 }
@@ -746,7 +826,7 @@ export function nextPermissionMode(
  * git commit 这类），第二词是选项/路径时只取首词。
  */
 export function commandPrefix(command: string): string {
-  const trimmed = command.trim();
+  const trimmed = normalizeBashOuterWhitespace(command);
   const words = analyzeBash(command).simpleWords;
   if (words === null) return trimmed;
   if (words.length <= 1) return trimmed;
@@ -760,8 +840,8 @@ export function commandPrefix(command: string): string {
 
 /** 由前缀生成 bash 内容规则："npm run" → "bash(npm run:*)"；整条命令 → 精确规则 */
 export function bashPrefixRule(command: string, requestedPrefix = commandPrefix(command)): string {
-  const trimmed = command.trim();
-  const prefix = requestedPrefix.trim();
+  const trimmed = normalizeBashOuterWhitespace(command);
+  const prefix = normalizeBashOuterWhitespace(requestedPrefix);
   return prefix !== trimmed && bashPrefixMatches(prefix, command)
     ? `bash(${prefix}:*)`
     : `bash(${trimmed})`;

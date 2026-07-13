@@ -1,7 +1,14 @@
 /** 权限判定：规则匹配、优先级链、模式循环、bash 前缀启发 */
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   bashPrefixRule,
@@ -35,6 +42,7 @@ describe("ruleMatches", () => {
     expect(ruleMatches("bash(git status)", "bash", { command: "git status --short" })).toBe(false);
     expect(ruleMatches("bash(npm run:*)", "bash", { command: "npm run build" })).toBe(true);
     expect(ruleMatches("bash(npm run:*)", "bash", { command: "npm install" })).toBe(false);
+    expect(ruleMatches("bash(echo)", "bash", { command: "echo\r" })).toBe(false);
   });
 
   it("Bash 前缀规则只授权单个简单命令，复合命令需要整条精确规则", () => {
@@ -234,6 +242,204 @@ describe("ruleMatches", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("文件 allow 前缀不授权指向目录外缺失目标的末端符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-dangling-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      const target = join(outside, "new.txt");
+      const link = join(source, "link");
+      mkdirSync(source);
+      mkdirSync(outside);
+      symlinkSync(join("..", "outside", "new.txt"), link);
+
+      const rule = `write_file(${source}${sep}:*)`;
+      const matched = ruleMatches(rule, "write_file", { path: link });
+      const verdict = evaluatePermission(
+        ctx({ rules: rules({ allow: [rule] }) }),
+        { toolName: "write_file", args: { path: link }, readOnly: false },
+      );
+
+      writeFileSync(link, "created outside");
+      expect(readFileSync(target, "utf-8")).toBe("created outside");
+      expect(matched).toBe(false);
+      expect(verdict.behavior).toBe("ask");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("多段与中间缺失符号链接按最终目标及剩余后代解析", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-dangling-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      mkdirSync(source);
+      mkdirSync(outside);
+      symlinkSync("second", join(source, "first"));
+      symlinkSync(join(outside, "new.txt"), join(source, "second"));
+      symlinkSync(join(outside, "missing-dir"), join(source, "directory"));
+      const allowRule = `write_file(${source}${sep}:*)`;
+      const denyRule = `write_file(${outside}${sep}:*)`;
+
+      for (const path of [join(source, "first"), join(source, "directory", "child.txt")]) {
+        expect(ruleMatches(allowRule, "write_file", { path }), path).toBe(false);
+        expect(
+          evaluatePermission(
+            ctx({ mode: "bypassPermissions", rules: rules({ deny: [denyRule] }) }),
+            { toolName: "write_file", args: { path }, readOnly: false },
+          ).behavior,
+          path,
+        ).toBe("deny");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("缺失分量被 .. 抵消后恢复检查后续现有符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-cancel-missing-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      const target = join(outside, "new.txt");
+      const path = `${source}${sep}missing${sep}..${sep}link`;
+      mkdirSync(source);
+      mkdirSync(outside);
+      symlinkSync(join("..", "outside", "new.txt"), join(source, "link"));
+      const allowRule = `write_file(${source}${sep}:*)`;
+      const denyRule = `write_file(${outside}${sep}:*)`;
+
+      const matched = ruleMatches(allowRule, "write_file", { path });
+      const allowVerdict = evaluatePermission(
+        ctx({ rules: rules({ allow: [allowRule] }) }),
+        { toolName: "write_file", args: { path }, readOnly: false },
+      );
+      const denyVerdict = evaluatePermission(
+        ctx({
+          mode: "bypassPermissions",
+          rules: rules({ allow: [allowRule], deny: [denyRule] }),
+        }),
+        { toolName: "write_file", args: { path }, readOnly: false },
+      );
+
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, "created outside");
+      expect(readFileSync(target, "utf-8")).toBe("created outside");
+      expect(matched).toBe(false);
+      expect(allowVerdict.behavior).toBe("ask");
+      expect(denyVerdict.behavior).toBe("deny");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("文件 deny/ask 前缀按缺失目标的真实位置匹配末端符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-dangling-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      const link = join(source, "link");
+      mkdirSync(source);
+      mkdirSync(outside);
+      symlinkSync(join(outside, "new.txt"), link);
+      const rule = `write_file(${outside}${sep}:*)`;
+      const allowRule = `write_file(${source}${sep}:*)`;
+
+      for (const [list, expected] of [
+        ["deny", "deny"],
+        ["ask", "ask"],
+      ] as const) {
+        expect(
+          evaluatePermission(
+            ctx({
+              mode: "bypassPermissions",
+              rules: rules({ [list]: [rule], allow: [allowRule] }),
+            }),
+            { toolName: "write_file", args: { path: link }, readOnly: false },
+          ).behavior,
+          list,
+        ).toBe(expected);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("普通缺失后代仍按最近存在父目录匹配，不被当成符号链接逃逸", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-missing-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      const target = join(source, "new", "file.txt");
+      mkdirSync(source);
+      mkdirSync(outside);
+      const allowRule = `write_file(${source}${sep}:*)`;
+      const denyRule = `write_file(${outside}${sep}:*)`;
+
+      expect(ruleMatches(allowRule, "write_file", { path: target })).toBe(true);
+      expect(
+        evaluatePermission(
+          ctx({ rules: rules({ allow: [allowRule] }) }),
+          { toolName: "write_file", args: { path: target }, readOnly: false },
+        ).behavior,
+      ).toBe("allow");
+      expect(
+        evaluatePermission(
+          ctx({ mode: "bypassPermissions", rules: rules({ deny: [denyRule] }) }),
+          { toolName: "write_file", args: { path: target }, readOnly: false },
+        ).behavior,
+      ).toBe("allow");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("现有普通文件后的路径分量失败关闭，符号链接循环有界返回", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-cycle-"));
+    try {
+      const source = join(root, "src");
+      mkdirSync(source);
+      writeFileSync(join(source, "file.txt"), "file");
+      symlinkSync("second", join(source, "first"));
+      symlinkSync("first", join(source, "second"));
+      const rule = `write_file(${source}${sep}:*)`;
+
+      for (const path of [
+        `${source}${sep}file.txt${sep}..${sep}new.txt`,
+        join(source, "first"),
+      ]) {
+        expect(ruleMatches(rule, "write_file", { path }), path).toBe(false);
+        expect(
+          evaluatePermission(
+            ctx({ rules: rules({ allow: [rule] }) }),
+            { toolName: "write_file", args: { path }, readOnly: false },
+          ).behavior,
+          path,
+        ).toBe("ask");
+      }
+
+      const cycle = join(source, "first");
+      for (const [list, expected] of [
+        ["deny", "deny"],
+        ["ask", "ask"],
+      ] as const) {
+        expect(
+          evaluatePermission(
+            ctx({
+              mode: "bypassPermissions",
+              rules: rules({ [list]: [`write_file(${cycle})`] }),
+            }),
+            { toolName: "write_file", args: { path: cycle }, readOnly: false },
+          ).behavior,
+          list,
+        ).toBe(expected);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("evaluatePermission 优先级", () => {
@@ -380,6 +586,35 @@ describe("evaluatePermission 优先级", () => {
       );
       expect(verdict.behavior).toBe("ask");
       expect(verdict.behavior === "ask" && verdict.reason.type).toBe("safety");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("safetyCheck：末端符号链接的缺失目标仍按真实敏感路径询问", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-sensitive-"));
+    try {
+      const source = join(root, "src");
+      const gitDir = join(root, ".git");
+      const link = join(source, "link");
+      mkdirSync(source);
+      mkdirSync(gitDir);
+      symlinkSync(join("..", ".git", "config"), link);
+
+      for (const path of [link, `${source}${sep}missing${sep}..${sep}link`]) {
+        const verdict = evaluatePermission(
+          ctx({ mode: "bypassPermissions" }),
+          { toolName: "write_file", args: { path }, readOnly: false },
+        );
+        expect(verdict.behavior, path).toBe("ask");
+        expect(verdict.behavior === "ask" && verdict.reason.type, path).toBe("safety");
+        expect(
+          verdict.behavior === "ask" && verdict.reason.type === "safety"
+            ? verdict.reason.path
+            : undefined,
+          path,
+        ).toBe(".git");
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
