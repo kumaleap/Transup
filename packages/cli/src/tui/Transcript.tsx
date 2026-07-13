@@ -92,7 +92,7 @@ export function summarizeToolCall(
       // 直接显示命令原文（比 key: value 更一眼看懂要跑什么）
       return { displayName: name, argSummary: truncateCommand(String(args.command ?? "")) };
     case "read_file":
-      return { displayName: name, argSummary: displayPath(args.path) };
+      return { displayName: "Read", argSummary: displayPath(args.path) };
     case "edit_file":
       return { displayName: "Update", argSummary: displayPath(args.path) };
     case "write_file":

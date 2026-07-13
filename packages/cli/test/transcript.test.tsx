@@ -88,7 +88,7 @@ describe("summarizeToolCall（参数摘要按工具定制，规格 §2.2）", ()
   it("read_file 显示相对路径", () => {
     const abs = join(process.cwd(), "src", "a.ts");
     expect(summarizeToolCall("read_file", { path: abs })).toEqual({
-      displayName: "read_file",
+      displayName: "Read",
       argSummary: join("src", "a.ts"),
     });
   });
