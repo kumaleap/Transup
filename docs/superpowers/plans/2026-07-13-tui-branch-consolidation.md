@@ -2,21 +2,21 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Repair the main-branch PTY smoke, merge the two outstanding TUI feature branches with their original ancestry, preserve both branches' behavior at shared App event handlers, and merge the verified result into local `main`.
+**Goal:** Repair the main-branch PTY smoke, merge the three outstanding TUI feature branches with their original ancestry, preserve their combined App, permission, visual, and streaming behavior, and merge the verified result into local `main`.
 
-**Architecture:** Work on `integration/tui-branch-consolidation` in the existing `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` worktree. Commit the PTY repair first, merge `message-visual`, then merge `streaming-activity`; resolve its known `App.tsx` conflict through an App-level RED/GREEN regression that proves visual tool summaries and streaming interruption behavior coexist. Verify the combined branch under Node 26 before creating a final local-main merge commit and a clean deferred-capabilities worktree.
+**Architecture:** Work on `integration/tui-branch-consolidation` in the existing `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` worktree. Commit the PTY repair first, merge `message-visual`, then merge `streaming-activity`; resolve its known `App.tsx` conflict through an App-level RED/GREEN regression that proves visual tool summaries and streaming interruption behavior coexist. Merge `feature/tui-permission-dialogs` last so its core policy and queued controller can be reconciled against the already combined App, preserve the repaired PTY harness explicitly, then verify the complete branch under Node 26 before creating a final local-main merge commit and a clean deferred-capabilities worktree.
 
 **Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, Vitest 3.2.7, ink-testing-library 4.0.0, Git worktrees.
 
 ## Global Constraints
 
 - Follow `docs/superpowers/specs/2026-07-13-tui-branch-consolidation-design.md` exactly.
-- Work only in `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` until Task 5 explicitly moves to the primary checkout.
-- Preserve the original commit identities of `9cc3797` and `82767dc` through real merge commits; do not rebase, squash, or cherry-pick them.
+- Work only in `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` until Task 6 explicitly moves to the primary checkout.
+- Preserve the original commit identities of `9cc3797`, `82767dc`, and `f630e23` through real merge commits; do not rebase, squash, or cherry-pick them.
 - Use Node `26.5.0` for every install, test, typecheck, build, and CLI smoke command.
 - Do not implement cross-process history locking, thinking rendering, `Ctrl+O`, Todo, images, or additional interaction-study 02/03 behavior.
 - Do not push `main`, force-update any ref, or delete any local or remote branch.
-- Preserve the user's untracked `/Users/kuma/workspace/Transup/.claude/` directory.
+- Preserve the user's untracked `/Users/kuma/workspace/Transup/.claude/` directory and `/Users/kuma/workspace/Transup/packages/cli/test/fixtures/jsx-probe.tsx` file.
 - Apply RED-GREEN-REFACTOR to every new regression; merge-only verification tasks reuse the tests already committed with their source branches.
 - Stage exact paths and use Conventional Commit subjects for non-merge commits.
 
@@ -25,7 +25,14 @@
 - `packages/cli/test/fixtures/pty-input-app.tsx`: standalone Node 26/`tsx` PTY fixture; must have a valid JSX runtime.
 - `packages/cli/test/tui-input/pty-smoke.test.ts`: macOS/Linux system-PTY contract and early-exit diagnostics.
 - `packages/cli/src/tui/App.tsx`: shared visual/streaming integration point for tool and turn lifecycle events.
+- `packages/cli/src/tui/PermissionDialog.tsx`: permission controller view plus the visual file-diff preview frame.
+- `packages/cli/src/tui/permission/`: queued permission controller, view types, and per-tool option construction.
+- `packages/core/src/permissions.ts`: UI-independent permission evaluation, modes, rules, and persistence updates.
+- `packages/core/src/settings.ts`: layered settings and permission rule persistence.
+- `packages/core/src/tools/registry.ts`: structured permission decisions, updated-input validation, and feedback flow.
 - `packages/cli/test/tui.test.tsx`: production App behavior across provider events, tool execution, streaming, interruption, cursor, permission, paste, and history.
+- `packages/cli/test/permission-options.test.ts`: permission view-model routing and update construction.
+- `packages/core/test/permissions.test.ts`: policy ordering, rule matching, and mode behavior.
 - `docs/superpowers/specs/2026-07-13-tui-branch-consolidation-design.md`: approved behavior and scope boundary.
 - `docs/superpowers/plans/2026-07-13-tui-branch-consolidation.md`: execution record for this consolidation.
 
@@ -41,7 +48,7 @@
 - Consumes: standalone workspace `tsx`, macOS/Linux `script`, `waitForOutput(child, getOutput, predicate)`, and `diagnostic(output)`.
 - Produces: a PTY fixture that reaches Ink's ready state and an early-exit error containing the captured terminal output.
 
-- [ ] **Step 1: Install the exact locked dependencies under Node 26**
+- [x] **Step 1: Install the exact locked dependencies under Node 26**
 
 Run:
 
@@ -53,7 +60,7 @@ PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH node --version
 
 Expected: install exits zero without changing `package-lock.json`; Node prints `v26.5.0`.
 
-- [ ] **Step 2: Verify the existing macOS PTY RED outside the restricted sandbox**
+- [x] **Step 2: Verify the existing macOS PTY RED outside the restricted sandbox**
 
 Run outside the sandbox:
 
@@ -64,7 +71,7 @@ env PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:/usr/local/bin:/usr/bin:/bin
 
 Expected: FAIL because the fixture exits before ready. Running its emitted command directly reports `ReferenceError: React is not defined` at `pty-input-app.tsx:83`.
 
-- [ ] **Step 3: Give the standalone fixture a valid classic JSX binding**
+- [x] **Step 3: Give the standalone fixture a valid classic JSX binding**
 
 Change the fixture import to:
 
@@ -74,7 +81,7 @@ import React, {useCallback, useRef} from "react";
 
 Do not change the production JSX configuration or Vitest transform to accommodate this standalone test process.
 
-- [ ] **Step 4: Include captured output in the early-exit error**
+- [x] **Step 4: Include captured output in the early-exit error**
 
 Replace the `onClose` error construction with:
 
@@ -92,7 +99,7 @@ const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
 
 This changes only test diagnostics. Keep the existing 4,000-character tail bound.
 
-- [ ] **Step 5: Verify the PTY GREEN and focused cursor suite**
+- [x] **Step 5: Verify the PTY GREEN and focused cursor suite**
 
 Run outside the sandbox:
 
@@ -111,7 +118,7 @@ git diff --check
 
 Expected: both commands exit zero.
 
-- [ ] **Step 6: Commit the PTY repair**
+- [x] **Step 6: Commit the PTY repair**
 
 ```bash
 git add packages/cli/test/fixtures/pty-input-app.tsx packages/cli/test/tui-input/pty-smoke.test.ts
@@ -142,7 +149,7 @@ Expected: one commit containing only the fixture and its diagnostic test harness
 - Consumes: visual branch tip `9cc379735ddf5f5ac704f4a011c4a8c4e93c314b` and current integration branch.
 - Produces: a merge commit in which `9cc3797` is an ancestor and message formatting APIs such as `summarizeToolCall()`, `summarizeToolResult()`, `formatToolError()`, and `pushError()` are available for Task 3.
 
-- [ ] **Step 1: Confirm the branch and clean pre-merge state**
+- [x] **Step 1: Confirm the branch and clean pre-merge state**
 
 ```bash
 git branch --show-current
@@ -152,7 +159,7 @@ git rev-parse origin/feature/tui-message-visual
 
 Expected: current branch is `integration/tui-branch-consolidation`, the tracked worktree is clean, and the remote tip is `9cc379735ddf5f5ac704f4a011c4a8c4e93c314b`.
 
-- [ ] **Step 2: Merge the original visual branch with ancestry intact**
+- [x] **Step 2: Merge the original visual branch with ancestry intact**
 
 ```bash
 git merge --no-ff origin/feature/tui-message-visual -m "Merge branch 'feature/tui-message-visual' into integration/tui-branch-consolidation"
@@ -160,7 +167,7 @@ git merge --no-ff origin/feature/tui-message-visual -m "Merge branch 'feature/tu
 
 Expected: Git creates a merge commit without conflict; no file under the approved consolidation spec or plan is replaced by an older branch copy.
 
-- [ ] **Step 3: Verify the visual branch's focused suites on the current main base**
+- [x] **Step 3: Verify the visual branch's focused suites on the current main base**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/diff.test.ts packages/cli/test/highlight.test.ts packages/cli/test/transcript.test.tsx packages/cli/test/tui.test.tsx
@@ -170,7 +177,7 @@ git diff --check HEAD^1..HEAD
 
 Expected: all selected tests and typecheck pass; the merge introduces no whitespace errors.
 
-- [ ] **Step 4: Verify ancestry and merge contents**
+- [x] **Step 4: Verify ancestry and merge contents**
 
 ```bash
 git merge-base --is-ancestor 9cc379735ddf5f5ac704f4a011c4a8c4e93c314b HEAD
@@ -355,7 +362,7 @@ git commit -m "Merge branch 'feature/tui-streaming-activity' into integration/tu
 
 Expected: Git records a two-parent merge commit and exits the merge state.
 
-- [ ] **Step 10: Verify both outstanding tips are ancestors**
+- [ ] **Step 10: Verify the visual and streaming tips are ancestors**
 
 ```bash
 git merge-base --is-ancestor 9cc379735ddf5f5ac704f4a011c4a8c4e93c314b HEAD
@@ -367,14 +374,213 @@ Expected: both ancestry checks exit zero and the integration worktree is clean.
 
 ---
 
-### Task 4: Run The Complete Integration Gate And Independent Review
+### Task 4: Merge Permission Dialogs With Combined App Semantics
+
+**Files:**
+- Merge: `feature/tui-permission-dialogs`
+- Preserve from first parent: `packages/cli/test/fixtures/pty-input-app.tsx`
+- Preserve from first parent: `packages/cli/test/tui-input/pty-smoke.test.ts`
+- Modify: `packages/cli/src/tui/App.tsx`
+- Modify: `packages/cli/src/tui/PermissionDialog.tsx`
+- Modify: `packages/cli/src/tui/permission/options.ts`
+- Modify: `packages/cli/src/tui/permission/types.ts`
+- Modify: `packages/cli/test/permission-options.test.ts`
+- Modify: `packages/cli/test/tui.test.tsx`
+- Verify: `packages/core/src/permissions.ts`
+- Verify: `packages/core/src/settings.ts`
+- Verify: `packages/core/src/tools/registry.ts`
+
+**Interfaces:**
+- Consumes: permission tip `f630e234f024ba19eca5b4efda33d52ef0874468`, its parent PTY fix `9eda19ddfd1b03e5a10fbce137eaa945f0398c16`, the Task 3 visual/streaming App, and the Task 1 Darwin PTY bridge.
+- Produces: one merge commit where structured permission evaluation, queued confirmations, controller-based dialog input, visual tool summaries/errors, streaming activity, and a real non-skipped PTY smoke coexist.
+
+- [ ] **Step 1: Confirm the exact permission tip and clean pre-merge state**
+
+```bash
+git status --short --branch
+git rev-parse feature/tui-permission-dialogs
+git rev-parse origin/feature/tui-permission-dialogs
+git merge-base origin/main feature/tui-permission-dialogs
+```
+
+Expected: the worktree is clean; both permission refs equal
+`f630e234f024ba19eca5b4efda33d52ef0874468`; the merge base is
+`1b8c76790583b28592c43af46ee62ace4a210114`.
+
+- [ ] **Step 2: Start the real permission merge**
+
+```bash
+git merge --no-commit --no-ff feature/tui-permission-dialogs
+git diff --name-only --diff-filter=U
+```
+
+Expected: the permission/core/settings files and tests enter the index, while
+the shared App/dialog/PTY/test paths stop for explicit resolution. Do not
+abort, rebase, squash, or replace the merge with a cherry-pick.
+
+- [ ] **Step 3: Keep the repaired PTY harness instead of the permission branch's obsolete probe**
+
+```bash
+git restore --source=HEAD --staged --worktree packages/cli/test/fixtures/pty-input-app.tsx packages/cli/test/tui-input/pty-smoke.test.ts
+git add packages/cli/test/fixtures/pty-input-app.tsx packages/cli/test/tui-input/pty-smoke.test.ts
+```
+
+Expected: Darwin execution still uses the bounded `/bin/cat` to
+`/usr/bin/script` bridge and its exit marker; early fixture exit still includes
+captured output; capability detection cannot silently skip a bridge that the
+test can execute.
+
+- [ ] **Step 4: Resolve App, dialog, and App-test conflicts to the combined contract**
+
+Resolve conflict blocks without choosing either complete file. The resulting
+`App.tsx` must retain the permission branch's `evaluatePermission()`,
+`ToolUseConfirm[]` queue, `usePermissionController()`, permission-mode refs,
+update persistence, queue recheck, Ctrl+C queue rejection, and single
+`routeKeystroke()` path. It must also retain Task 3's exact event bodies:
+
+```ts
+case "tool_start": {
+  stallTrackerRef.current?.observeProgress(Date.now());
+  flushStream();
+  const {displayName, argSummary} = summarizeToolCall(
+    ev.call.name,
+    ev.parsedArgs,
+  );
+  tool = {name: displayName, argSummary, tail: [], streamed: false};
+  activeToolRef.current = tool;
+  setActiveTool(tool);
+  break;
+}
+```
+
+```ts
+case "turn_end":
+  if (ev.reason === "max_iterations") {
+    pushError("已达到单轮最大迭代次数，强制停止。");
+  } else if (ev.reason === "aborted") {
+    flushStream();
+    info("已中断 · 接下来要我做什么?");
+  } else if (ev.reason === "loop_detected") {
+    pushError("检测到模型在重复相同的调用（循环空转），已强制停止本轮。");
+  }
+  break;
+```
+
+Keep `activeToolRef`, whole-line preview/flush, stall tracking, the activity
+status line, structured visual tool results/errors, input metrics, one
+production `useInput()`, and one production `usePaste()`.
+
+Resolve `PermissionDialog.tsx` around the permission branch's
+`PermissionDialogView` and three-section option rows. In `tui.test.tsx`, retain
+both the Task 3 summary/interruption/activity regressions and the permission
+branch's numeric selection, Esc denial, feedback, plan-mode, and queued-ask
+tests. Remove obsolete assertions that require the old `y/n/a/A` dialog.
+
+- [ ] **Step 5: Add RED coverage for the retained visual diff frame**
+
+In the existing `edit_file` case in
+`packages/cli/test/permission-options.test.ts`, add:
+
+```ts
+expect(view.previewKind).toBe("diff");
+```
+
+In the App test that opens an edit/write permission dialog, capture the frame
+before selecting option `1` and add:
+
+```ts
+expect(frame).toContain("╌");
+```
+
+Run:
+
+```bash
+PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/permission-options.test.ts packages/cli/test/tui.test.tsx
+```
+
+Expected: the new `previewKind` assertion fails because the permission branch's
+view model does not yet distinguish diff previews. Existing Task 3 and
+permission-controller cases must compile at this baseline.
+
+- [ ] **Step 6: Add the minimal typed diff-preview adapter**
+
+Add this optional field to `PermissionViewModel`:
+
+```ts
+previewKind?: "diff";
+```
+
+Set `previewKind: "diff"` in the `edit_file` and `write_file` view models only.
+In `PermissionDialog.tsx`, retain the visual branch's `dashedEdges` constant and
+render `model.preview` as follows:
+
+```tsx
+{model.previewKind === "diff" ? (
+  <Box
+    flexDirection="column"
+    borderStyle={dashedEdges}
+    borderLeft={false}
+    borderRight={false}
+    borderColor={T.border}
+    borderDimColor
+  >
+    <Text>{model.preview}</Text>
+  </Box>
+) : (
+  model.preview && <Text>{model.preview}</Text>
+)}
+```
+
+Do not restore the old `PermissionRequest` or `y/n/a/A` decision API.
+
+- [ ] **Step 7: Verify permission, visual, streaming, input, and PTY behavior**
+
+```bash
+PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/core/test/permissions.test.ts packages/core/test/settings.test.ts packages/core/test/registry.test.ts packages/cli/test/permission-options.test.ts packages/cli/test/tui.test.tsx packages/cli/test/transcript.test.tsx packages/cli/test/tui-input/text-input.test.tsx packages/cli/test/tui-activity/frames.test.ts packages/cli/test/tui-activity/line-commit.test.ts packages/cli/test/tui-activity/stall.test.ts packages/cli/test/tui-activity/status-line.test.ts
+PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm run typecheck
+git diff --check --cached
+```
+
+Run the real PTY case outside the restricted sandbox:
+
+```bash
+env PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:/usr/local/bin:/usr/bin:/bin /Users/kuma/.nvm/versions/node/v26.5.0/bin/npm test -- packages/cli/test/tui-input/pty-smoke.test.ts
+```
+
+Expected: all focused tests and typecheck pass; the PTY suite reports one pass
+and zero skips; the staged merge is whitespace-clean.
+
+- [ ] **Step 8: Complete the permission merge commit**
+
+```bash
+git diff --name-only --diff-filter=U
+git commit -m "Merge branch 'feature/tui-permission-dialogs' into integration/tui-branch-consolidation"
+```
+
+Expected: no unmerged path remains and Git records a two-parent merge commit.
+
+- [ ] **Step 9: Verify all outstanding source tips are ancestors**
+
+```bash
+git merge-base --is-ancestor 9cc379735ddf5f5ac704f4a011c4a8c4e93c314b HEAD
+git merge-base --is-ancestor 82767dcccc71435b639bb4f2477eb868f26fdf3f HEAD
+git merge-base --is-ancestor 9eda19ddfd1b03e5a10fbce137eaa945f0398c16 HEAD
+git merge-base --is-ancestor f630e234f024ba19eca5b4efda33d52ef0874468 HEAD
+git status --short --branch
+```
+
+Expected: every ancestry check exits zero and the integration worktree is clean.
+
+---
+
+### Task 5: Run The Complete Integration Gate And Independent Review
 
 **Files:**
 - Inspect: all paths changed from `origin/main` to `HEAD`
 - Verify: `docs/superpowers/specs/2026-07-13-tui-branch-consolidation-design.md`
 
 **Interfaces:**
-- Consumes: completed PTY repair and both feature merge commits.
+- Consumes: completed PTY repair and all three feature merge commits.
 - Produces: fresh verification and independent review evidence suitable for merging into local main.
 
 - [ ] **Step 1: Run the full Node 26 completion suite**
@@ -408,25 +614,26 @@ Expected: one real PTY test passes with zero skips.
 ```bash
 rg -n "useInput\(|usePaste\(" packages/cli/src/tui
 rg -n "useCursor|useBoxMetrics|activeToolRef|summarizeToolCall|visibleStreamLines" packages/cli/src/tui packages/cli/test
+rg -n "evaluatePermission|usePermissionController|confirmQueue|PermissionDialogView" packages/cli/src/tui packages/core/src packages/cli/test packages/core/test
 git branch -r --merged HEAD
 git log --graph --decorate --oneline -20
 git status --short --branch
 ```
 
-Expected: one production input subscription and one paste subscription remain in `App.tsx`; cursor and combined activity integrations exist; all five remote TUI feature branches are listed as merged; the worktree is clean.
+Expected: one production input subscription and one paste subscription remain in `App.tsx`; cursor, combined activity, and queued permission integrations exist; all six remote TUI feature branches are listed as merged; the worktree is clean.
 
 - [ ] **Step 4: Request independent requirement and code reviews**
 
 Use `superpowers:requesting-code-review` twice:
 
 1. requirement review against the approved design and this plan;
-2. code review of `origin/main...HEAD`, prioritizing App event ordering, duplicate stream commits, PTY process cleanup, and cursor regression risk.
+2. code review of `origin/main...HEAD`, prioritizing App event ordering, duplicate stream commits, permission policy/queue correctness, PTY process cleanup, and cursor regression risk.
 
 Expected: no unresolved Critical or Important finding. Apply valid findings with new failing regressions and narrow `fix(tui): ...` or `fix(test): ...` commits, then repeat Steps 1-3.
 
 ---
 
-### Task 5: Merge Into Local Main And Create The Deferred Worktree
+### Task 6: Merge Into Local Main And Create The Deferred Worktree
 
 **Files:**
 - Merge: `integration/tui-branch-consolidation` into local `main`
@@ -435,7 +642,7 @@ Expected: no unresolved Critical or Important finding. Apply valid findings with
 
 **Interfaces:**
 - Consumes: independently reviewed integration tip and the primary checkout at `/Users/kuma/workspace/Transup`.
-- Produces: a verified local main containing all five TUI branches and a clean deferred-capabilities worktree based on that main commit.
+- Produces: a verified local main containing all six TUI branches and a clean deferred-capabilities worktree based on that main commit.
 
 - [ ] **Step 1: Record the verified integration tip and confirm both worktrees are safe**
 
@@ -462,7 +669,7 @@ Expected: local main advances from `3980e96` to current `origin/main` without ch
 git -C /Users/kuma/workspace/Transup merge --no-ff integration/tui-branch-consolidation -m "Merge branch 'integration/tui-branch-consolidation'"
 ```
 
-Expected: Git creates a local main merge commit containing the design, plan, PTY repair, and both feature merge commits.
+Expected: Git creates a local main merge commit containing the design, plan, PTY repair, and all three feature merge commits.
 
 - [ ] **Step 4: Re-run the final main verification**
 
@@ -482,7 +689,7 @@ Run the complete main test suite outside the restricted sandbox:
 env PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:/usr/local/bin:/usr/bin:/bin /Users/kuma/.nvm/versions/node/v26.5.0/bin/npm test
 ```
 
-Expected: verification passes; all five remote feature branches are merged into local main; only the pre-existing user `.claude/` path may remain untracked.
+Expected: verification passes; all six remote feature branches are merged into local main; only the pre-existing user `.claude/` path and `packages/cli/test/fixtures/jsx-probe.tsx` file may remain untracked.
 
 - [ ] **Step 5: Create the isolated deferred-capabilities worktree from consolidated main**
 
