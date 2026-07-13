@@ -9,8 +9,8 @@
  *   Tab        焦点项可附言 → 展开附言输入；input 选项 → 进入编辑
  *   Shift+Tab  直选会话级选项（文件对话框约定）
  *
- * 编辑态（附言 / 前缀编辑）吞掉全部按键：Enter 提交、Esc 收起、
- * Backspace 删字 —— 单行、光标恒在末尾的极简输入，够用且可预测。
+ * 编辑态（附言 / 前缀编辑）吞掉全部按键：Enter 提交、Esc 拒绝、
+ * Tab 收起、Backspace 删字 —— 单行、光标恒在末尾的极简输入。
  *
  * 状态以 ref 为权威、useState 只作渲染镜像：按键事件可能在同一 tick
  * 连续到达（快速输入 + 回车），闭包里的 state 会过期，ref 不会。
@@ -95,7 +95,12 @@ export function usePermissionController(
     const editingNow = editingRef.current;
 
     if (editingNow) {
-      if (stroke.name === "escape" || (stroke.name === "tab" && !stroke.shift)) {
+      if (stroke.name === "escape") {
+        setEditing(null);
+        confirm.resolve({ kind: "deny" });
+        return true;
+      }
+      if (stroke.name === "tab" && !stroke.shift) {
         setEditing(null);
         return true;
       }

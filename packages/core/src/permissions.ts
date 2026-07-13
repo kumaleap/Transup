@@ -1,3 +1,5 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
+
 /**
  * 权限判定 —— 一次工具调用能不能跑，由谁说了算
  *
@@ -77,6 +79,58 @@ function contentOf(toolName: string, args: Record<string, unknown>): string | un
   return typeof args.path === "string" ? args.path : undefined;
 }
 
+/**
+ * Prefix rules may authorize simple shell commands, but never shell syntax whose
+ * command boundaries require a real parser. Exact rules can still authorize an
+ * explicitly reviewed compound command.
+ */
+function splitSimpleBashCommands(command: string): string[] | null {
+  const trimmed = command.trim();
+  if (!trimmed || /["'`$\\<>(){}\[\]]/.test(trimmed)) return null;
+  const commands = trimmed.split(/\s*(?:&&|\|\||[;|&\n\r])\s*/);
+  return commands.every(Boolean) ? commands : null;
+}
+
+function bashPrefixMatches(prefix: string, command: string): boolean {
+  const commands = splitSimpleBashCommands(command);
+  if (!prefix || !commands || commands.length !== 1) return false;
+  const simple = commands[0];
+  return simple === prefix || (simple.startsWith(prefix) && /\s/.test(simple[prefix.length]));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Deny/ask may conservatively match a prefix at any apparent command boundary. */
+function bashPrefixMayMatch(rule: string, command: string): boolean {
+  const match = /^bash\((.*):\*\)$/.exec(rule);
+  const prefix = match?.[1];
+  if (!prefix) return false;
+  const dequoted = command.replace(/["']/g, "");
+  return new RegExp(
+    `(?:^|[;&|()\\n\\r])\\s*${escapeRegExp(prefix)}(?=\\s|$)`,
+  ).test(dequoted);
+}
+
+function normalizeRulePath(value: string): string {
+  return value.replace(/[\\/]+/g, sep);
+}
+
+function pathPrefixMatches(prefix: string, content: string): boolean {
+  if (!prefix || !content) return false;
+  const fromBase = relative(
+    resolve(normalizeRulePath(prefix)),
+    resolve(normalizeRulePath(content)),
+  );
+  return (
+    fromBase !== "" &&
+    fromBase !== ".." &&
+    !fromBase.startsWith(`..${sep}`) &&
+    !isAbsolute(fromBase)
+  );
+}
+
 /** 单条规则是否命中（工具级 or 内容级） */
 export function ruleMatches(
   rule: string,
@@ -94,16 +148,40 @@ export function ruleMatches(
   if (tool !== toolName || !args) return false;
   const content = contentOf(toolName, args);
   if (content === undefined) return false;
-  if (pattern.endsWith(":*")) return content.startsWith(pattern.slice(0, -2));
-  return content === pattern;
+  if (toolName === "bash") {
+    if (pattern.endsWith(":*")) return bashPrefixMatches(pattern.slice(0, -2), content);
+    return content === pattern;
+  }
+  if (pattern.endsWith(":*")) return pathPrefixMatches(pattern.slice(0, -2), content);
+  return resolve(normalizeRulePath(content)) === resolve(normalizeRulePath(pattern));
 }
 
 function findMatch(
   rules: string[],
   toolName: string,
   args: Record<string, unknown>,
+  list: keyof PermissionRules,
 ): string | undefined {
-  return rules.find((r) => ruleMatches(r, toolName, args));
+  const direct = rules.find((r) => ruleMatches(r, toolName, args));
+  if (direct || toolName !== "bash" || typeof args.command !== "string") return direct;
+  const command = args.command;
+
+  if (list !== "allow") {
+    const conservative = rules.find((rule) => bashPrefixMayMatch(rule, command));
+    if (conservative) return conservative;
+  }
+
+  const commands = splitSimpleBashCommands(command);
+  if (!commands || commands.length < 2) return undefined;
+  if (list === "allow") {
+    const coveringRules = commands.map((command) =>
+      rules.find((rule) => ruleMatches(rule, toolName, { command })),
+    );
+    return coveringRules.every((rule) => rule !== undefined) ? coveringRules[0] : undefined;
+  }
+  return rules.find((rule) =>
+    commands.some((command) => ruleMatches(rule, toolName, { command })),
+  );
 }
 
 // ── safetyCheck：敏感路径 ─────────────────────────────────
@@ -127,12 +205,41 @@ function isSensitivePath(p: string): boolean {
   return SENSITIVE_BASENAMES.includes(base);
 }
 
+function sensitiveShellTarget(command: string): string | undefined {
+  // Quote concatenation (for example `.zsh""rc`) must not hide a literal
+  // sensitive basename. This is detection only; it does not execute or expand.
+  const dequoted = command.replace(/["']/g, "");
+  const candidates = dequoted.split(/[\s=<>|;&()]+/).filter(Boolean);
+  const sensitive = candidates.find(isSensitivePath);
+  if (sensitive) return sensitive;
+
+  // `git config` can write repository, global, or system configuration. Without
+  // fully parsing its flags, every invocation stays behind an explicit ask.
+  if (/\bgit\b[^\n;&|]*\bconfig\b/.test(dequoted)) return "git config";
+
+  // Expansion and indirect shell execution can construct a sensitive target
+  // that is absent from the literal command. Fail closed rather than guessing.
+  if (
+    /[$`*?\\]|\[[^\]]*\]|\{[^}]*\}|(?:<|>)\(|<<<?/.test(command)
+  ) {
+    return "shell expansion";
+  }
+  if (
+    /(?:^|[;&|\n]\s*)(?:eval|source|\.|command|env|sudo|nohup|xargs|exec)\s+/.test(dequoted) ||
+    /\b(?:bash|sh|zsh|fish)\b[^;&|\n]*\s-[A-Za-z]*c[A-Za-z]*(?:\s|$)/.test(dequoted)
+  ) {
+    return "shell indirection";
+  }
+  return undefined;
+}
+
 /** 写操作是否触碰敏感路径；命中返回引发警报的那个片段 */
 function sensitiveTarget(toolName: string, args: Record<string, unknown>): string | undefined {
   const candidates: string[] = [];
   if (typeof args.path === "string") candidates.push(args.path);
   if (toolName === "bash" && typeof args.command === "string") {
-    candidates.push(...args.command.split(/\s+/));
+    const shellTarget = sensitiveShellTarget(args.command);
+    if (shellTarget) return shellTarget;
   }
   return candidates.find(isSensitivePath);
 }
@@ -147,7 +254,7 @@ export function evaluatePermission(
 ): PermissionVerdict {
   const { toolName, args, readOnly } = query;
 
-  const denyRule = findMatch(ctx.rules.deny, toolName, args);
+  const denyRule = findMatch(ctx.rules.deny, toolName, args, "deny");
   if (denyRule) {
     return {
       behavior: "deny",
@@ -156,7 +263,7 @@ export function evaluatePermission(
     };
   }
 
-  const askRule = findMatch(ctx.rules.ask, toolName, args);
+  const askRule = findMatch(ctx.rules.ask, toolName, args, "ask");
   if (askRule) {
     return { behavior: "ask", reason: { type: "rule", rule: askRule, list: "ask" } };
   }
@@ -184,7 +291,7 @@ export function evaluatePermission(
     return { behavior: "allow", reason: { type: "mode", mode: "acceptEdits" } };
   }
 
-  const allowRule = findMatch(ctx.rules.allow, toolName, args);
+  const allowRule = findMatch(ctx.rules.allow, toolName, args, "allow");
   if (allowRule) {
     return { behavior: "allow", reason: { type: "rule", rule: allowRule, list: "allow" } };
   }

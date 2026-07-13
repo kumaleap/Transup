@@ -84,6 +84,9 @@ describe("buildPermissionView", () => {
       ),
     );
     expect(view.explanation).toContain("bash(npm publish:*)");
+    expect(view.options.map((option) => option.value)).toEqual(["yes", "no"]);
+    expect(view.options.every((option) => option.updates === undefined || option.updates.length === 0))
+      .toBe(true);
   });
 
   it("fallback（MCP 等）：整工具不再询问选项", () => {

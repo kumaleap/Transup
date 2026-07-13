@@ -246,10 +246,10 @@ export function App(props: AppProps) {
         setPermissionMode(u.mode);
         continue;
       }
-      sessionRulesRef.current[u.list].push(u.rule);
       if (u.destination !== "session") {
         await persistPermissionRule(u.rule, u.list, u.destination);
       }
+      sessionRulesRef.current[u.list].push(u.rule);
     }
     if (updates.some((u) => u.type === "addRule")) recheckConfirmQueue();
   };
@@ -296,7 +296,15 @@ export function App(props: AppProps) {
             : undefined,
         };
       }
-      await applyPermissionUpdates(outcome.updates);
+      try {
+        await applyPermissionUpdates(outcome.updates);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return {
+          behavior: "deny",
+          message: `权限设置保存失败，本次操作未执行：${detail}`,
+        };
+      }
       return { behavior: "allow", feedback: outcome.feedback };
     },
     // 只经 refs 与 setState 取状态，保持引用稳定（引擎不重建）

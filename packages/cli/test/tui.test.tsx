@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
+import * as transupCore from "@transup/core";
 import { App } from "../src/tui/App.js";
 import {RowText, TextInput} from "../src/tui/TextInput.js";
 import {T} from "../src/theme.js";
@@ -42,11 +43,13 @@ class MockProvider implements Provider {
   readonly model = "test-model";
   private step = 0;
   streamCalls = 0;
+  requests: Message[][] = [];
   /** 最近一次请求里的 user 消息内容（验证占位符已还原成全文） */
   lastUserContent = "";
   constructor(private replies: { content: string; toolCalls?: ToolCall[] }[]) {}
   async *stream(messages?: Message[]): AsyncIterable<ProviderEvent> {
     this.streamCalls++;
+    this.requests.push(structuredClone(messages ?? []));
     const u = [...(messages ?? [])].reverse().find((m) => m.role === "user");
     if (u) this.lastUserContent = u.content;
     const r = this.replies[Math.min(this.step++, this.replies.length - 1)] ?? {
@@ -1424,6 +1427,48 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("权限附言编辑中 Tab 仅收起，Esc 一次即拒绝当前确认", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-edit-escape-"));
+    const target = join(dir, "deny-editing.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "no" }),
+          },
+        ],
+      },
+      { content: "编辑附言时也已取消。" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).toContain("└ 附言:");
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).not.toContain("└ 附言:");
+    expect(lastFrame()).toContain("创建文件");
+
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).toContain("└ 附言:");
+    stdin.write("\x1b");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("编辑附言时也已取消。"),
+      { timeout: 3000 },
+    );
+    expect(existsSync(target)).toBe(false);
+    unmount();
+  });
+
   it("会话级选项（数字 2）切到 acceptEdits：后续编辑不再询问，footer 显示模式", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const a = join(dir, "a.txt").replace(/\\/g, "/");
@@ -1484,6 +1529,52 @@ describe("TUI", {timeout: 30_000}, () => {
     expect(existsSync(target)).toBe(false);
     expect(lastFrame()).toContain("改用别的方案"); // 拒绝文案（含附言）进了工具结果预览
     unmount();
+  });
+
+  it("持久权限写盘失败时返回拒绝，且重试仍需确认", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-persist-fail-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${target}`;
+    const persistSpy = vi
+      .spyOn(transupCore, "persistPermissionRule")
+      .mockRejectedValue(new Error("disk unavailable"));
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "权限保存失败，命令没有执行。" },
+      {
+        content: "",
+        toolCalls: [{ id: "t2", name: "bash", args: JSON.stringify({ command }) }],
+      },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+
+    try {
+      await flush();
+      stdin.write("运行命令");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      stdin.write("2"); // 选择持久化的 prefix allow
+
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("权限保存失败，命令没有执行。"),
+        { timeout: 3000 },
+      );
+      const toolResult = provider.requests[1]?.find((message) => message.role === "tool");
+      expect(toolResult?.content).toContain("权限设置保存失败");
+      expect(existsSync(target)).toBe(false);
+
+      stdin.write("再次运行");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      expect(existsSync(target)).toBe(false);
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      persistSpy.mockRestore();
+    }
   });
 
   it("Shift+Tab 循环到 plan 模式：写操作直接拒绝并回流引导文案", async () => {
@@ -1549,8 +1640,13 @@ describe("TUI", {timeout: 30_000}, () => {
     stdin.write("读两个文件");
     stdin.write("\r");
     await vi.waitFor(() => expect(lastFrame()).toContain("还有 1 个待确认"), { timeout: 3000 });
+    expect(lastFrame()).not.toContain("本项目不再询问 read_file");
     stdin.write("1"); // 放行第一个
-    await flush();
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain("工具调用");
+      expect(lastFrame()).not.toContain("还有 1 个待确认");
+    }, { timeout: 3000 });
+    expect(provider.streamCalls).toBe(1);
     stdin.write("1"); // 放行第二个
     await vi.waitFor(() => expect(lastFrame()).toContain("都读完了"), { timeout: 3000 });
     unmount();

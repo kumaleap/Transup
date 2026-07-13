@@ -37,7 +37,7 @@ export interface HeadlessOptions {
   sessionId: string;
   history: Message[];
   prompt: string;
-  /** 跳过所有权限确认。只应在可信环境（CI/沙箱）使用。 */
+  /** 启用 bypass 模式；显式 ask 与 safety gate 仍会 fail-closed。 */
   allowAll?: boolean;
   /** 会话持久化目录覆盖（测试用） */
   sessionDir?: string;
@@ -58,13 +58,12 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     provider: opts.provider,
     canUseTool: async (name, args, meta) => {
       // 与 TUI 同一套判定链（deny 规则连 --allow-all 也拦得住）；
-      // 无人可问 → ask 一律降级为 deny，除非 --allow-all 明示信任环境
+      // 无人可问 → evaluator 留下的 ask 一律降级为 deny
       const verdict = evaluatePermission(
         { mode: opts.allowAll ? "bypassPermissions" : "default", rules: settingsRules(opts.settings) },
         { toolName: name, args, readOnly: meta.readOnly },
       );
       if (verdict.behavior === "allow") return { behavior: "allow" };
-      if (verdict.behavior === "ask" && opts.allowAll) return { behavior: "allow" };
       if (verdict.behavior === "deny") {
         err(`⊘ 已拒绝 ${name}（权限规则禁止）\n`);
         return { behavior: "deny", message: verdict.message };

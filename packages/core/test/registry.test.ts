@@ -4,14 +4,30 @@
  * 管线的核心承诺："任何一步失败都不崩溃，错误作为 tool result 喂回模型"。
  * 这里逐个验证每一道关卡。
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
+import type { Tool } from "../src/tools/types.js";
 
 const allow = async () => ({ behavior: "allow" as const });
 const deny = async () => ({ behavior: "deny" as const });
+
+const captureSchema = z.object({ value: z.string() });
+
+function captureRegistry(
+  execute: Tool<typeof captureSchema>["execute"],
+): ToolRegistry {
+  return new ToolRegistry([{
+    name: "capture",
+    description: "capture test input",
+    schema: captureSchema,
+    readOnly: false,
+    execute,
+  }]);
+}
 
 describe("工具执行管线", () => {
   const reg = new ToolRegistry();
@@ -51,6 +67,71 @@ describe("工具执行管线", () => {
     const r = await reg.execute("1", "read_file", JSON.stringify({ path: join(dir, "a.txt") }), spy);
     expect(r.isError).toBe(false);
     expect(seenReadOnly).toBe(true);
+  });
+
+  it("有效 updatedInput 重新校验后作为最终参数执行", async () => {
+    const executed: string[] = [];
+    const local = captureRegistry(async ({ value }) => {
+      executed.push(value);
+      return `captured:${value}`;
+    });
+
+    const result = await local.execute(
+      "updated-valid",
+      "capture",
+      JSON.stringify({ value: "original" }),
+      async () => ({ behavior: "allow", updatedInput: { value: "updated" } }),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(result.content).toBe("captured:updated");
+    expect(executed).toEqual(["updated"]);
+  });
+
+  it("无效 updatedInput 返回校验错误且不执行工具", async () => {
+    const execute = vi.fn(async () => "should not run");
+    const local = captureRegistry(execute);
+
+    const result = await local.execute(
+      "updated-invalid",
+      "capture",
+      JSON.stringify({ value: "original" }),
+      async () => ({ behavior: "allow", updatedInput: { value: 42 } }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("修改后的参数校验失败");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("成功工具结果保留权限附言", async () => {
+    const local = captureRegistry(async () => "captured");
+    const result = await local.execute(
+      "feedback-success",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      async () => ({ behavior: "allow", feedback: "also verify tests" }),
+    );
+
+    expect(result.isError).toBe(false);
+    expect(result.content).toContain("captured");
+    expect(result.content).toContain("[用户附言] also verify tests");
+  });
+
+  it("失败工具结果同样保留权限附言", async () => {
+    const local = captureRegistry(async () => {
+      throw new Error("capture failed");
+    });
+    const result = await local.execute(
+      "feedback-error",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      async () => ({ behavior: "allow", feedback: "try another source" }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("capture failed");
+    expect(result.content).toContain("[用户附言] try another source");
   });
 
   it("执行异常 → 错误信息回流（edit_file 找不到 old_string）", async () => {

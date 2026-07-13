@@ -110,6 +110,49 @@ describe("headless 模式", () => {
     expect(readFileSync(target, "utf-8")).toBe("hi");
   });
 
+  it("--allow-all 对显式 ask 规则仍然 fail-closed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-headless-ask-"));
+    const target = join(dir, "asked.txt");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "显式确认无法在 headless 完成。" },
+    ]);
+
+    const { code, err } = await run(provider, {
+      allowAll: true,
+      settings: { permissions: { ask: ["write_file"] } },
+    });
+
+    expect(existsSync(target)).toBe(false);
+    expect(err).toContain("已拒绝写操作 write_file");
+    expect(code).toBe(0);
+  });
+
+  it("--allow-all 对敏感路径 safety ask 仍然 fail-closed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-headless-safety-"));
+    const target = join(dir, ".git", "config");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "敏感路径没有写入。" },
+    ]);
+
+    const { code, err } = await run(provider, { allowAll: true });
+
+    expect(existsSync(target)).toBe(false);
+    expect(err).toContain("已拒绝写操作 write_file");
+    expect(code).toBe(0);
+  });
+
   it("settings 允许清单同样放行", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-headless-settings-"));
     const target = join(dir, "ok.txt");

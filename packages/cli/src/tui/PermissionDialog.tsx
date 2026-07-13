@@ -76,7 +76,7 @@ export function PermissionDialog({ view }: { view: PermissionDialogView }) {
   const hasSession = model.options.some((o) => o.sessionShortcut);
 
   const hints = editing
-    ? "Enter 提交 · Esc 收起"
+    ? "Enter 提交 · Esc 取消 · Tab 收起"
     : [
         "↑↓ 选择",
         "数字直选",

@@ -6,8 +6,8 @@
  *   bash                    命令展示 + "不再询问"可编辑前缀（写 local settings）
  *   其余（MCP / 被 ask 规则命中的只读工具）  参数 JSON + 整工具放行
  *
- * 敏感路径（safety）触发的询问不提供任何"不再询问"选项 ——
- * 一键永久放行敏感路径就失去了 safetyCheck 的意义。
+ * 敏感路径或显式 ask 规则触发的询问不提供任何"不再询问"选项 ——
+ * 前者不能被持久规则覆盖，后者优先于 allow/mode，承诺 scoped 放行会失实。
  */
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
@@ -46,10 +46,12 @@ function noOption(): PermissionOption {
   };
 }
 
-/** 敏感路径询问只留 是/否 */
+/** 无法被 scoped allow 覆盖的询问只留 是/否 */
 function withScoped(scoped: PermissionOption, confirm: ToolUseConfirm): PermissionOption[] {
-  const safety = confirm.verdict.reason.type === "safety";
-  return safety ? [yesOption(), noOption()] : [yesOption(), scoped, noOption()];
+  const reason = confirm.verdict.reason.type;
+  return reason === "safety" || reason === "rule"
+    ? [yesOption(), noOption()]
+    : [yesOption(), scoped, noOption()];
 }
 
 export function buildPermissionView(confirm: ToolUseConfirm): PermissionViewModel {
