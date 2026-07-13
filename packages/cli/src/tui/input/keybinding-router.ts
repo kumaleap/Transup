@@ -1,6 +1,6 @@
 import type {EditorAction} from "./editor.js";
 
-export type InputContext = "permission" | "transcript" | "history-search" | "editor";
+export type InputContext = "permission" | "panel" | "transcript" | "history-search" | "editor";
 
 export interface InputKey {
   upArrow: boolean;
@@ -48,6 +48,7 @@ export type KeyHandler = (stroke: Keystroke) => boolean;
 export interface RouteHandlers {
   global: KeyHandler;
   permission?: KeyHandler;
+  panel?: KeyHandler;
   transcript?: KeyHandler;
   historySearch?: KeyHandler;
   editor?: KeyHandler;
@@ -190,10 +191,12 @@ export function routeKeystroke(
   const handler =
     context === "permission"
       ? handlers.permission
-      : context === "transcript"
-        ? handlers.transcript
-        : context === "history-search"
-          ? handlers.historySearch
-          : handlers.editor;
+      : context === "panel"
+        ? handlers.panel
+        : context === "transcript"
+          ? handlers.transcript
+          : context === "history-search"
+            ? handlers.historySearch
+            : handlers.editor;
   return handler?.(stroke) ?? false;
 }

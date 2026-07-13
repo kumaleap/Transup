@@ -1628,6 +1628,105 @@ describe("TUI", () => {
     unmount();
   });
 
+  it("/sessions 打开切换面板：Esc 关闭吞键，数字直选切换会话", async () => {
+    // 独立 sessionDir，预置一个历史会话
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-panel-"));
+    writeFileSync(
+      join(dir, "old-session.jsonl"),
+      JSON.stringify({ role: "user", content: "旧会话的问题" }) + "\n",
+    );
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("/sessions");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+    expect(lastFrame()).toContain("old-session");
+
+    // Esc 关闭；面板期间按键不漏进输入框
+    stdin.write("\x1b");
+    await flush();
+    expect(lastFrame()).not.toContain("切换会话");
+
+    stdin.write("/sessions");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+    stdin.write("1"); // 列表按字典序，old-session 在前
+    await vi.waitFor(() => expect(lastFrame()).toContain("已切换到会话 old-session"), {
+      timeout: 2000,
+    });
+    expect(lastFrame()).toContain("1 条消息");
+    unmount();
+  });
+
+  it("settings.statusLine：命令输出显示在状态栏上方", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{
+          statusLine: {
+            command: `node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log('SL:'+JSON.parse(d).model.id))"`,
+          },
+        }}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("hi");
+    stdin.write("\r");
+    // 一轮结束（running 翻转）触发刷新：300ms debounce + 命令执行
+    await vi.waitFor(() => expect(lastFrame()).toContain("SL:test-model"), { timeout: 4000 });
+    unmount();
+  });
+
+  it("退出时回调 /cost 同款汇总", async () => {
+    let summary = "";
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        onExitStats={(s) => {
+          summary = s;
+        }}
+      />,
+    );
+    await flush();
+    stdin.write("hi");
+    stdin.write("\r");
+    await flush(600);
+    unmount();
+    expect(summary).toContain("会话时长（wall）");
+    expect(summary).toContain("输入 tokens");
+    unmount();
+  });
+
   it("/help 显示命令列表，/cost 显示用量", async () => {
     const { stdin, lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
@@ -1638,7 +1737,21 @@ describe("TUI", () => {
     stdin.write("/cost");
     stdin.write("\r");
     await flush();
-    expect(lastFrame()).toContain("累计 tokens");
+    expect(lastFrame()).toContain("会话时长（wall）");
+    expect(lastFrame()).toContain("输入 tokens");
+    unmount();
+  });
+
+  it("/context 显示方块网格与汇总行", async () => {
+    const { stdin, lastFrame, unmount } = render(makeApp(new MockProvider([])));
+    await flush();
+    stdin.write("/context");
+    stdin.write("\r");
+    await flush();
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("上下文用量");
+    expect(frame).toContain("⛶"); // 新会话几乎全空闲
+    expect(frame).toMatch(/test-model · .*（\d+%）/);
     unmount();
   });
 });
