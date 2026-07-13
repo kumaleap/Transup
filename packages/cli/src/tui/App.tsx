@@ -12,6 +12,7 @@
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { basename } from "node:path";
 import {
   Box,
   Static,
@@ -20,6 +21,7 @@ import {
   useBoxMetrics,
   useInput,
   usePaste,
+  useWindowSize,
   type DOMElement,
 } from "./runtime/index.js";
 import {
@@ -52,6 +54,11 @@ import { TextInput } from "./TextInput.js";
 import { PermissionDialog } from "./PermissionDialog.js";
 import { usePermissionController } from "./permission/use-permission-controller.js";
 import type { PermissionOutcome, ToolUseConfirm } from "./permission/types.js";
+import { Layout } from "./Layout.js";
+import { TranscriptScreen } from "./TranscriptScreen.js";
+import { useTerminalStatus } from "./terminal/use-terminal-status.js";
+import { useTerminalNotifications } from "./terminal/use-terminal-notifications.js";
+import type { TerminalWriter } from "./terminal/writer.js";
 import { StatusBar, type StatusInfo } from "./StatusBar.js";
 import {
   normalizeKeystroke,
@@ -77,6 +84,10 @@ export interface AppProps {
   sessionDir?: string;
   /** 项目提示历史文件覆盖（测试用）；不传写入 cwd/.transup/history.jsonl */
   historyPath?: string;
+  /** 终端带外序列（标题/进度/通知）的写入口（测试用）；不传只在真实 TTY 下写 */
+  terminalWrite?: TerminalWriter;
+  /** 环境变量覆盖（测试用）：通知频道与阈值从这里读 */
+  env?: NodeJS.ProcessEnv;
 }
 
 const HELP = `命令：
@@ -90,6 +101,7 @@ const HELP = `命令：
 输入技巧：
   @路径          引用文件，内容自动附加到消息（如 "解释 @src/index.ts"）
   Ctrl+C         任务运行中按一次中断任务，再按一次退出
+  Ctrl+O         查看会话全文（工具输出不截断），Ctrl+E 展开全部
   Shift+Tab      循环权限模式（default → accept edits → plan）`;
 
 /** 非 default 模式在输入框下方的指示（对齐交互规格 04 §6.5） */
@@ -130,10 +142,15 @@ export function App(props: AppProps) {
   const inputAreaMetrics = useBoxMetrics(inputAreaRef);
   const inputBorderMetrics = useBoxMetrics(inputBorderRef);
 
+  const { columns } = useWindowSize();
+
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
   const [confirmQueue, setConfirmQueue] = useState<ToolUseConfirm[]>([]);
+  // 主屏 / 会话全文屏（Ctrl+O）—— 规格 05 §1.2 的"屏幕"就是这么个 state
+  const [screen, setScreen] = useState<"prompt" | "transcript">("prompt");
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
   const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
     props.settings.permissions?.defaultMode ?? "default",
   );
@@ -148,6 +165,8 @@ export function App(props: AppProps) {
   const submitPendingRef = useRef(false);
   const abortExitArmedRef = useRef(false);
   const totals = useRef({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  // 最近一次按键时间戳 —— 通知只在"人确实不在"时才发（ref：更新它不该重渲）
+  const lastInputAt = useRef(Date.now());
   // 权限判定的三份动态输入：待确认队列 / 当前模式 / 会话内攒下的规则
   const confirmQueueRef = useRef<ToolUseConfirm[]>([]);
   const confirmIdRef = useRef(0);
@@ -325,6 +344,24 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
+  // ── 终端带外通道：窗口标题 + 进度 + 桌面通知 ──────────────
+  const activeConfirm = confirmQueue[0] ?? null;
+  useTerminalStatus(
+    { busy: running, text: `transup — ${basename(process.cwd())}` },
+    props.terminalWrite,
+  );
+  useTerminalNotifications(
+    {
+      running,
+      pendingPermission: activeConfirm
+        ? { id: activeConfirm.id, toolName: activeConfirm.toolName }
+        : null,
+      lastInputAt,
+    },
+    props.terminalWrite,
+    props.env,
+  );
+
   const inputController = useInputController({
     active: !running,
     historyPath: props.historyPath,
@@ -336,8 +373,17 @@ export function App(props: AppProps) {
     },
   });
 
-  const activeConfirm = confirmQueue[0] ?? null;
-  const permissionController = usePermissionController(activeConfirm, confirmQueue.length);
+  // 对话框内容宽度：终端列数减去边框(2)+内缩(2)+预览自带的两格缩进
+  const permissionController = usePermissionController(
+    activeConfirm,
+    confirmQueue.length,
+    Math.max(20, columns - 6),
+  );
+
+  // 全文屏里冒出权限询问 → 必须回主屏，否则用户看不到弹窗也答不了
+  useEffect(() => {
+    if (confirmQueue.length > 0) setScreen("prompt");
+  }, [confirmQueue.length]);
 
   const rejectAllConfirms = (): boolean => {
     const pending = confirmQueueRef.current;
@@ -347,7 +393,17 @@ export function App(props: AppProps) {
   };
 
   // ── 全局输入与交互上下文路由 ──────────────────────────────
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+
   const handleGlobalKey = (stroke: Keystroke): boolean => {
+    // Ctrl+O 双向切换会话全文屏；有权限弹窗挂起时不让走开（那弹窗必须先答）
+    if (stroke.ctrl && stroke.input === "o") {
+      if (confirmQueueRef.current.length > 0) return true;
+      setScreen(screenRef.current === "transcript" ? "prompt" : "transcript");
+      setTranscriptExpanded(false);
+      return true;
+    }
     if (!(stroke.ctrl && stroke.input === "c")) return false;
     if (abortExitArmedRef.current) {
       inputController.requestExit();
@@ -372,19 +428,37 @@ export function App(props: AppProps) {
     setPermissionMode(nextPermissionMode(permissionModeRef.current, bypassAvailable));
   };
 
+  // 全文屏：只认展开/返回，其余按键一律吞掉（不能漏进底下的编辑器）
+  const handleTranscriptKey = (stroke: Keystroke): boolean => {
+    if (stroke.ctrl && stroke.input === "e") {
+      setTranscriptExpanded((v) => !v);
+      return true;
+    }
+    if (stroke.name === "escape") {
+      setScreen("prompt");
+      setTranscriptExpanded(false);
+      return true;
+    }
+    return true;
+  };
+
   useInput((input, key) => {
     const stroke = normalizeKeystroke(input, key);
+    lastInputAt.current = Date.now();
     if (!(stroke.ctrl && stroke.input === "c")) {
       abortExitArmedRef.current = false;
     }
     const inputContext = confirmQueueRef.current.length > 0
       ? "permission"
-      : inputController.isHistorySearchActive()
-        ? "history-search"
-        : "editor";
+      : screenRef.current === "transcript"
+        ? "transcript"
+        : inputController.isHistorySearchActive()
+          ? "history-search"
+          : "editor";
     routeKeystroke(stroke, inputContext, {
       global: handleGlobalKey,
       permission: (permStroke) => permissionController.handleKey(permStroke),
+      transcript: handleTranscriptKey,
       historySearch: (searchStroke) =>
         submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
       editor: (editorStroke) => {
@@ -400,9 +474,10 @@ export function App(props: AppProps) {
 
   usePaste((text) => {
     abortExitArmedRef.current = false;
+    lastInputAt.current = Date.now();
     if (!submitPendingRef.current) inputController.handlePaste(text);
   }, {
-    isActive: !running && confirmQueue.length === 0,
+    isActive: !running && confirmQueue.length === 0 && screen === "prompt",
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -527,6 +602,7 @@ export function App(props: AppProps) {
               name: ev.call.name,
               argSummary: tool?.argSummary ?? "",
               preview: previewResult(ev.content, streamed && !ev.isError),
+              full: ev.content, // 主屏截断，Ctrl+O 全文屏要看未截断的原文
               isError: ev.isError,
             });
             tool = null;
@@ -651,45 +727,57 @@ export function App(props: AppProps) {
       : "Thinking";
   const meter = `${elapsedSec}s · ↑${fmtTokens(liveUsage.current.input)} ↓${fmtTokens(liveUsage.current.output)}`;
 
-  return (
-    <Box ref={appRootRef} flexDirection="column">
+  const transcriptMode = screen === "transcript";
+
+  // Static 在两个屏之间保持挂载：Ink 的 Static 一旦卸载重挂，
+  // 会把所有条目重新吐进 scrollback（历史凭空翻倍）
+  const scrollable = (
+    <>
       <Static items={items}>
         {(item) => <TranscriptItemView key={item.id} item={item} />}
       </Static>
 
-      {streamText && (
-        <Box marginTop={1}>
-          <Text>{renderMarkdown(streamText)}</Text>
-        </Box>
-      )}
-
-      {activeTool && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text>
-            <Text color={T.secondary}>◆ {activeTool.name}</Text>
-            <Text dimColor>({activeTool.argSummary})</Text>
-          </Text>
-          {activeTool.tail.length > 0 && (
-            <Text dimColor>
-              {activeTool.tail.map((l) => `  │ ${l}`).join("\n")}
-            </Text>
+      {transcriptMode ? (
+        <TranscriptScreen items={items} expanded={transcriptExpanded} />
+      ) : (
+        <>
+          {streamText && (
+            <Box marginTop={1}>
+              <Text>{renderMarkdown(streamText)}</Text>
+            </Box>
           )}
-        </Box>
-      )}
 
-      {running && (
-        <Box marginTop={1}>
-          <Text color={T.primary}>{SPINNER[spinnerTick % SPINNER.length]} </Text>
-          <Text dimColor>
-            {statusWord}… · {meter}
-          </Text>
-        </Box>
-      )}
+          {activeTool && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text>
+                <Text color={T.secondary}>◆ {activeTool.name}</Text>
+                <Text dimColor>({activeTool.argSummary})</Text>
+              </Text>
+              {activeTool.tail.length > 0 && (
+                <Text dimColor>
+                  {activeTool.tail.map((l) => `  │ ${l}`).join("\n")}
+                </Text>
+              )}
+            </Box>
+          )}
 
-      <Box ref={inputAreaRef} flexDirection="column" marginTop={1}>
-        {permissionController.view ? (
-          <PermissionDialog view={permissionController.view} />
-        ) : (
+          {running && (
+            <Box marginTop={1}>
+              <Text color={T.primary}>{SPINNER[spinnerTick % SPINNER.length]} </Text>
+              <Text dimColor>
+                {statusWord}… · {meter}
+              </Text>
+            </Box>
+          )}
+        </>
+      )}
+    </>
+  );
+
+  const bottom = (
+    <>
+      {!transcriptMode &&
+        (permissionController.view ? null : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box
             ref={inputBorderRef}
@@ -707,15 +795,28 @@ export function App(props: AppProps) {
               onContentWidthChange={inputController.setContentWidth}
             />
           </Box>
-        )}
-        {permissionMode !== "default" && (
-          <Text color={MODE_META[permissionMode].color}>
-            {MODE_META[permissionMode].symbol} {MODE_META[permissionMode].title} on{" "}
-            <Text dimColor>(shift+tab 循环)</Text>
-          </Text>
-        )}
-        <StatusBar status={status} />
-      </Box>
-    </Box>
+        ))}
+      {!transcriptMode && permissionMode !== "default" && (
+        <Text color={MODE_META[permissionMode].color}>
+          {MODE_META[permissionMode].symbol} {MODE_META[permissionMode].title} on{" "}
+          <Text dimColor>(shift+tab 循环)</Text>
+        </Text>
+      )}
+      <StatusBar status={status} />
+    </>
+  );
+
+  return (
+    <Layout
+      rootRef={appRootRef}
+      bottomRef={inputAreaRef}
+      scrollable={scrollable}
+      overlay={
+        !transcriptMode && permissionController.view ? (
+          <PermissionDialog view={permissionController.view} />
+        ) : null
+      }
+      bottom={bottom}
+    />
   );
 }

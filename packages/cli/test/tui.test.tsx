@@ -134,6 +134,29 @@ class PendingLoadHistoryStore extends HistoryStore {
   override async append() {}
 }
 
+/** 05：带终端带外通道注入的 App（标题/进度/通知的序列落进 sink，不写真实 stdout） */
+function makeAppWithTerminal(
+  provider: Provider,
+  terminalWrite: (s: string) => void,
+  env: NodeJS.ProcessEnv,
+) {
+  return (
+    <App
+      provider={provider}
+      projectContext=""
+      tools={builtinTools}
+      settings={{}}
+      initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+      initialHistory={[]}
+      mcpToolCount={0}
+      sessionDir={sessionDir}
+      historyPath={newHistoryPath()}
+      terminalWrite={terminalWrite}
+      env={env}
+    />
+  );
+}
+
 function makeApp(provider: Provider, historyPath = newHistoryPath()) {
   return (
     <App
@@ -1478,6 +1501,130 @@ describe("TUI", () => {
     expect(frame).toContain("↑1.2k"); // 实时 input tokens
     expect(frame).toContain("↓340"); // 实时 output tokens
     expect(frame).toContain("working…"); // 输入框运行态英文占位
+    unmount();
+  });
+
+  it("Ctrl+O 打开会话全文屏：工具输出不截断；Ctrl+E 展开、Esc 返回", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "long.txt").replace(/\\/g, "/");
+    // 8 行内容：主屏预览只留前 3 行 + "… +5 行"，全文屏要能看到最后一行
+    writeFileSync(target, Array.from({ length: 8 }, (_, i) => `第${i + 1}行`).join("\n"));
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "read_file", args: JSON.stringify({ path: target }) }],
+      },
+      { content: "读完了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("读文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("读完了"), { timeout: 3000 });
+    expect(lastFrame()).toContain("… +5 行"); // 主屏是截断预览
+    expect(lastFrame()).not.toContain("第8行");
+
+    stdin.write("\x0f"); // Ctrl+O
+    await flush();
+    expect(lastFrame()).toContain("会话全文");
+    expect(lastFrame()).toContain("第8行"); // 全文屏给出未截断输出
+
+    stdin.write("\x05"); // Ctrl+E 展开
+    await flush();
+    expect(lastFrame()).toContain("已展开");
+
+    stdin.write("\x1b"); // Esc 返回主屏
+    await flush();
+    expect(lastFrame()).not.toContain("会话全文");
+    unmount();
+  });
+
+  it("全文屏吞掉普通按键：不会漏进输入框", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("\x0f"); // Ctrl+O 进全文屏
+    await flush();
+    stdin.write("abc");
+    stdin.write("\r"); // 回车在全文屏里不该提交
+    await flush();
+    expect(provider.streamCalls).toBe(0);
+
+    stdin.write("\x0f"); // Ctrl+O 回主屏
+    await flush();
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).not.toContain("❯ abc"); // 输入框里没有残留
+    unmount();
+  });
+
+  it("终端标题与进度：空闲 ✳、运行中 ⠂ + OSC 9;4 转圈", async () => {
+    const writes: string[] = [];
+    const { stdin, unmount } = render(
+      makeAppWithTerminal(new SlowProvider(), (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "off",
+      }),
+    );
+    await flush();
+    expect(writes.some((w) => w.includes("\x1b]0;✳ transup — "))).toBe(true);
+    expect(writes.some((w) => w === "\x1b]9;4;0;0\x07")).toBe(true); // 空闲：进度清零
+
+    writes.length = 0;
+    stdin.write("hi");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("\x1b]0;⠂ transup — "))).toBe(true),
+      { timeout: 2000 },
+    );
+    expect(writes.some((w) => w === "\x1b]9;4;3;0\x07")).toBe(true); // 运行中：转圈
+    unmount();
+  });
+
+  it("权限弹窗挂起超阈值 → 发桌面通知", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "notify.txt").replace(/\\/g, "/");
+    const writes: string[] = [];
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "好" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      makeAppWithTerminal(provider, (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "iterm2",
+        TRANSUP_NOTIF_PERMISSION_MS: "60",
+      }),
+    );
+    await flush();
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("需要你的授权：write_file"))).toBe(true),
+      { timeout: 2000 },
+    );
+    expect(writes.find((w) => w.includes("需要你的授权"))).toContain("\x1b]9;"); // iTerm2 OSC 9
+    unmount();
+  });
+
+  it("回复完成后长时间无操作 → 发空闲通知", async () => {
+    const writes: string[] = [];
+    const { stdin, unmount } = render(
+      makeAppWithTerminal(new MockProvider([{ content: "答完了" }]), (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "iterm2",
+        TRANSUP_NOTIF_IDLE_MS: "60",
+      }),
+    );
+    await flush();
+    stdin.write("问题");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("等待你的下一步"))).toBe(true),
+      { timeout: 2000 },
+    );
     unmount();
   });
 

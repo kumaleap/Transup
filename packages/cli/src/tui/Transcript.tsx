@@ -19,6 +19,8 @@ export type TranscriptItem =
       argSummary: string;
       /** 结果预览行（已截断）；流式显示过的长输出这里只留统计 */
       preview: string;
+      /** 未截断的完整输出 —— 主屏不显示，Ctrl+O 的全文屏用它 */
+      full?: string;
       isError: boolean;
     }
   | { id: number; kind: "info"; text: string; tone: "dim" | "green" | "yellow" | "red" };

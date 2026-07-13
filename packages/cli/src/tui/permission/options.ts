@@ -52,7 +52,11 @@ function withScoped(scoped: PermissionOption, confirm: ToolUseConfirm): Permissi
   return safety ? [yesOption(), noOption()] : [yesOption(), scoped, noOption()];
 }
 
-export function buildPermissionView(confirm: ToolUseConfirm): PermissionViewModel {
+/** width：对话框内容可用列数（终端宽度减去边框/内缩），diff 预览据此折行 */
+export function buildPermissionView(
+  confirm: ToolUseConfirm,
+  width?: number,
+): PermissionViewModel {
   const { toolName, args } = confirm;
 
   if (toolName === "edit_file" || toolName === "write_file") {
@@ -68,7 +72,10 @@ export function buildPermissionView(confirm: ToolUseConfirm): PermissionViewMode
     return {
       title: toolName === "edit_file" ? "编辑文件" : overwrite ? "覆盖文件" : "创建文件",
       subtitle: path,
-      preview: toolName === "edit_file" ? renderEditPreview(args) : renderWritePreview(args),
+      preview:
+        toolName === "edit_file"
+          ? renderEditPreview(args, width)
+          : renderWritePreview(args, width),
       ...explanationFor(confirm),
       question:
         toolName === "edit_file"
