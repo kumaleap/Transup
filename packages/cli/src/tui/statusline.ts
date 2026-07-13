@@ -1,0 +1,103 @@
+/**
+ * 自定义状态行（规格 06 §1.1）—— "statusline 即 hook"
+ *
+ * 用户在 settings.statusLine.command 配一条 shell 命令，我们把会话状态
+ * 打包成 JSON 从 stdin 喂给它，stdout 原样（含 ANSI 颜色）显示在状态栏
+ * 上方。低成本高扩展：想显示 git 分支？天气？加班时长？写脚本就行。
+ *
+ * 约定（照抄 Claude Code 的合理设计）：
+ *   - 超时 5 秒，超时/非 0 退出/空输出一律静默丢弃 —— 状态行是装饰，
+ *     不能因为用户脚本坏了打扰主流程
+ *   - 触发方 300ms debounce + 取消 in-flight（见 use-status-line.ts）
+ */
+import { spawn } from "node:child_process";
+
+/** 喂给用户命令的会话状态快照（字段名对齐 Claude Code，脚本可迁移） */
+export interface StatusLineInput {
+  model: { id: string; display_name: string };
+  workspace: { current_dir: string };
+  version: string;
+  permission_mode: string;
+  cost: {
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_duration_ms: number;
+  };
+  context_window: {
+    used_percentage: number;
+  };
+}
+
+export interface StatusLineCommand {
+  command: string;
+  timeoutMs?: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 5000;
+
+/**
+ * 跑一次用户命令。任何失败（超时/非 0/信号/spawn 报错）都返回 null。
+ * stdout 按行 trim 后重新拼接（去掉尾部空行，保留中间的多行输出）。
+ */
+export function runStatusLineCommand(
+  config: StatusLineCommand,
+  input: StatusLineInput,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(null);
+
+    const child = spawn(config.command, {
+      shell: true,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+
+    let out = "";
+    let settled = false;
+    const settle = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+
+    const kill = () => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* 已退出 */
+      }
+    };
+    const onAbort = () => {
+      kill();
+      settle(null);
+    };
+    signal?.addEventListener("abort", onAbort);
+
+    const timer = setTimeout(() => {
+      kill();
+      settle(null);
+    }, config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+    child.stdout.setEncoding("utf-8");
+    child.stdout.on("data", (chunk: string) => {
+      out += chunk;
+    });
+    child.on("error", () => settle(null));
+    child.on("close", (code) => {
+      if (code !== 0) return settle(null);
+      const text = out
+        .split("\n")
+        .map((l) => l.trimEnd())
+        .join("\n")
+        .trim();
+      settle(text || null);
+    });
+
+    child.stdin.on("error", () => {
+      /* 用户命令不读 stdin 就退出会触发 EPIPE —— 无害 */
+    });
+    child.stdin.end(JSON.stringify(input));
+  });
+}
