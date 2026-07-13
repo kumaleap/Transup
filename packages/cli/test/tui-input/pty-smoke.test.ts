@@ -17,6 +17,8 @@ const BRACKETED_PASTE_END = "\u001B[201~";
 const DECLARED_CURSOR_ESCAPE =
   /(?:\u001B\[\d+A)?\u001B\[\d*G\u001B\[\?25h/;
 const ANSI_ESCAPE = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+const SCRIPT_EXIT_MARKER = "__TRANSUP_PTY_SCRIPT_EXIT__:";
+const SCRIPT_EXIT_PATTERN = /__TRANSUP_PTY_SCRIPT_EXIT__:(\d+)/;
 const PROCESS_TIMEOUT_MS = 12_000;
 const CLEANUP_GRACE_MS = 500;
 
@@ -27,6 +29,11 @@ type PtySupport =
 interface ChildExit {
   code: number | null;
   signal: NodeJS.Signals | null;
+}
+
+interface ScriptInvocation {
+  command: string;
+  args: string[];
 }
 
 function detectPtySupport(): PtySupport {
@@ -65,16 +72,32 @@ function shellQuote(argument: string): string {
   return `'${argument.replaceAll("'", "'\\''")}'`;
 }
 
-function scriptArguments(
+function scriptInvocation(
   platform: "darwin" | "linux",
   tsxPath: string,
   fixturePath: string,
-): string[] {
+): ScriptInvocation {
   if (platform === "darwin") {
-    return ["-q", "/dev/null", tsxPath, fixturePath];
+    const args = ["-q", "/dev/null", tsxPath, fixturePath]
+      .map(shellQuote)
+      .join(" ");
+    // Darwin's script rejects Node's socket-backed stdin pipe. The marker lets
+    // the parent release cat immediately if script exits before Node input.
+    const bridge = [
+      "exec /bin/cat | {",
+      `  /usr/bin/script ${args}`,
+      "  status=$?",
+      `  printf '\n${SCRIPT_EXIT_MARKER}%s\n' "$status"`,
+      '  exit "$status"',
+      "}",
+    ].join("\n");
+    return {
+      command: "/bin/sh",
+      args: ["-c", bridge],
+    };
   }
   const command = `${shellQuote(tsxPath)} ${shellQuote(fixturePath)}`;
-  return ["-qefc", command, "/dev/null"];
+  return {command: "script", args: ["-qefc", command, "/dev/null"]};
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -134,14 +157,30 @@ function waitForOutput(
       child.off("close", onClose);
     };
     const check = () => {
-      if (!predicate(getOutput())) return;
+      const output = getOutput();
+      const scriptExit = SCRIPT_EXIT_PATTERN.exec(output);
+      if (scriptExit) {
+        cleanup();
+        child.stdin.destroy();
+        rejectOutput(
+          new Error(
+            `PTY fixture exited before it was ready (code=${scriptExit[1]}, signal=null); ` +
+            `output=${diagnostic(output)}`,
+          ),
+        );
+        return;
+      }
+      if (!predicate(output)) return;
       cleanup();
       resolveOutput();
     };
     const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
       rejectOutput(
-        new Error(`PTY fixture exited before it was ready (code=${code}, signal=${signal})`),
+        new Error(
+          `PTY fixture exited before it was ready (code=${code}, signal=${signal}); ` +
+          `output=${diagnostic(getOutput())}`,
+        ),
       );
     };
 
@@ -175,9 +214,10 @@ describe("terminal input PTY smoke", () => {
       const workspaceRoot = resolve(dirname(testFile), "../../../..");
       const tsxPath = join(workspaceRoot, "node_modules", ".bin", "tsx");
       const fixturePath = resolve(dirname(testFile), "../fixtures/pty-input-app.tsx");
+      const invocation = scriptInvocation(support.platform, tsxPath, fixturePath);
       const child = spawn(
-        "script",
-        scriptArguments(support.platform, tsxPath, fixturePath),
+        invocation.command,
+        invocation.args,
         {
           cwd: testDirectory,
           detached: true,
@@ -230,8 +270,15 @@ describe("terminal input PTY smoke", () => {
 
         const pasted = "first line\n第二行\nthird line";
         child.stdin.write(
-          `${BRACKETED_PASTE_START}${pasted}${BRACKETED_PASTE_END}\r`,
+          `${BRACKETED_PASTE_START}${pasted}${BRACKETED_PASTE_END}`,
         );
+        const pasteRendered = waitForOutput(
+          child,
+          () => output,
+          (current) => current.includes("[Pasted text #1 +2 lines]"),
+        );
+        await Promise.race([pasteRendered, spawnFailed, timedOut]);
+        child.stdin.end("\r");
 
         const result = await Promise.race([closed, spawnFailed, timedOut]);
         if (result.code !== 0) {
