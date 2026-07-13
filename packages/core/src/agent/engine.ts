@@ -31,7 +31,8 @@ export type AgentEvent =
   | { type: "tool_end"; call: ToolCall; content: string; isError: boolean }
   | { type: "usage"; usage: Usage }
   | { type: "compact_start"; beforeChars: number }
-  | { type: "compact_end"; afterChars: number; ok: boolean }
+  /** ok 时带摘要正文 —— 宿主可做"一行摘要卡 + 展开查看"（规格 07 §1.2） */
+  | { type: "compact_end"; afterChars: number; ok: boolean; summary?: string }
   /** 模型调用失败，引擎将在 delayMs 后重试（宿主应提示并清掉已流出的半截文本） */
   | { type: "stream_retry"; attempt: number; maxAttempts: number; error: string; delayMs: number }
   /** 引擎自动催模型继续（截断续跑 / 空回复催跑） */
@@ -60,6 +61,21 @@ export interface EngineOptions {
 
 /** 每轮自动干预（截断续跑 + 空回复催跑）的总次数上限 */
 const AUTO_CONTINUE_LIMIT = 3;
+
+/**
+ * 判断一段会话历史是否终止在"半截 turn"上（恢复会话时提示用户可续跑）。
+ * 三种可靠的中断痕迹：
+ *   - 尾部是 user 消息 → 提问后没得到任何回应（请求期间崩溃/被杀）
+ *   - 尾部是 tool 结果 → 模型还没接话（工具阶段被中断，或熔断停轮）
+ *   - 尾部 assistant 带中断标记 → 流式阶段被 Ctrl+C（引擎写入的固定文案）
+ */
+export function wasInterrupted(history: Message[]): boolean {
+  const last = history.at(-1);
+  if (!last) return false;
+  if (last.role === "user") return !last.content.startsWith("[系统提示]");
+  if (last.role === "tool") return true;
+  return last.role === "assistant" && last.content.includes("已被用户中断");
+}
 
 /** 判断模型调用错误是否值得重试：4xx（限流/超时除外）是请求本身的问题，重试无意义 */
 function isRetryable(err: unknown): boolean {
@@ -162,7 +178,7 @@ export class AgentEngine {
       await this.session?.append(newMessages[1]);
       await this.session?.append(newMessages[2]);
 
-      yield { type: "compact_end", afterChars: this.contextSize(), ok: true };
+      yield { type: "compact_end", afterChars: this.contextSize(), ok: true, summary };
     } catch {
       // 熔断：压缩失败退回最简截断
       trimHistory(this.messages, this.maxContextChars);

@@ -3,7 +3,7 @@
  *
  * 宿主（CLI / IDE / server）只依赖这里导出的东西。
  */
-export { AgentEngine, type AgentEvent, type EngineOptions } from "./agent/engine.js";
+export { AgentEngine, wasInterrupted, type AgentEvent, type EngineOptions } from "./agent/engine.js";
 export { OpenAICompatProvider, type OpenAICompatOptions } from "./provider/openai-compat.js";
 export {
   OpenAIResponsesProvider,

@@ -9,7 +9,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
+import { z } from "zod";
+import { AgentEngine, wasInterrupted, type AgentEvent } from "../src/agent/engine.js";
 import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, ToolCall } from "../src/provider/types.js";
 
@@ -143,11 +144,67 @@ describe("AgentEngine 主循环", () => {
     expect(events.some((e) => e.type === "compact_start")).toBe(true);
     const end = events.find((e) => e.type === "compact_end") as any;
     expect(end.ok).toBe(true);
+    // 摘要正文随事件透出 —— 宿主用它渲染"一行摘要卡 + 展开查看"
+    expect(end.summary).toContain("已完成 A");
 
     // 压缩后的请求里必须带着摘要，且不再包含第一轮的原始内容
     const lastCall = provider.calls.at(-1)!;
     const text = JSON.stringify(lastCall);
     expect(text).toContain("摘要");
     expect(text).not.toContain("x".repeat(100));
+  });
+
+  it("只读工具的进度也走 tool_progress（并行启动，轮到时转发）", async () => {
+    // 自定义只读工具：执行期间吐两段进度
+    const probe = {
+      name: "probe",
+      description: "test",
+      schema: z.object({}),
+      readOnly: true,
+      async execute(_args: object, onProgress?: (chunk: string) => void) {
+        onProgress?.("第一步\n");
+        await new Promise((r) => setTimeout(r, 10));
+        onProgress?.("第二步\n");
+        return "完成";
+      },
+    };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [{ id: "t1", name: "probe", args: "{}" }] },
+      { content: "收到。" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [probe] });
+    const events = await collect(engine.runTurn("跑探针"));
+
+    const types = events.map((e) => e.type);
+    const progress = events.filter((e) => e.type === "tool_progress") as any[];
+    expect(progress.map((p) => p.chunk)).toEqual(["第一步\n", "第二步\n"]);
+    // 顺序：tool_start → progress → tool_end
+    expect(types.indexOf("tool_start")).toBeLessThan(types.indexOf("tool_progress"));
+    expect(types.lastIndexOf("tool_progress")).toBeLessThan(types.indexOf("tool_end"));
+  });
+});
+
+describe("wasInterrupted", () => {
+  const user = (content: string): Message => ({ role: "user", content });
+  const assistant = (content: string): Message => ({ role: "assistant", content });
+  const tool = (content: string): Message => ({ role: "tool", toolCallId: "t1", content });
+
+  it("正常收尾（assistant 结尾）→ 未中断；空历史 → 未中断", () => {
+    expect(wasInterrupted([])).toBe(false);
+    expect(wasInterrupted([user("做任务"), assistant("做完了")])).toBe(false);
+  });
+
+  it("尾部是 user → 提问后没有回应，中断", () => {
+    expect(wasInterrupted([user("做任务")])).toBe(true);
+    // 但引擎注入的系统提示不算用户提问
+    expect(wasInterrupted([user("[系统提示] 对话历史已被压缩。")])).toBe(false);
+  });
+
+  it("尾部是 tool 结果 → 模型还没接话，中断", () => {
+    expect(wasInterrupted([user("做"), assistant(""), tool("[错误] 已被用户中断")])).toBe(true);
+  });
+
+  it("流式中断标记 → 中断", () => {
+    expect(wasInterrupted([user("做"), assistant("(已被用户中断)")])).toBe(true);
   });
 });

@@ -27,6 +27,14 @@ const schema = z.object({
   description: z.string().describe("子任务的完整描述，包含要找什么、在哪找、需要返回什么"),
 });
 
+/** 进度行里的参数摘要：取各字段值拼一行，截断防刷屏 */
+function briefArgs(args: Record<string, unknown>): string {
+  const text = Object.values(args)
+    .map((v) => (typeof v === "string" ? v : JSON.stringify(v)))
+    .join(" ");
+  return text.length > 60 ? text.slice(0, 60) + "…" : text;
+}
+
 export function createTaskTool(provider: Provider): Tool<typeof schema> {
   return {
     name: "task",
@@ -37,7 +45,7 @@ export function createTaskTool(provider: Provider): Tool<typeof schema> {
       "description 必须自包含：子 agent 看不到当前对话。",
     schema,
     readOnly: true, // 只读工具集 → 整体只读 → 可并行、免确认
-    async execute({ description }) {
+    async execute({ description }, onProgress) {
       const sub = new AgentEngine({
         provider,
         // 子 agent 的工具全是只读的，只读直接放行；
@@ -50,8 +58,13 @@ export function createTaskTool(provider: Provider): Tool<typeof schema> {
         maxIterations: 15,
       });
 
+      // 子 agent 的工具活动以进度行透出（→ read_file src/index.ts），
+      // 长探索不再像卡死；正文仍只回流最终结论，不污染主上下文
       let result = "";
       for await (const ev of sub.runTurn(description)) {
+        if (ev.type === "tool_start") {
+          onProgress?.(`→ ${ev.call.name} ${briefArgs(ev.parsedArgs)}\n`);
+        }
         if (ev.type === "turn_end" && ev.reason !== "done") {
           return `[子任务未完成: ${ev.reason}] 已收集到的部分结论：\n${result}`;
         }
