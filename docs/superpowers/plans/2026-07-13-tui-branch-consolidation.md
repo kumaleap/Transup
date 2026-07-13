@@ -206,7 +206,7 @@ Expected: ancestry command exits zero, the merge shows the visual files and test
 - Consumes: streaming branch tip `82767dcccc71435b639bb4f2477eb868f26fdf3f`, visual helpers `summarizeToolCall()` and `pushError()`, streaming `stallTrackerRef` and `activeToolRef`, and the existing `MockProvider`/`AbortableProvider` TUI harness.
 - Produces: one merge commit where tool summaries, stall tracking, whole-line streaming, structured errors, and interruption flushing coexist.
 
-- [ ] **Step 1: Start the real streaming merge and confirm the known conflict**
+- [x] **Step 1: Start the real streaming merge and confirm the known conflict**
 
 ```bash
 git merge --no-commit --no-ff origin/feature/tui-streaming-activity
@@ -215,7 +215,7 @@ git status --short
 
 Expected: the streaming activity modules and tests are staged; only `packages/cli/src/tui/App.tsx` remains unmerged.
 
-- [ ] **Step 2: Resolve the two conflict markers to the streaming-side behavior as a compilable RED baseline**
+- [x] **Step 2: Resolve the two conflict markers to the streaming-side behavior as a compilable RED baseline**
 
 For `tool_start`, temporarily keep the streaming-side body:
 
@@ -243,7 +243,7 @@ git diff --check --cached
 
 Expected: the index is conflict-free and whitespace-clean, but visual tool summarization is absent by construction.
 
-- [ ] **Step 3: Add a failing App regression for visual tool summaries after streaming integration**
+- [x] **Step 3: Add a failing App regression for visual tool summaries after streaming integration**
 
 Add this test next to the existing tool and streaming App tests in `packages/cli/test/tui.test.tsx`:
 
@@ -282,7 +282,7 @@ it("keeps user-facing tool summaries while streaming activity is integrated", as
 
 Use the existing `writeFileSync` import from the test file's `node:fs` import.
 
-- [ ] **Step 4: Strengthen the existing interruption regression against duplicate commits**
+- [x] **Step 4: Strengthen the existing interruption regression against duplicate commits**
 
 After the existing assertions for `部分输出`, `后半`, and the interruption notice, add:
 
@@ -293,7 +293,7 @@ expect(frame.match(/已中断 · 接下来要我做什么\?/g)).toHaveLength(1);
 
 This freezes the combined contract that `turn_end: aborted` flushes the partial stream once before the notice and the `finally` flush is empty.
 
-- [ ] **Step 5: Run the combined App test and verify RED**
+- [x] **Step 5: Run the combined App test and verify RED**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/tui.test.tsx
@@ -301,7 +301,7 @@ PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/t
 
 Expected: the new tool-summary test fails because the temporary merge resolution renders `read_file(...)` instead of `Read(...)`; the existing streaming interruption cases still pass.
 
-- [ ] **Step 6: Implement the minimal combined `tool_start` handler**
+- [x] **Step 6: Implement the minimal combined `tool_start` handler**
 
 Replace the temporary handler with:
 
@@ -324,7 +324,7 @@ Remove `formatArgs` from the `./format.js` import. The temporary streaming-side
 `tool_start` handler is its only call site, so the combined handler makes the
 import unused.
 
-- [ ] **Step 7: Implement the minimal combined `turn_end` handler**
+- [x] **Step 7: Implement the minimal combined `turn_end` handler**
 
 Use this exact reason mapping:
 
@@ -343,7 +343,7 @@ case "turn_end":
 
 Retain `activeToolRef.current = null` in `finally` and in successful tool-end cleanup.
 
-- [ ] **Step 8: Verify GREEN across combined visual, streaming, cursor, and App suites**
+- [x] **Step 8: Verify GREEN across combined visual, streaming, cursor, and App suites**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/tui.test.tsx packages/cli/test/transcript.test.tsx packages/cli/test/tui-input/text-input.test.tsx packages/cli/test/tui-activity/frames.test.ts packages/cli/test/tui-activity/line-commit.test.ts packages/cli/test/tui-activity/stall.test.ts packages/cli/test/tui-activity/status-line.test.ts
@@ -353,7 +353,7 @@ git diff --check --cached
 
 Expected: all selected tests and typecheck pass; staged merge content is whitespace-clean.
 
-- [ ] **Step 9: Complete the streaming merge commit**
+- [x] **Step 9: Complete the streaming merge commit**
 
 ```bash
 git add packages/cli/src/tui/App.tsx packages/cli/test/tui.test.tsx
@@ -362,7 +362,7 @@ git commit -m "Merge branch 'feature/tui-streaming-activity' into integration/tu
 
 Expected: Git records a two-parent merge commit and exits the merge state.
 
-- [ ] **Step 10: Verify the visual and streaming tips are ancestors**
+- [x] **Step 10: Verify the visual and streaming tips are ancestors**
 
 ```bash
 git merge-base --is-ancestor 9cc379735ddf5f5ac704f4a011c4a8c4e93c314b HEAD
