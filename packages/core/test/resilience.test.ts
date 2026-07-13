@@ -53,7 +53,7 @@ class FlakyProvider implements Provider {
 function makeEngine(provider: Provider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
   return new AgentEngine({
     provider,
-    canUseTool: async () => true,
+    canUseTool: async () => ({ behavior: "allow" as const }),
     retryBaseMs: 1, // 测试不等真实退避
     ...opts,
   });

@@ -19,7 +19,8 @@
 import {
   AgentEngine,
   SessionStore,
-  isAllowed,
+  evaluatePermission,
+  settingsRules,
   type AgentEvent,
   type Message,
   type Provider,
@@ -55,10 +56,21 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 
   const engine = new AgentEngine({
     provider: opts.provider,
-    canUseTool: async (name) => {
-      if (opts.allowAll || isAllowed(opts.settings, name)) return true;
+    canUseTool: async (name, args, meta) => {
+      // 与 TUI 同一套判定链（deny 规则连 --allow-all 也拦得住）；
+      // 无人可问 → ask 一律降级为 deny，除非 --allow-all 明示信任环境
+      const verdict = evaluatePermission(
+        { mode: opts.allowAll ? "bypassPermissions" : "default", rules: settingsRules(opts.settings) },
+        { toolName: name, args, readOnly: meta.readOnly },
+      );
+      if (verdict.behavior === "allow") return { behavior: "allow" };
+      if (verdict.behavior === "ask" && opts.allowAll) return { behavior: "allow" };
+      if (verdict.behavior === "deny") {
+        err(`⊘ 已拒绝 ${name}（权限规则禁止）\n`);
+        return { behavior: "deny", message: verdict.message };
+      }
       err(`⊘ 已拒绝写操作 ${name}（headless 模式需要 settings 允许清单或 --allow-all）\n`);
-      return false;
+      return { behavior: "deny" };
     },
     session: new SessionStore(opts.sessionId, opts.sessionDir),
     history: opts.history,

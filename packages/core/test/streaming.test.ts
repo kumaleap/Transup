@@ -12,7 +12,7 @@ import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
 import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, ToolCall } from "../src/provider/types.js";
 
-const allow = async () => true;
+const allow = async () => ({ behavior: "allow" as const });
 
 describe("bash 流式输出", () => {
   it("工具层：onProgress 收到增量 chunk，最终结果仍完整", async () => {

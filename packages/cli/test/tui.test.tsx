@@ -4,7 +4,8 @@
  * 验证核心链路而不碰真实 API：
  * 1. 首屏横幅与输入框渲染
  * 2. 输入 → 引擎跑 mock 回复 → 流式文本落进 transcript
- * 3. 工具调用（写操作）→ 权限对话框弹出 → 按 y 放行 / 按 n 拒绝
+ * 3. 工具调用（写操作）→ 权限对话框弹出 → 数字直选放行 / Esc 拒绝 /
+ *    会话级选项 / Tab 附言 / Shift+Tab 模式循环 / 队列
  * 4. 斜杠命令 /help /cost
  */
 import React from "react";
@@ -1237,12 +1238,12 @@ describe("TUI", () => {
     stdin.write("写个文件");
     stdin.write("\r");
     await vi.waitFor(
-      () => expect(lastFrame()).toContain("write_file"),
+      () => expect(lastFrame()).toContain("创建文件"),
       {timeout: 3000},
     );
-    expect(lastFrame()).toContain("write_file");
-    expect(lastFrame()).toContain("允许吗?");
-    stdin.write("y");
+    expect(lastFrame()).toContain("创建文件"); // 目标不存在 → "创建"标题
+    expect(lastFrame()).toContain("要创建 hello.txt 吗？");
+    stdin.write("1"); // 数字直选"是"
     await vi.waitFor(
       () => expect(lastFrame()).toContain("写完了"),
       {timeout: 3000},
@@ -1275,15 +1276,15 @@ describe("TUI", () => {
 
     stdin.write(pastedDraft);
     stdin.write("\r");
-    await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 2000});
+    await vi.waitFor(() => expect(lastFrame()).toContain("◈"), {timeout: 2000});
 
     stdin.write("\x12");
     await flush();
-    expect(lastFrame()).toContain("允许吗?");
+    expect(lastFrame()).toContain("◈");
     expect(lastFrame()).not.toContain("search prompts:");
     expect(lastFrame()).not.toContain("no matching prompt:");
 
-    stdin.write("y");
+    stdin.write("1"); // 数字直选"是"
     await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 2000});
     const callsAfterPermission = provider.streamCalls;
 
@@ -1302,7 +1303,7 @@ describe("TUI", () => {
     unmount();
   });
 
-  it("权限对话框按 n 拒绝：文件不写入，模型收到拒绝反馈", async () => {
+  it("权限对话框按 Esc 拒绝：文件不写入，模型收到拒绝反馈", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const target = join(dir, "deny.txt").replace(/\\/g, "/");
     const provider = new MockProvider([
@@ -1323,10 +1324,142 @@ describe("TUI", () => {
     stdin.write("写个文件");
     stdin.write("\r");
     await flush(400);
-    stdin.write("n");
+    stdin.write("\x1b"); // Esc = 拒绝
     await flush(600);
     expect(lastFrame()).toContain("好的，不写了");
     expect(existsSync(target)).toBe(false);
+    unmount();
+  });
+
+  it("会话级选项（数字 2）切到 acceptEdits：后续编辑不再询问，footer 显示模式", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const a = join(dir, "a.txt").replace(/\\/g, "/");
+    const b = join(dir, "b.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: a, content: "1" }) },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { id: "t2", name: "write_file", args: JSON.stringify({ path: b, content: "2" }) },
+        ],
+      },
+      { content: "两个都写完了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写两个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    stdin.write("2"); // 会话级：本会话内允许所有编辑
+    await vi.waitFor(() => expect(lastFrame()).toContain("两个都写完了"), { timeout: 3000 });
+    expect(readFileSync(a, "utf-8")).toBe("1");
+    expect(readFileSync(b, "utf-8")).toBe("2"); // 第二个写入没有再弹窗
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("accept edits on"); // footer 模式指示
+    unmount();
+  });
+
+  it("拒绝时 Tab 附言：反馈文本随工具结果回流", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "veto.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "收到，换个方案" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    stdin.write("\x1b[B"); // ↓ 到会话级
+    stdin.write("\x1b[B"); // ↓ 到"否"
+    stdin.write("\t"); // 展开附言
+    await flush();
+    stdin.write("改用别的方案");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("收到，换个方案"), { timeout: 3000 });
+    expect(existsSync(target)).toBe(false);
+    expect(lastFrame()).toContain("改用别的方案"); // 拒绝文案（含附言）进了工具结果预览
+    unmount();
+  });
+
+  it("Shift+Tab 循环到 plan 模式：写操作直接拒绝并回流引导文案", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "plan.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "那我先给出计划" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("\x1b[Z"); // Shift+Tab → acceptEdits
+    stdin.write("\x1b[Z"); // Shift+Tab → plan
+    await flush();
+    let frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("plan mode on");
+
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("那我先给出计划"), { timeout: 3000 });
+    expect(existsSync(target)).toBe(false); // 没有弹窗，直接被 plan 模式拒绝
+    frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("plan 模式");
+    unmount();
+  });
+
+  it("并发只读询问进队列：逐个确认，显示排队数", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const f1 = join(dir, "one.txt").replace(/\\/g, "/");
+    const f2 = join(dir, "two.txt").replace(/\\/g, "/");
+    writeFileSync(f1, "1");
+    writeFileSync(f2, "2");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "read_file", args: JSON.stringify({ path: f1 }) },
+          { id: "t2", name: "read_file", args: JSON.stringify({ path: f2 }) },
+        ],
+      },
+      { content: "都读完了" },
+    ]);
+    // ask 规则命中只读工具 → 两个并发 read_file 同时请求确认
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{ permissions: { ask: ["read_file"] } }}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("读两个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("还有 1 个待确认"), { timeout: 3000 });
+    stdin.write("1"); // 放行第一个
+    await flush();
+    stdin.write("1"); // 放行第二个
+    await vi.waitFor(() => expect(lastFrame()).toContain("都读完了"), { timeout: 3000 });
     unmount();
   });
 

@@ -73,16 +73,31 @@ export class ToolRegistry {
       );
     }
 
-    if (!tool.readOnly) {
-      const allowed = await canUse(name, check.data as Record<string, unknown>);
-      if (!allowed) return fail("用户拒绝了本次操作。请询问用户希望如何处理，不要重复尝试。");
+    const decision = await canUse(name, check.data as Record<string, unknown>, {
+      readOnly: tool.readOnly,
+    });
+    if (decision.behavior === "deny") {
+      return fail(decision.message ?? "用户拒绝了本次操作。请询问用户希望如何处理，不要重复尝试。");
     }
 
+    // 对话框里改过的参数同样要过校验 —— 权限层不能成为绕过 schema 的后门
+    let finalArgs = check.data;
+    if (decision.updatedInput) {
+      const recheck = tool.schema.safeParse(decision.updatedInput);
+      if (!recheck.success) {
+        return fail(
+          `修改后的参数校验失败:\n${recheck.error.issues.map((i) => `- ${i.path.join(".")}: ${i.message}`).join("\n")}`,
+        );
+      }
+      finalArgs = recheck.data;
+    }
+
+    const note = decision.feedback ? `\n\n[用户附言] ${decision.feedback}` : "";
     try {
-      const result = await tool.execute(check.data, onProgress);
-      return { toolCallId, content: result || "(无输出)", isError: false };
+      const result = await tool.execute(finalArgs, onProgress);
+      return { toolCallId, content: (result || "(无输出)") + note, isError: false };
     } catch (err: any) {
-      return fail(`工具执行出错: ${err.message}`);
+      return fail(`工具执行出错: ${err.message}${note}`);
     }
   }
 }

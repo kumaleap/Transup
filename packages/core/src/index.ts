@@ -14,8 +14,32 @@ export { AnthropicProvider, type AnthropicOptions } from "./provider/anthropic.j
 export { buildProjectContext } from "./agent/context.js";
 export { createTaskTool } from "./agent/subagent.js";
 export { connectMcpServer, connectAllMcpServers, type McpServerConfig, type McpConnection } from "./tools/mcp.js";
-export { loadSettings, saveSettings, isAllowed, persistAllow, type Settings } from "./settings.js";
+export {
+  loadSettings,
+  saveSettings,
+  isAllowed,
+  persistAllow,
+  persistPermissionRule,
+  settingsRules,
+  type Settings,
+} from "./settings.js";
+export {
+  evaluatePermission,
+  nextPermissionMode,
+  normalizeRules,
+  ruleMatches,
+  commandPrefix,
+  bashPrefixRule,
+  type PermissionMode,
+  type PermissionRules,
+  type PermissionQuery,
+  type PermissionReason,
+  type PermissionVerdict,
+  type PermissionUpdate,
+  type PermissionDestination,
+  type ToolPermissionContext,
+} from "./permissions.js";
 export type { Provider, ProviderEvent, Message, StopReason, ToolCall, ToolSpec, Usage } from "./provider/types.js";
 export { ToolRegistry, builtinTools } from "./tools/registry.js";
-export type { Tool, ToolResult, PermissionFn } from "./tools/types.js";
+export type { Tool, ToolResult, PermissionFn, PermissionDecision } from "./tools/types.js";
 export { SessionStore } from "./session/store.js";

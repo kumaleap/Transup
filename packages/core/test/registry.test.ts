@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolRegistry } from "../src/tools/registry.js";
 
-const allow = async () => true;
-const deny = async () => false;
+const allow = async () => ({ behavior: "allow" as const });
+const deny = async () => ({ behavior: "deny" as const });
 
 describe("工具执行管线", () => {
   const reg = new ToolRegistry();
@@ -40,14 +40,17 @@ describe("工具执行管线", () => {
     expect(r.content).toContain("拒绝");
   });
 
-  it("只读工具不触发权限回调", async () => {
-    let asked = false;
-    const spy = async () => { asked = true; return true; };
+  it("只读工具也过权限回调（deny 规则才能管到它们），并带 readOnly 标记", async () => {
+    let seenReadOnly: boolean | undefined;
+    const spy = async (_n: string, _a: Record<string, unknown>, meta: { readOnly: boolean }) => {
+      seenReadOnly = meta.readOnly;
+      return { behavior: "allow" as const };
+    };
     const dir = await mkdtemp(join(tmpdir(), "transup-"));
     await writeFile(join(dir, "a.txt"), "hello");
     const r = await reg.execute("1", "read_file", JSON.stringify({ path: join(dir, "a.txt") }), spy);
     expect(r.isError).toBe(false);
-    expect(asked).toBe(false);
+    expect(seenReadOnly).toBe(true);
   });
 
   it("执行异常 → 错误信息回流（edit_file 找不到 old_string）", async () => {
