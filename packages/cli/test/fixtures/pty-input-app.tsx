@@ -1,4 +1,5 @@
-import {useCallback, useRef} from "react";
+// 显式引入 React：本文件在 tsconfig include 之外，tsx 会退回 classic JSX 转换
+import React, {useCallback, useRef} from "react";
 
 import {TextInput} from "../../src/tui/TextInput.js";
 import {

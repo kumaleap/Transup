@@ -40,8 +40,12 @@ function detectPtySupport(): PtySupport {
   const probeArgs = process.platform === "darwin"
     ? ["-q", "/dev/null", "/usr/bin/true"]
     : ["-qefc", "exit 0", "/dev/null"];
+  // stdin 必须和真实调用同形（pipe → macOS 上是 socketpair）：
+  // BSD script 会对 stdin 做 tcgetattr，socketpair 直接报错退出 ——
+  // 探针用 /dev/null 会把这类环境误判为"支持"，真跑时才炸
   const probe = spawnSync("script", probeArgs, {
-    stdio: "ignore",
+    stdio: ["pipe", "ignore", "ignore"],
+    input: "",
     timeout: 3_000,
   });
 
