@@ -251,6 +251,17 @@ describe("renderMarkdown", () => {
     }
   });
 
+  it("高度不对称的三列表格不超过 80 列", () => {
+    const long = "x".repeat(120);
+    const out = strip(
+      renderMarkdown(`| A | B | C |\n| --- | --- | --- |\n| ${long} | y | z |`),
+    );
+    expect(out).toContain("…");
+    for (const line of out.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+  });
+
   it("没有分隔行的 | 行按普通段落处理", () => {
     const out = strip(renderMarkdown("a | b | c"));
     expect(out).toBe("a | b | c");

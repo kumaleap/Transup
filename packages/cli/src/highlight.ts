@@ -309,8 +309,14 @@ function renderTable(rawRows: string[]): string {
   );
   const budget = MAX_TABLE_WIDTH - (3 * cols + 1); // 每列占 "│ … " 3 列 + 收尾 │
   const total = widths.reduce((a, b) => a + b, 0);
-  if (total > budget && budget > cols * 3) {
-    widths = widths.map((w) => Math.max(3, Math.floor((w * budget) / total)));
+  const minWidth = 3;
+  if (total > budget && budget > cols * minWidth) {
+    const remainingBudget = budget - cols * minWidth;
+    const extraWidths = widths.map((w) => Math.max(0, w - minWidth));
+    const extraTotal = extraWidths.reduce((a, b) => a + b, 0);
+    widths = extraWidths.map(
+      (extra) => minWidth + Math.floor((extra * remainingBudget) / extraTotal),
+    );
   }
 
   const cell = (c: { rendered: string; plain: string; width: number }, w: number, align: CellAlign) => {
