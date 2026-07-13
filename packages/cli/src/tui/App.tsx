@@ -39,9 +39,13 @@ import { renderEditPreview, renderWritePreview } from "../diff.js";
 import { expandFileRefs } from "../input.js";
 import { renderMarkdown } from "../highlight.js";
 import {
+  DOT,
+  ResultLine,
   TranscriptItemView,
-  formatArgs,
-  previewResult,
+  formatApiError,
+  formatToolError,
+  summarizeToolCall,
+  summarizeToolResult,
   type TranscriptItem,
 } from "./Transcript.js";
 import { TextInput } from "./TextInput.js";
@@ -160,8 +164,14 @@ export function App(props: AppProps) {
   }, []);
 
   const info = useCallback(
-    (text: string, tone: "dim" | "green" | "yellow" | "red" = "dim") =>
+    (text: string, tone: "dim" | "green" | "yellow" = "dim") =>
       push({ kind: "info", text, tone }),
+    [push],
+  );
+
+  // 结构化错误行（⎿ 缩进 + 红，规格 §1.5）：API/系统错误统一截 1000 字符
+  const pushError = useCallback(
+    (text: string) => push({ kind: "error", text: formatApiError(text) }),
     [push],
   );
 
@@ -346,7 +356,7 @@ export function App(props: AppProps) {
           for await (const ev of engineRef.current!.compactNow()) {
             if (ev.type === "compact_end") {
               if (ev.ok) info(`压缩完成（${Math.round(ev.afterChars / 1000)}k 字符）`, "green");
-              else info("压缩失败", "red");
+              else pushError("压缩失败");
             }
           }
           const { percent } = engineRef.current!.contextUsage();
@@ -385,7 +395,7 @@ export function App(props: AppProps) {
       }
       default:
         if (cmd.startsWith("/")) {
-          info(`未知命令 ${cmd}，输入 /help 查看可用命令`, "red");
+          pushError(`未知命令 ${cmd}，输入 /help 查看可用命令`);
           return true;
         }
         return false;
@@ -421,16 +431,14 @@ export function App(props: AppProps) {
             stream += ev.text;
             setStreamText(stream);
             break;
-          case "tool_start":
+          case "tool_start": {
             flushStream();
-            tool = {
-              name: ev.call.name,
-              argSummary: formatArgs(ev.parsedArgs),
-              tail: [],
-              streamed: false,
-            };
+            // 标题行摘要按工具定制（bash 显示命令原文、edit → Update(路径) 等）
+            const { displayName, argSummary } = summarizeToolCall(ev.call.name, ev.parsedArgs);
+            tool = { name: displayName, argSummary, tail: [], streamed: false };
             setActiveTool(tool);
             break;
+          }
           case "tool_progress":
             if (tool) {
               tool.streamed = true;
@@ -443,9 +451,12 @@ export function App(props: AppProps) {
             const streamed = tool?.streamed ?? false;
             push({
               kind: "tool",
-              name: ev.call.name,
+              name: tool?.name ?? ev.call.name,
               argSummary: tool?.argSummary ?? "",
-              preview: previewResult(ev.content, streamed && !ev.isError),
+              // 错误走规范化（剥标签/补前缀/10 行截断），成功走语义摘要（数字 bold）
+              preview: ev.isError
+                ? formatToolError(ev.content)
+                : summarizeToolResult(ev.call.name, ev.content, streamed),
               isError: ev.isError,
             });
             tool = null;
@@ -483,18 +494,18 @@ export function App(props: AppProps) {
             break;
           case "compact_end":
             if (ev.ok) info(`⟳ 压缩完成（${Math.round(ev.afterChars / 1000)}k 字符）`, "green");
-            else info("⟳ 压缩失败，已退回截断策略", "red");
+            else pushError("压缩失败，已退回截断策略");
             break;
           case "turn_end":
-            if (ev.reason === "max_iterations") info("已达到单轮最大迭代次数，强制停止。", "red");
+            if (ev.reason === "max_iterations") pushError("已达到单轮最大迭代次数，强制停止。");
             else if (ev.reason === "aborted") info("任务已中断。", "yellow");
             else if (ev.reason === "loop_detected")
-              info("检测到模型在重复相同的调用（循环空转），已强制停止本轮。", "red");
+              pushError("检测到模型在重复相同的调用（循环空转），已强制停止本轮。");
             break;
         }
       }
     } catch (err: any) {
-      info(`API 错误: ${err.message}`, "red");
+      pushError(`API 错误: ${err.message}`);
     } finally {
       flushStream();
       setActiveTool(null);
@@ -531,12 +542,15 @@ export function App(props: AppProps) {
       inputController.requestExit();
       return;
     }
+    // TODO(bash 模式)：输入控制器暂无 "!" 前缀的 bash 直执行模式；接入后
+    // 此处应改 push({ kind: "bash-input", text: 命令原文 }) 并走执行链路
+    // （渲染分支已就绪，见 Transcript.tsx 的 "bash-input" case，规格 §1.4）。
     push({ kind: "user", text: display });
     const startTurn = () => {
       void runTurn(expanded).catch((error) => {
         submitPendingRef.current = false;
         const detail = error instanceof Error ? error.message : String(error);
-        info(`API 错误: ${detail}`, "red");
+        pushError(`API 错误: ${detail}`);
       });
     };
     if (!display.startsWith("/")) {
@@ -553,7 +567,7 @@ export function App(props: AppProps) {
     } catch (error) {
       submitPendingRef.current = false;
       const detail = error instanceof Error ? error.message : String(error);
-      info(`命令错误: ${detail}`, "red");
+      pushError(`命令错误: ${detail}`);
     }
   }
 
@@ -583,15 +597,22 @@ export function App(props: AppProps) {
       )}
 
       {activeTool && (
+        // 动态活动行与完成态统一（规格 §1.2）：运行中 = dim 圆点（颜色即状态），
+        // 工具名 bold + 参数摘要括号；实时输出尾巴走 ⎿ 5 列 gutter。
         <Box flexDirection="column" marginTop={1}>
-          <Text>
-            <Text color={T.secondary}>◆ {activeTool.name}</Text>
-            <Text dimColor>({activeTool.argSummary})</Text>
-          </Text>
+          <Box>
+            <Box minWidth={2} flexShrink={0}>
+              <Text dimColor>{DOT}</Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text bold>{activeTool.name}</Text>
+                {activeTool.argSummary ? <Text>({activeTool.argSummary})</Text> : null}
+              </Text>
+            </Box>
+          </Box>
           {activeTool.tail.length > 0 && (
-            <Text dimColor>
-              {activeTool.tail.map((l) => `  │ ${l}`).join("\n")}
-            </Text>
+            <ResultLine>{activeTool.tail.join("\n")}</ResultLine>
           )}
         </Box>
       )}
