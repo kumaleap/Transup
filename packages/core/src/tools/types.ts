@@ -38,8 +38,26 @@ export interface ToolResult {
 /**
  * 权限回调 —— core 不知道"怎么问用户"（终端? IDE 弹窗? 自动策略?），
  * 由宿主（CLI/服务端）注入实现。这是 core 保持 UI 无关的关键接缝。
+ *
+ * 所有工具（含只读）都会经过回调 —— deny 规则对只读工具同样生效；
+ * 宿主对只读调用通常走无 UI 的快速判定。
  */
+export type PermissionDecision =
+  | {
+      behavior: "allow";
+      /** 对话框里修改过的参数（如编辑过的命令），执行前会重新过 schema 校验 */
+      updatedInput?: Record<string, unknown>;
+      /** 用户附言（"顺便…"），随工具结果一起喂回模型 */
+      feedback?: string;
+    }
+  | {
+      behavior: "deny";
+      /** 拒绝原因，喂回模型；不传用默认文案 */
+      message?: string;
+    };
+
 export type PermissionFn = (
   toolName: string,
   args: Record<string, unknown>,
-) => Promise<boolean>;
+  meta: { readOnly: boolean },
+) => Promise<PermissionDecision>;

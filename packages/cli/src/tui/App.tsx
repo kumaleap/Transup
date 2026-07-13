@@ -25,17 +25,21 @@ import {
 import {
   AgentEngine,
   SessionStore,
-  isAllowed,
-  persistAllow,
+  evaluatePermission,
+  nextPermissionMode,
+  persistPermissionRule,
+  settingsRules,
   type AgentEvent,
   type Message,
+  type PermissionDecision,
+  type PermissionMode,
+  type PermissionRules,
+  type PermissionUpdate,
   type Provider,
   type Settings,
   type Tool,
 } from "@transup/core";
-import { color } from "../ui.js";
 import { T } from "../theme.js";
-import { renderEditPreview, renderWritePreview } from "../diff.js";
 import { expandFileRefs } from "../input.js";
 import { renderMarkdown } from "../highlight.js";
 import {
@@ -49,11 +53,9 @@ import {
   type TranscriptItem,
 } from "./Transcript.js";
 import { TextInput } from "./TextInput.js";
-import {
-  PermissionDialog,
-  type PermissionDecision,
-  type PermissionRequest,
-} from "./PermissionDialog.js";
+import { PermissionDialog } from "./PermissionDialog.js";
+import { usePermissionController } from "./permission/use-permission-controller.js";
+import type { PermissionOutcome, ToolUseConfirm } from "./permission/types.js";
 import { StatusBar, type StatusInfo } from "./StatusBar.js";
 import {
   normalizeKeystroke,
@@ -100,7 +102,18 @@ const HELP = `命令：
   exit / quit    退出
 输入技巧：
   @路径          引用文件，内容自动附加到消息（如 "解释 @src/index.ts"）
-  Ctrl+C         任务运行中按一次中断任务，再按一次退出`;
+  Ctrl+C         任务运行中按一次中断任务，再按一次退出
+  Shift+Tab      循环权限模式（default → accept edits → plan）`;
+
+/** 非 default 模式在输入框下方的指示（对齐交互规格 04 §6.5） */
+const MODE_META: Record<
+  Exclude<PermissionMode, "default">,
+  { symbol: string; title: string; color: string }
+> = {
+  acceptEdits: { symbol: "⏵⏵", title: "accept edits", color: T.warn },
+  plan: { symbol: "⏸", title: "plan mode", color: T.primary },
+  bypassPermissions: { symbol: "⏵⏵", title: "bypass permissions", color: T.danger },
+};
 
 function newSessionId(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -128,7 +141,10 @@ export function App(props: AppProps) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
-  const [permission, setPermission] = useState<PermissionRequest | null>(null);
+  const [confirmQueue, setConfirmQueue] = useState<ToolUseConfirm[]>([]);
+  const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
+    props.settings.permissions?.defaultMode ?? "default",
+  );
   const [running, setRunning] = useState(false);
   // 每轮开始时随机取一次的 spinner 动词（turn 内不轮换）
   const [turnVerb, setTurnVerb] = useState("");
@@ -142,9 +158,15 @@ export function App(props: AppProps) {
   const runningRef = useRef(false);
   const submitPendingRef = useRef(false);
   const abortExitArmedRef = useRef(false);
-  const sessionAllowed = useRef(new Set<string>());
   const totals = useRef({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-  const permissionRef = useRef<PermissionRequest | null>(null);
+  // 权限判定的三份动态输入：待确认队列 / 当前模式 / 会话内攒下的规则
+  const confirmQueueRef = useRef<ToolUseConfirm[]>([]);
+  const confirmIdRef = useRef(0);
+  const permissionModeRef = useRef(permissionMode);
+  const sessionRulesRef = useRef<PermissionRules>({ allow: [], deny: [], ask: [] });
+  const baseRulesRef = useRef(settingsRules(props.settings));
+  // bypass 不进循环，除非 settings 显式声明（对齐"启动时声明才可用"约定）
+  const bypassAvailable = props.settings.permissions?.defaultMode === "bypassPermissions";
   // 本轮起始时间戳与实时累计用量 —— 渲染时读取，展示执行时长 / tokens
   const turnStartRef = useRef(0);
   const liveUsage = useRef({ input: 0, output: 0 });
@@ -187,40 +209,99 @@ export function App(props: AppProps) {
     [push],
   );
 
+  // ── 权限链路 ──────────────────────────────────────────────
+  // settings 两层规则 + 会话内攒下的规则 + 当前模式 → 判定上下文快照
+  const permissionContext = () => ({
+    mode: permissionModeRef.current,
+    rules: {
+      allow: [...baseRulesRef.current.allow, ...sessionRulesRef.current.allow],
+      deny: [...baseRulesRef.current.deny, ...sessionRulesRef.current.deny],
+      ask: [...baseRulesRef.current.ask, ...sessionRulesRef.current.ask],
+    },
+  });
+
+  // 模式/规则变化后重查队列：变 allow 的挂起弹窗自动放行（规格 §1.2 recheck）
+  const recheckConfirmQueue = () => {
+    for (const c of [...confirmQueueRef.current]) {
+      const v = evaluatePermission(permissionContext(), {
+        toolName: c.toolName,
+        args: c.args,
+        readOnly: c.readOnly,
+      });
+      if (v.behavior === "allow") c.resolve({ kind: "allow", updates: [] });
+    }
+  };
+
+  const setPermissionMode = (mode: PermissionMode) => {
+    permissionModeRef.current = mode;
+    setPermissionModeState(mode);
+    recheckConfirmQueue();
+  };
+
+  // 对话框决策产生的持久化动作：session 进内存，其余落对应 settings 文件；
+  // 落盘的规则同时写进内存镜像，本会话立即生效
+  const applyPermissionUpdates = async (updates: PermissionUpdate[]) => {
+    for (const u of updates) {
+      if (u.type === "setMode") {
+        setPermissionMode(u.mode);
+        continue;
+      }
+      sessionRulesRef.current[u.list].push(u.rule);
+      if (u.destination !== "session") {
+        await persistPermissionRule(u.rule, u.list, u.destination);
+      }
+    }
+    if (updates.some((u) => u.type === "addRule")) recheckConfirmQueue();
+  };
+
   // ── 引擎组装 ──────────────────────────────────────────────
   const canUseTool = useCallback(
-    async (name: string, args: Record<string, unknown>): Promise<boolean> => {
-      if (sessionAllowed.current.has(name)) return true;
-      if (isAllowed(props.settings, name)) return true;
-
-      const preview =
-        name === "edit_file"
-          ? renderEditPreview(args)
-          : name === "write_file"
-            ? renderWritePreview(args)
-            : color.dim(JSON.stringify(args, null, 2));
-
-      const decision = await new Promise<
-        "yes" | "no" | "session" | "always"
-      >((resolve) => {
-        const req: PermissionRequest = { toolName: name, preview, resolve };
-        permissionRef.current = req;
-        setPermission(req);
+    async (
+      name: string,
+      args: Record<string, unknown>,
+      meta: { readOnly: boolean },
+    ): Promise<PermissionDecision> => {
+      const verdict = evaluatePermission(permissionContext(), {
+        toolName: name,
+        args,
+        readOnly: meta.readOnly,
       });
-      permissionRef.current = null;
-      setPermission(null);
+      if (verdict.behavior === "allow") return { behavior: "allow" };
+      if (verdict.behavior === "deny") return { behavior: "deny", message: verdict.message };
 
-      if (decision === "always") {
-        await persistAllow(props.settings, name);
-        return true;
+      // ask → 入队挂起；只读工具并发执行时可能同时到达，对话框按队列一次显示一个
+      const outcome = await new Promise<PermissionOutcome>((resolve) => {
+        const confirm: ToolUseConfirm = {
+          id: confirmIdRef.current++,
+          toolName: name,
+          args,
+          readOnly: meta.readOnly,
+          verdict,
+          resolve: (o) => {
+            if (!confirmQueueRef.current.includes(confirm)) return; // 防双 resolve（用户按键与 recheck 竞争）
+            confirmQueueRef.current = confirmQueueRef.current.filter((x) => x !== confirm);
+            setConfirmQueue(confirmQueueRef.current);
+            resolve(o);
+          },
+        };
+        confirmQueueRef.current = [...confirmQueueRef.current, confirm];
+        setConfirmQueue(confirmQueueRef.current);
+      });
+
+      if (outcome.kind === "deny") {
+        return {
+          behavior: "deny",
+          message: outcome.feedback
+            ? `用户拒绝了本次操作，并要求：${outcome.feedback}`
+            : undefined,
+        };
       }
-      if (decision === "session") {
-        sessionAllowed.current.add(name);
-        return true;
-      }
-      return decision === "yes";
+      await applyPermissionUpdates(outcome.updates);
+      return { behavior: "allow", feedback: outcome.feedback };
     },
-    [props.settings],
+    // 只经 refs 与 setState 取状态，保持引用稳定（引擎不重建）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
 
   const createEngine = useCallback(
@@ -284,11 +365,13 @@ export function App(props: AppProps) {
     },
   });
 
-  const resolveCurrentPermission = (decision: PermissionDecision): boolean => {
-    const request = permissionRef.current;
-    if (!request) return false;
-    permissionRef.current = null;
-    request.resolve(decision);
+  const activeConfirm = confirmQueue[0] ?? null;
+  const permissionController = usePermissionController(activeConfirm, confirmQueue.length);
+
+  const rejectAllConfirms = (): boolean => {
+    const pending = confirmQueueRef.current;
+    if (pending.length === 0) return false;
+    for (const c of [...pending]) c.resolve({ kind: "deny" });
     return true;
   };
 
@@ -307,23 +390,15 @@ export function App(props: AppProps) {
       return true;
     }
     // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
-    resolveCurrentPermission("no");
+    rejectAllConfirms();
     info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
     abortExitArmedRef.current = true;
     controllerRef.current?.abort();
     return true;
   };
 
-  const handlePermissionKey = (stroke: Keystroke): boolean => {
-    if (stroke.input === "y" || stroke.name === "return") {
-      return resolveCurrentPermission("yes");
-    }
-    if (stroke.input === "n" || stroke.name === "escape") {
-      return resolveCurrentPermission("no");
-    }
-    if (stroke.input === "a") return resolveCurrentPermission("session");
-    if (stroke.input === "A") return resolveCurrentPermission("always");
-    return false;
+  const cyclePermissionMode = () => {
+    setPermissionMode(nextPermissionMode(permissionModeRef.current, bypassAvailable));
   };
 
   useInput((input, key) => {
@@ -331,18 +406,24 @@ export function App(props: AppProps) {
     if (!(stroke.ctrl && stroke.input === "c")) {
       abortExitArmedRef.current = false;
     }
-    const inputContext = permissionRef.current
+    const inputContext = confirmQueueRef.current.length > 0
       ? "permission"
       : inputController.isHistorySearchActive()
         ? "history-search"
         : "editor";
     routeKeystroke(stroke, inputContext, {
       global: handleGlobalKey,
-      permission: handlePermissionKey,
+      permission: (permStroke) => permissionController.handleKey(permStroke),
       historySearch: (searchStroke) =>
         submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
-      editor: (editorStroke) =>
-        submitPendingRef.current || inputController.handleEditorKey(editorStroke),
+      editor: (editorStroke) => {
+        // Shift+Tab 循环权限模式（运行中也生效 —— acceptEdits 可给后续弹窗放行）
+        if (editorStroke.name === "tab" && editorStroke.shift) {
+          cyclePermissionMode();
+          return true;
+        }
+        return submitPendingRef.current || inputController.handleEditorKey(editorStroke);
+      },
     });
   });
 
@@ -350,7 +431,7 @@ export function App(props: AppProps) {
     abortExitArmedRef.current = false;
     if (!submitPendingRef.current) inputController.handlePaste(text);
   }, {
-    isActive: !running && !permission,
+    isActive: !running && confirmQueue.length === 0,
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -667,8 +748,8 @@ export function App(props: AppProps) {
       )}
 
       <Box ref={inputAreaRef} flexDirection="column" marginTop={1}>
-        {permission ? (
-          <PermissionDialog request={permission} />
+        {permissionController.view ? (
+          <PermissionDialog view={permissionController.view} />
         ) : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box
@@ -687,6 +768,12 @@ export function App(props: AppProps) {
               onContentWidthChange={inputController.setContentWidth}
             />
           </Box>
+        )}
+        {permissionMode !== "default" && (
+          <Text color={MODE_META[permissionMode].color}>
+            {MODE_META[permissionMode].symbol} {MODE_META[permissionMode].title} on{" "}
+            <Text dimColor>(shift+tab 循环)</Text>
+          </Text>
         )}
         <StatusBar status={status} />
       </Box>

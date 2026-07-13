@@ -41,7 +41,7 @@ async function makeEngine(provider: Provider, opts: Partial<ConstructorParameter
   const dir = await mkdtemp(join(tmpdir(), "transup-engine-"));
   return new AgentEngine({
     provider,
-    canUseTool: async () => true,
+    canUseTool: async () => ({ behavior: "allow" as const }),
     session: new SessionStore("t", dir),
     ...opts,
   });

@@ -40,9 +40,12 @@ export function createTaskTool(provider: Provider): Tool<typeof schema> {
     async execute({ description }) {
       const sub = new AgentEngine({
         provider,
-        // 子 agent 的工具全是只读的，权限回调理论上不会被调到；
-        // fail-closed：真被调到（未来有人误加写工具）一律拒绝
-        canUseTool: async () => false,
+        // 子 agent 的工具全是只读的，只读直接放行；
+        // fail-closed：写操作（未来有人误加写工具）一律拒绝
+        canUseTool: async (_name, _args, meta) =>
+          meta.readOnly
+            ? { behavior: "allow" }
+            : { behavior: "deny", message: "子任务禁止写操作" },
         tools: [readFileTool, listDirTool, grepTool],
         maxIterations: 15,
       });
