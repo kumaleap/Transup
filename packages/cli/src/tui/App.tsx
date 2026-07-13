@@ -31,6 +31,7 @@ import {
   nextPermissionMode,
   persistPermissionRule,
   settingsRules,
+  wasInterrupted,
   type AgentEvent,
   type Message,
   type PermissionDecision,
@@ -95,6 +96,8 @@ export interface AppProps {
   env?: NodeJS.ProcessEnv;
   /** 退出时回调用量汇总（index.ts 用它在 TUI 卸载后打印 /cost 同款统计） */
   onExitStats?: (summary: string) => void;
+  /** 上下文字符预算覆盖（测试用小值触发压缩链路；也留给用户按模型窗口调） */
+  maxContextChars?: number;
 }
 
 const HELP = `命令：
@@ -165,6 +168,7 @@ export function App(props: AppProps) {
     props.settings.permissions?.defaultMode ?? "default",
   );
   const [running, setRunning] = useState(false);
+  const [compacting, setCompacting] = useState(false);
   const [spinnerTick, setSpinnerTick] = useState(0);
 
   const nextId = useRef(0);
@@ -322,7 +326,9 @@ export function App(props: AppProps) {
         history,
         projectContext: props.projectContext,
         tools: props.tools,
+        maxContextChars: props.maxContextChars,
       }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.provider, props.projectContext, props.tools, canUseTool],
   );
 
@@ -344,8 +350,37 @@ export function App(props: AppProps) {
         mcpToolCount: props.mcpToolCount,
       },
     });
+    // 恢复的会话终止在半截 turn 上 → 提示可以带着已有进度续跑
+    if (wasInterrupted(props.initialHistory)) {
+      info("⚠ 上次任务在执行中途被打断；直接下达指令，模型会带着已有进度继续。", "yellow");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── 压缩三段式（事中状态 + 事后摘要卡），runTurn 与 /compact 共用 ──
+  const compactBeforeRef = useRef(0);
+  const handleCompactEvent = (ev: AgentEvent): boolean => {
+    if (ev.type === "compact_start") {
+      compactBeforeRef.current = ev.beforeChars;
+      setCompacting(true);
+      return true;
+    }
+    if (ev.type === "compact_end") {
+      setCompacting(false);
+      if (ev.ok && ev.summary) {
+        push({
+          kind: "compact",
+          beforeChars: compactBeforeRef.current,
+          afterChars: ev.afterChars,
+          summary: ev.summary,
+        });
+      } else if (!ev.ok) {
+        info("⟳ 压缩失败，已退回截断策略", "red");
+      }
+      return true;
+    }
+    return false;
+  };
 
   // ── 运行期心跳 ────────────────────────────────────────────
   // 整轮运行期间跑一个 120ms 心跳：驱动 spinner 动画，同时让执行时长与
@@ -566,13 +601,12 @@ export function App(props: AppProps) {
       case "/compact": {
         runningRef.current = true;
         setRunning(true);
+        let acted = false;
         try {
           for await (const ev of engineRef.current!.compactNow()) {
-            if (ev.type === "compact_end") {
-              if (ev.ok) info(`压缩完成（${Math.round(ev.afterChars / 1000)}k 字符）`, "green");
-              else info("压缩失败", "red");
-            }
+            acted = handleCompactEvent(ev) || acted;
           }
+          if (!acted) info("会话还很短，无需压缩");
           const { percent } = engineRef.current!.contextUsage();
           setStatus((s) => ({ ...s, contextPercent: percent }));
         } finally {
@@ -596,12 +630,17 @@ export function App(props: AppProps) {
           info("暂无历史会话");
           return true;
         }
+        // 首条 prompt 做标题（lite read，只读文件头）—— 列表一眼可辨
+        const titles = await Promise.all(
+          ids.map((sessionId) => SessionStore.firstPrompt(sessionId, props.sessionDir)),
+        );
         openPanel(
           "切换会话",
-          ids.map((sessionId) => ({
+          ids.map((sessionId, i) => ({
             value: sessionId,
-            label: sessionId,
-            description: sessionId === sessionIdRef.current ? "当前" : undefined,
+            label: titles[i] ?? "（空会话）",
+            description:
+              sessionId === sessionIdRef.current ? `${sessionId} · 当前` : sessionId,
           })),
           (sessionId) => {
             if (sessionId === sessionIdRef.current) return;
@@ -613,6 +652,12 @@ export function App(props: AppProps) {
                 const { percent } = engineRef.current.contextUsage();
                 setStatus((s) => ({ ...s, sessionId, contextPercent: percent }));
                 info(`已切换到会话 ${sessionId}（${history.length} 条消息）`, "green");
+                if (wasInterrupted(history)) {
+                  info(
+                    "⚠ 该会话上次在执行中途被打断；直接下达指令，模型会带着已有进度继续。",
+                    "yellow",
+                  );
+                }
               } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
                 info(`切换会话失败：${detail}`, "red");
@@ -719,11 +764,9 @@ export function App(props: AppProps) {
             );
             break;
           case "compact_start":
-            info("⟳ 上下文接近上限，正在压缩…", "yellow");
-            break;
           case "compact_end":
-            if (ev.ok) info(`⟳ 压缩完成（${Math.round(ev.afterChars / 1000)}k 字符）`, "green");
-            else info("⟳ 压缩失败，已退回截断策略", "red");
+            flushStream(); // 保险：压缩边界前把已流出的文本落卡
+            handleCompactEvent(ev);
             break;
           case "turn_end":
             if (ev.reason === "max_iterations") info("已达到单轮最大迭代次数，强制停止。", "red");
@@ -803,11 +846,13 @@ export function App(props: AppProps) {
 
   // 运行期活动状态：英文状态词 + 执行时长 + 实时累计 tokens
   const elapsedSec = running ? Math.max(0, Math.floor((Date.now() - turnStartRef.current) / 1000)) : 0;
-  const statusWord = activeTool
-    ? `Running ${activeTool.name}`
-    : streamText
-      ? "Responding"
-      : "Thinking";
+  const statusWord = compacting
+    ? "Compacting"
+    : activeTool
+      ? `Running ${activeTool.name}`
+      : streamText
+        ? "Responding"
+        : "Thinking";
   const meter = `${elapsedSec}s · ↑${fmtTokens(liveUsage.current.input)} ↓${fmtTokens(liveUsage.current.output)}`;
 
   const transcriptMode = screen === "transcript";
@@ -884,6 +929,12 @@ export function App(props: AppProps) {
         <Text color={MODE_META[permissionMode].color}>
           {MODE_META[permissionMode].symbol} {MODE_META[permissionMode].title} on{" "}
           <Text dimColor>(shift+tab 循环)</Text>
+        </Text>
+      )}
+      {/* 事前警告（规格 07 §1.2）：接近压缩触发点时给出倒计时式提示 */}
+      {!transcriptMode && status.contextPercent >= 80 && (
+        <Text color={status.contextPercent >= 95 ? T.danger : T.warn}>
+          ⚠ 上下文已用 {status.contextPercent}%，满 100% 自动压缩 · /compact 可手动压缩
         </Text>
       )}
       {statusLineText && (

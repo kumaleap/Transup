@@ -9,6 +9,7 @@
  * 4. 斜杠命令 /help /cost
  */
 import React from "react";
+import { z } from "zod";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -1654,6 +1655,7 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
     expect(lastFrame()).toContain("old-session");
+    expect(lastFrame()).toContain("旧会话的问题"); // 首条 prompt 做标题（lite read）
 
     // Esc 关闭；面板期间按键不漏进输入框
     stdin.write("\x1b");
@@ -1724,6 +1726,125 @@ describe("TUI", () => {
     unmount();
     expect(summary).toContain("会话时长（wall）");
     expect(summary).toContain("输入 tokens");
+    unmount();
+  });
+
+  it("压缩三段式：事前警告行 → 压缩 → ✻ 摘要卡，Ctrl+O 展开摘要正文", async () => {
+    const provider = new MockProvider([
+      // 第 1 轮：长回复把上下文撑到警告区（不到 100%）
+      { content: "先干活。" + "x".repeat(2000) },
+      // 第 2 轮提交后超预算 → 该次调用被 compact 拿去生成摘要
+      { content: "摘要：之前在处理任务 A，已完成第一步，接下来做第二步。" },
+      // 压缩后的正常回复
+      { content: "继续任务。" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={3000}
+      />,
+    );
+    await flush();
+    stdin.write("第一轮");
+    stdin.write("\r");
+    // 事前警告：一轮结束、水位刷新后出现（等它而不是等回复文本 —— setStatus 在收尾时才跑）
+    await vi.waitFor(
+      () =>
+        expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(
+          /上下文已用 \d+%，满 100% 自动压缩/,
+        ),
+      { timeout: 3000 },
+    );
+
+    // 第二轮输入足够长，确定性越过 3000 阈值触发压缩
+    stdin.write("第二轮" + "y".repeat(500));
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("对话已压缩"), { timeout: 3000 });
+    expect(lastFrame()).toContain("✻");
+    expect(lastFrame()).toContain("Ctrl+O 查看完整摘要");
+    expect(lastFrame()).not.toContain("已完成第一步"); // 主屏不摊开摘要正文
+    await vi.waitFor(() => expect(lastFrame()).toContain("继续任务"), { timeout: 3000 });
+
+    stdin.write("\x0f"); // Ctrl+O → 全文屏
+    await flush();
+    expect(lastFrame()).toContain("对话已在此处压缩");
+    expect(lastFrame()).toContain("已完成第一步"); // 摘要正文在全文屏
+    stdin.write("\x1b");
+    await flush();
+    unmount();
+  });
+
+  it("恢复中断会话：启动即提示可带进度续跑", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[
+          { role: "user", content: "没跑完的任务" },
+          { role: "assistant", content: "(已被用户中断)" },
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    expect(lastFrame()).toContain("上次任务在执行中途被打断");
+    unmount();
+  });
+
+  it("子任务实时进度：只读工具的 onProgress 显示在运行尾巴里", async () => {
+    // 自定义只读工具：分两段吐进度，中间停顿让 UI 有机会渲染
+    const probe = {
+      name: "probe",
+      description: "test probe",
+      schema: z.object({}),
+      readOnly: true,
+      async execute(_args: object, onProgress?: (chunk: string) => void) {
+        onProgress?.("→ read_file src/a.ts\n");
+        await new Promise((r) => setTimeout(r, 400));
+        onProgress?.("→ grep TODO\n");
+        await new Promise((r) => setTimeout(r, 200));
+        return "探索完成";
+      },
+    };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [{ id: "t1", name: "probe", args: "{}" }] },
+      { content: "结论出来了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[...builtinTools, probe]}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("探索一下");
+    stdin.write("\r");
+    // 运行中就能看到进度行（不是等到结束才一次性出现）
+    await vi.waitFor(() => expect(lastFrame()).toContain("→ read_file src/a.ts"), {
+      timeout: 3000,
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain("结论出来了"), { timeout: 3000 });
     unmount();
   });
 
