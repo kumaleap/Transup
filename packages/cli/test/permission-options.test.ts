@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { evaluatePermission, normalizeRules } from "@transup/core";
 import { buildPermissionView } from "../src/tui/permission/options.js";
 import type { AskVerdict, ToolUseConfirm } from "../src/tui/permission/types.js";
 
@@ -61,6 +62,81 @@ describe("buildPermissionView", () => {
     expect(scoped.input!.buildUpdates("npm run build")).toEqual([
       { type: "addRule", list: "allow", rule: "bash(npm run build)", destination: "localSettings" },
     ]);
+  });
+
+  it("bash：带引号的简单命令持久化后，下一次完全相同的调用会放行", () => {
+    const command = 'npm run "build"';
+    const view = buildPermissionView(confirmOf("bash", { command }));
+    const scoped = view.options.find((option) => option.value === "yes-prefix");
+    expect(scoped?.input?.value).toBe("npm run");
+
+    const updates = scoped!.input!.buildUpdates(scoped!.input!.value);
+    expect(updates).toEqual([
+      { type: "addRule", list: "allow", rule: "bash(npm run:*)", destination: "localSettings" },
+    ]);
+    const update = updates[0];
+    expect(update.type).toBe("addRule");
+    if (update.type !== "addRule") return;
+
+    const verdict = evaluatePermission(
+      { mode: "default", rules: normalizeRules({ allow: [update.rule] }) },
+      { toolName: "bash", args: { command }, readOnly: false },
+    );
+    expect(verdict.behavior).toBe("allow");
+    expect(verdict.reason).toEqual({ type: "rule", rule: update.rule, list: "allow" });
+  });
+
+  it("bash：含 shell 语法的命令仅生成整条精确规则，且该规则可复用", () => {
+    const command = "echo ok && printf done";
+    const view = buildPermissionView(confirmOf("bash", { command }));
+    const scoped = view.options.find((option) => option.value === "yes-prefix");
+    expect(scoped?.input?.value).toBe(command);
+
+    const updates = scoped!.input!.buildUpdates(scoped!.input!.value);
+    expect(updates).toEqual([
+      { type: "addRule", list: "allow", rule: `bash(${command})`, destination: "localSettings" },
+    ]);
+    const update = updates[0];
+    if (update.type !== "addRule") throw new Error("expected addRule update");
+    expect(
+      evaluatePermission(
+        { mode: "default", rules: normalizeRules({ allow: [update.rule] }) },
+        { toolName: "bash", args: { command }, readOnly: false },
+      ).behavior,
+    ).toBe("allow");
+  });
+
+  it("bash：多行命令生成的整条精确规则也可复用", () => {
+    const command = "echo ok\nprintf done";
+    const view = buildPermissionView(confirmOf("bash", { command }));
+    const scoped = view.options.find((option) => option.value === "yes-prefix");
+    expect(scoped?.input?.value).toBe(command);
+
+    const updates = scoped!.input!.buildUpdates(scoped!.input!.value);
+    expect(updates).toEqual([
+      { type: "addRule", list: "allow", rule: `bash(${command})`, destination: "localSettings" },
+    ]);
+    const update = updates[0];
+    if (update.type !== "addRule") throw new Error("expected addRule update");
+    expect(
+      evaluatePermission(
+        { mode: "default", rules: normalizeRules({ allow: [update.rule] }) },
+        { toolName: "bash", args: { command }, readOnly: false },
+      ).behavior,
+    ).toBe("allow");
+  });
+
+  it("bash：解释器安全询问不提供无法生效的持久化选项", () => {
+    const command = "node -e 'console.log(1)'";
+    const verdict = evaluatePermission(
+      { mode: "bypassPermissions", rules: normalizeRules({ allow: [`bash(${command})`] }) },
+      { toolName: "bash", args: { command }, readOnly: false },
+    );
+    expect(verdict.behavior).toBe("ask");
+    if (verdict.behavior !== "ask") return;
+
+    const view = buildPermissionView(confirmOf("bash", { command }, verdict));
+    expect(view.options.map((option) => option.value)).toEqual(["yes", "no"]);
   });
 
   it("safety 询问：裁掉持久化选项，只留 是/否 + 警告", () => {

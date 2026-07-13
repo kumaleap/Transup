@@ -1,4 +1,7 @@
 /** 权限判定：规则匹配、优先级链、模式循环、bash 前缀启发 */
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   bashPrefixRule,
@@ -34,7 +37,7 @@ describe("ruleMatches", () => {
     expect(ruleMatches("bash(npm run:*)", "bash", { command: "npm install" })).toBe(false);
   });
 
-  it("Bash 前缀规则不跨命令边界，复合命令的每一段都必须被授权", () => {
+  it("Bash 前缀规则只授权单个简单命令，复合命令需要整条精确规则", () => {
     expect(ruleMatches("bash(npm run:*)", "bash", { command: "npm runner" })).toBe(false);
     expect(
       ruleMatches("bash(npm run:*)", "bash", { command: "npm run build && rm -rf dist" }),
@@ -55,6 +58,14 @@ describe("ruleMatches", () => {
       evaluatePermission(
         ctx({
           rules: rules({ allow: ["bash(npm run:*)", "bash(echo:*)"] }),
+        }),
+        compound,
+      ).behavior,
+    ).toBe("ask");
+    expect(
+      evaluatePermission(
+        ctx({
+          rules: rules({ allow: ["bash(npm run build && echo done)"] }),
         }),
         compound,
       ).behavior,
@@ -82,6 +93,47 @@ describe("ruleMatches", () => {
     }
   });
 
+  it("Bash deny/ask 前缀识别否定、包装器、赋值、绝对路径和条件分支中的命令", () => {
+    const concealedCommands = [
+      "! rm -rf dist",
+      "time rm -rf dist",
+      "time ! rm -rf dist",
+      "FOO=x rm -rf dist",
+      "FOO+=x rm -rf dist",
+      "FOO[0]=x rm -rf dist",
+      "/bin/rm -rf dist",
+      "if test -d dist; then rm -rf dist; fi",
+      "env FOO=x rm -rf dist",
+      "command rm -rf dist",
+      "exec rm -rf dist",
+      "sudo rm -rf dist",
+      "nohup rm -rf dist",
+      "nice rm -rf dist",
+      "nice -n5 rm -rf dist",
+      "time -f elapsed:%E rm -rf dist",
+      "arch -arm64 rm -rf dist",
+      "printf dist | xargs rm -rf",
+    ];
+
+    for (const list of ["deny", "ask"] as const) {
+      for (const command of concealedCommands) {
+        const verdict = evaluatePermission(
+          ctx({
+            mode: "bypassPermissions",
+            rules: rules({ [list]: ["bash(rm:*)"] }),
+          }),
+          { toolName: "bash", args: { command }, readOnly: false },
+        );
+        expect(verdict.behavior, `${list}: ${command}`).toBe(list);
+        expect(verdict.reason.type, `${list}: ${command}`).toBe("rule");
+      }
+    }
+  });
+
+  it("引号内的普通参数仍可由 Bash 前缀规则授权", () => {
+    expect(ruleMatches("bash(npm run:*)", "bash", { command: 'npm run "build"' })).toBe(true);
+  });
+
   it("内容级：文件工具匹配路径", () => {
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src/a.ts" })).toBe(true);
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "test/a.ts" })).toBe(false);
@@ -91,7 +143,9 @@ describe("ruleMatches", () => {
 
   it("文件前缀规则按规范化目录边界匹配，拒绝遍历和相邻前缀", () => {
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "./src/a.ts" })).toBe(true);
-    expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src\\a.ts" })).toBe(true);
+    expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src\\a.ts" })).toBe(
+      sep === "\\",
+    );
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src/lib/../a.ts" })).toBe(true);
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src/../../outside.ts" })).toBe(false);
     expect(ruleMatches("edit_file(src/:*)", "edit_file", { path: "src/../src-private/a.ts" })).toBe(false);
@@ -111,6 +165,74 @@ describe("ruleMatches", () => {
         alternateSpelling,
       ).behavior,
     ).toBe("deny");
+  });
+
+  it("文件 allow 前缀不跟随逃出授权目录的符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-path-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      mkdirSync(source);
+      mkdirSync(outside);
+      writeFileSync(join(outside, "existing.txt"), "outside");
+      writeFileSync(join(root, "escaped.txt"), "outside via symlink parent");
+      symlinkSync(outside, join(source, "link"), "dir");
+      const rule = `edit_file(${source}${sep}:*)`;
+
+      for (const path of [
+        join(source, "link", "existing.txt"),
+        join(source, "link", "new", "file.txt"),
+        `${source}${sep}link${sep}..${sep}escaped.txt`,
+        `${source}${sep}link${sep}..${sep}future.txt`,
+      ]) {
+        expect(ruleMatches(rule, "edit_file", { path }), path).toBe(false);
+        expect(
+          evaluatePermission(
+            ctx({ rules: rules({ allow: [rule] }) }),
+            { toolName: "edit_file", args: { path }, readOnly: false },
+          ).behavior,
+          path,
+        ).toBe("ask");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("文件 deny/ask 前缀同时按词法路径与真实路径保守匹配符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-path-"));
+    try {
+      const source = join(root, "src");
+      const outside = join(root, "outside");
+      mkdirSync(source);
+      mkdirSync(outside);
+      writeFileSync(join(outside, "existing.txt"), "outside");
+      symlinkSync(outside, join(source, "link"), "dir");
+      const lexicalRule = `edit_file(${source}${sep}:*)`;
+      const canonicalRule = `edit_file(${outside}${sep}:*)`;
+
+      for (const path of [
+        join(source, "link", "existing.txt"),
+        join(source, "link", "new", "file.txt"),
+      ]) {
+        for (const [list, expected] of [
+          ["deny", "deny"],
+          ["ask", "ask"],
+        ] as const) {
+          for (const rule of [lexicalRule, canonicalRule]) {
+            expect(
+              evaluatePermission(
+                ctx({ mode: "bypassPermissions", rules: rules({ [list]: [rule] }) }),
+                { toolName: "edit_file", args: { path }, readOnly: false },
+              ).behavior,
+              `${list}: ${rule} -> ${path}`,
+            ).toBe(expected);
+          }
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -143,6 +265,9 @@ describe("evaluatePermission 优先级", () => {
       { toolName: "write_file", args: { path: "/Users/x/.zshrc" }, readOnly: false },
       bash("echo hacked >> ~/.bashrc"),
       bash("rm -rf .git"),
+      bash("rm -rf .GIT"),
+      edit(".GIT/config"),
+      { toolName: "write_file", args: { path: "/Users/x/.ZSHRC" }, readOnly: false },
     ]) {
       const v = evaluatePermission(ctx({ mode: "bypassPermissions" }), q);
       expect(v.behavior).toBe("ask");
@@ -184,6 +309,93 @@ describe("evaluatePermission 优先级", () => {
       expect(verdict.behavior, command).toBe("ask");
       expect(verdict.behavior === "ask" && verdict.reason.type, command).toBe("safety");
     }
+  });
+
+  it("safetyCheck：解释器代码参数、裸 shell 和管道 shell 在 bypass 下保守询问", () => {
+    for (const command of [
+      "node -e 'console.log(1)'",
+      "node --eval='console.log(1)'",
+      "node -p '1 + 1'",
+      "python3 -c 'print(1)'",
+      "python3 -Bc 'print(1)'",
+      "python3 -Iqc 'print(1)'",
+      "perl -e 'print 1'",
+      "ruby -e 'puts 1'",
+      "bash",
+      "/bin/sh",
+      "zsh script.zsh",
+      "printf 'echo ok' | sh",
+    ]) {
+      const verdict = evaluatePermission(
+        ctx({
+          mode: "bypassPermissions",
+          rules: rules({ allow: [`bash(${command})`] }),
+        }),
+        bash(command),
+      );
+      expect(verdict.behavior, command).toBe("ask");
+      expect(verdict.behavior === "ask" && verdict.reason.type, command).toBe("safety");
+    }
+  });
+
+  it("safetyCheck：代码字符串内的敏感 basename 使用语法边界而不是路径分词", () => {
+    for (const [command, sensitiveName] of [
+      [`python3 -c 'open("/tmp/.zshrc","w").write("x")'`, ".zshrc"],
+      [`node -e 'require("fs").writeFileSync("/tmp/.bashrc","x")'`, ".bashrc"],
+      [`perl -e 'open(F,">/tmp/.profile");print F "x"'`, ".profile"],
+      [`ruby -e 'File.write("/tmp/.zprofile","x")'`, ".zprofile"],
+    ]) {
+      const verdict = evaluatePermission(ctx({ mode: "bypassPermissions" }), bash(command));
+      expect(verdict.behavior, command).toBe("ask");
+      expect(verdict.behavior === "ask" && verdict.reason.type, command).toBe("safety");
+      expect(
+        verdict.behavior === "ask" && verdict.reason.type === "safety"
+          ? verdict.reason.path
+          : undefined,
+        command,
+      ).toBe(sensitiveName);
+    }
+
+    const nonsensitiveSuffix = evaluatePermission(
+      ctx({ mode: "bypassPermissions" }),
+      bash("echo x > /tmp/.zshrc.bak"),
+    );
+    expect(nonsensitiveSuffix.behavior).toBe("ask");
+    expect(nonsensitiveSuffix.reason.type).toBe("default");
+  });
+
+  it("safetyCheck：文件工具按真实路径识别指向敏感目录的符号链接", () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-permission-sensitive-"));
+    try {
+      const source = join(root, "src");
+      const gitDir = join(root, ".git");
+      mkdirSync(source);
+      mkdirSync(gitDir);
+      writeFileSync(join(gitDir, "config"), "[core]");
+      symlinkSync(gitDir, join(source, "link"), "dir");
+
+      const verdict = evaluatePermission(
+        ctx({ mode: "bypassPermissions" }),
+        edit(join(source, "link", "config")),
+      );
+      expect(verdict.behavior).toBe("ask");
+      expect(verdict.behavior === "ask" && verdict.reason.type).toBe("safety");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("无法证明为单一简单命令的 Bash 调用在 bypass 下仍需确认，精确规则除外", () => {
+    const command = "echo ok && printf done";
+    expect(evaluatePermission(ctx({ mode: "bypassPermissions" }), bash(command)).behavior).toBe(
+      "ask",
+    );
+    expect(
+      evaluatePermission(
+        ctx({ rules: rules({ allow: [`bash(${command})`] }) }),
+        bash(command),
+      ).behavior,
+    ).toBe("allow");
   });
 
   it("safetyCheck 只管写操作：只读读取 .git 正常放行", () => {
@@ -237,5 +449,10 @@ describe("bash 前缀启发", () => {
     expect(bashPrefixRule("echo a && rm -rf /")).toBe("bash(echo a && rm -rf /)");
     expect(bashPrefixRule("npm run build")).toBe("bash(npm run:*)");
     expect(bashPrefixRule("ls")).toBe("bash(ls)");
+  });
+
+  it("带普通引号的简单命令仍生成可复用前缀", () => {
+    expect(commandPrefix('npm run "build"')).toBe("npm run");
+    expect(bashPrefixRule('npm run "build"')).toBe("bash(npm run:*)");
   });
 });

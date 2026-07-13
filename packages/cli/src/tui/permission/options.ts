@@ -11,7 +11,7 @@
  */
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import { commandPrefix } from "@transup/core";
+import { bashPrefixRule, commandPrefix } from "@transup/core";
 import { color } from "../../ui.js";
 import { renderEditPreview, renderWritePreview } from "../../diff.js";
 import type { PermissionOption, PermissionViewModel, ToolUseConfirm } from "./types.js";
@@ -91,9 +91,7 @@ export function buildPermissionView(confirm: ToolUseConfirm): PermissionViewMode
       input: {
         value: prefix,
         buildUpdates: (value) => {
-          const v = value.trim();
-          // 编辑后的值等于整条命令 → 精确规则；否则按前缀放行
-          const rule = v === command.trim() ? `bash(${v})` : `bash(${v}:*)`;
+          const rule = bashPrefixRule(command, value);
           return [{ type: "addRule", list: "allow", rule, destination: "localSettings" }];
         },
       },

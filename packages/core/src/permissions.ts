@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 /**
  * 权限判定 —— 一次工具调用能不能跑，由谁说了算
@@ -79,50 +80,359 @@ function contentOf(toolName: string, args: Record<string, unknown>): string | un
   return typeof args.path === "string" ? args.path : undefined;
 }
 
+function parseContentRule(rule: string): { tool: string; pattern: string } | undefined {
+  const match = /^([^()]+)\(([\s\S]*)\)$/.exec(rule);
+  return match === null ? undefined : { tool: match[1], pattern: match[2] };
+}
+
+type BashToken = { kind: "word" | "operator"; value: string };
+
+interface BashAnalysis {
+  tokens: BashToken[];
+  simpleWords: string[] | null;
+  commandCandidates: string[][];
+}
+
+const CONTROL_OPERATORS = new Set(["&&", "||", ";", "|", "&", "\n", "(", ")"]);
+const SHELL_RESERVED_WORDS = new Set([
+  "if",
+  "then",
+  "elif",
+  "else",
+  "fi",
+  "for",
+  "while",
+  "until",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "select",
+  "function",
+  "coproc",
+]);
+const COMMAND_WRAPPERS = new Set([
+  "time",
+  "env",
+  "command",
+  "builtin",
+  "exec",
+  "sudo",
+  "nohup",
+  "nice",
+  "xargs",
+  "arch",
+]);
+
+function shellCommandName(word: string): string {
+  const slash = word.lastIndexOf("/");
+  return slash === -1 ? word : word.slice(slash + 1);
+}
+
+function isShellAssignment(word: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?\+?=/.test(word);
+}
+
+function commandStartIndex(words: string[], from: number): number {
+  let index = from;
+  while (
+    index < words.length &&
+    (words[index] === "!" ||
+      SHELL_RESERVED_WORDS.has(words[index]) ||
+      isShellAssignment(words[index]))
+  ) {
+    index += 1;
+  }
+  return index;
+}
+
+function tokenizeBash(command: string): { tokens: BashToken[]; unsafe: boolean } {
+  const tokens: BashToken[] = [];
+  let word = "";
+  let wordStarted = false;
+  let unsafe = false;
+
+  const pushWord = () => {
+    if (!wordStarted) return;
+    tokens.push({ kind: "word", value: word });
+    word = "";
+    wordStarted = false;
+  };
+
+  for (let i = 0; i < command.length; i += 1) {
+    const char = command[i];
+
+    if (char === " " || char === "\t" || char === "\r") {
+      pushWord();
+      continue;
+    }
+    if (char === "\n") {
+      pushWord();
+      tokens.push({ kind: "operator", value: "\n" });
+      unsafe = true;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      wordStarted = true;
+      const quote = char;
+      let closed = false;
+      for (i += 1; i < command.length; i += 1) {
+        const quoted = command[i];
+        if (quoted === quote) {
+          closed = true;
+          break;
+        }
+        if (quote === '"' && (quoted === "$" || quoted === "`" || quoted === "\\")) {
+          unsafe = true;
+        }
+        word += quoted;
+      }
+      if (!closed) unsafe = true;
+      continue;
+    }
+    if (char === "\\") {
+      wordStarted = true;
+      unsafe = true;
+      if (i + 1 < command.length) word += command[(i += 1)];
+      continue;
+    }
+    if (";&|<>()".includes(char)) {
+      pushWord();
+      const pair = command.slice(i, i + 2);
+      const operator =
+        pair === "&&" || pair === "||" || pair === ">>" || pair === "<<" ? pair : char;
+      if (operator.length === 2) i += 1;
+      tokens.push({ kind: "operator", value: operator });
+      unsafe = true;
+      continue;
+    }
+    if (char === "#" && !wordStarted) {
+      unsafe = true;
+      while (i + 1 < command.length && command[i + 1] !== "\n") i += 1;
+      continue;
+    }
+    if (
+      char === "$" ||
+      char === "`" ||
+      char === "*" ||
+      char === "?" ||
+      char === "[" ||
+      char === "{"
+    ) {
+      unsafe = true;
+    }
+    wordStarted = true;
+    word += char;
+  }
+  pushWord();
+  return { tokens, unsafe };
+}
+
+function optionValueIndex(words: string[], index: number, optionsWithValue: Set<string>): number {
+  const option = words[index];
+  if (!option.startsWith("-") || option === "-") return index;
+  if (option === "--") return index + 1;
+  if (optionsWithValue.has(option)) return index + 2;
+  return index + 1;
+}
+
+function wrappedCommandIndex(words: string[], index: number, wrapper: string): number | null {
+  let next = index + 1;
+  if (wrapper === "env") {
+    while (next < words.length && words[next].startsWith("-")) {
+      next = optionValueIndex(words, next, new Set(["-u", "--unset", "-C", "--chdir"]));
+    }
+    while (next < words.length && isShellAssignment(words[next])) next += 1;
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "command") {
+    if (words.slice(next).some((word) => word === "-v" || word === "-V")) return null;
+    while (next < words.length && words[next].startsWith("-")) next += 1;
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "sudo") {
+    const optionsWithValue = new Set([
+      "-C",
+      "--close-from",
+      "-D",
+      "--chdir",
+      "-g",
+      "--group",
+      "-h",
+      "--host",
+      "-p",
+      "--prompt",
+      "-R",
+      "--chroot",
+      "-r",
+      "--role",
+      "-t",
+      "--type",
+      "-T",
+      "--command-timeout",
+      "-u",
+      "--user",
+    ]);
+    while (next < words.length && words[next].startsWith("-")) {
+      next = optionValueIndex(words, next, optionsWithValue);
+    }
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "nice") {
+    if (words[next] === "-n" || words[next] === "--adjustment") next += 2;
+    else if (words[next]?.startsWith("--adjustment=") || /^-(?:n)?\d+$/.test(words[next] ?? "")) {
+      next += 1;
+    }
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "time") {
+    const optionsWithValue = new Set(["-f", "--format", "-o", "--output"]);
+    while (next < words.length && words[next].startsWith("-")) {
+      next = optionValueIndex(words, next, optionsWithValue);
+    }
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "xargs") {
+    const optionsWithValue = new Set([
+      "-a",
+      "--arg-file",
+      "-d",
+      "--delimiter",
+      "-E",
+      "--eof",
+      "-I",
+      "--replace",
+      "-L",
+      "--max-lines",
+      "-n",
+      "--max-args",
+      "-P",
+      "--max-procs",
+      "-s",
+      "--max-chars",
+    ]);
+    while (next < words.length && words[next].startsWith("-")) {
+      next = optionValueIndex(words, next, optionsWithValue);
+    }
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "arch") {
+    const optionsWithValue = new Set(["-arch", "--arch", "-d", "-e"]);
+    while (next < words.length && words[next].startsWith("-")) {
+      next = optionValueIndex(words, next, optionsWithValue);
+    }
+    return next < words.length ? next : null;
+  }
+  if (wrapper === "exec" && words[next] === "-a") next += 2;
+  while (next < words.length && words[next].startsWith("-")) next += 1;
+  return next < words.length ? next : null;
+}
+
+function commandCandidates(tokens: BashToken[]): string[][] {
+  const segments: string[][] = [];
+  let segment: string[] = [];
+  for (const token of tokens) {
+    if (token.kind === "operator" && CONTROL_OPERATORS.has(token.value)) {
+      if (segment.length > 0) segments.push(segment);
+      segment = [];
+    } else if (token.kind === "word") {
+      segment.push(token.value);
+    }
+  }
+  if (segment.length > 0) segments.push(segment);
+
+  const candidates: string[][] = [];
+  for (const words of segments) {
+    let index = commandStartIndex(words, 0);
+    const seen = new Set<number>();
+    while (index < words.length && !seen.has(index)) {
+      seen.add(index);
+      const normalized = [...words.slice(index)];
+      normalized[0] = shellCommandName(normalized[0]);
+      candidates.push(normalized);
+      const wrapper = normalized[0];
+      if (!COMMAND_WRAPPERS.has(wrapper)) break;
+      const nested = wrappedCommandIndex(words, index, wrapper);
+      if (nested === null || nested <= index) break;
+      index = commandStartIndex(words, nested);
+    }
+  }
+  return candidates;
+}
+
 /**
- * Prefix rules may authorize simple shell commands, but never shell syntax whose
- * command boundaries require a real parser. Exact rules can still authorize an
- * explicitly reviewed compound command.
+ * Ordinary quoted words are safe to compare. Anything that changes command
+ * boundaries or executable selection remains analyzable for deny/ask, but is
+ * never eligible for prefix authorization.
  */
-function splitSimpleBashCommands(command: string): string[] | null {
-  const trimmed = command.trim();
-  if (!trimmed || /["'`$\\<>(){}\[\]]/.test(trimmed)) return null;
-  const commands = trimmed.split(/\s*(?:&&|\|\||[;|&\n\r])\s*/);
-  return commands.every(Boolean) ? commands : null;
+function analyzeBash(command: string): BashAnalysis {
+  const { tokens, unsafe } = tokenizeBash(command);
+  const words = tokens.filter((token) => token.kind === "word").map((token) => token.value);
+  const first = words[0];
+  const simpleWords =
+    !unsafe &&
+    tokens.length > 0 &&
+    tokens.every((token) => token.kind === "word") &&
+    first !== undefined &&
+    first !== "!" &&
+    !isShellAssignment(first) &&
+    !SHELL_RESERVED_WORDS.has(first) &&
+    !COMMAND_WRAPPERS.has(shellCommandName(first)) &&
+    !first.includes("/")
+      ? words
+      : null;
+  return { tokens, simpleWords, commandCandidates: commandCandidates(tokens) };
+}
+
+function wordsStartWith(words: string[], prefix: string[]): boolean {
+  return (
+    prefix.length > 0 &&
+    prefix.length <= words.length &&
+    prefix.every((word, i) => words[i] === word)
+  );
 }
 
 function bashPrefixMatches(prefix: string, command: string): boolean {
-  const commands = splitSimpleBashCommands(command);
-  if (!prefix || !commands || commands.length !== 1) return false;
-  const simple = commands[0];
-  return simple === prefix || (simple.startsWith(prefix) && /\s/.test(simple[prefix.length]));
+  const prefixWords = analyzeBash(prefix).simpleWords;
+  const commandWords = analyzeBash(command).simpleWords;
+  return prefixWords !== null && commandWords !== null && wordsStartWith(commandWords, prefixWords);
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Deny/ask may conservatively match a prefix at any apparent command boundary. */
+/** Deny/ask inspect visible executable positions even when allow cannot prove simplicity. */
 function bashPrefixMayMatch(rule: string, command: string): boolean {
-  const match = /^bash\((.*):\*\)$/.exec(rule);
-  const prefix = match?.[1];
-  if (!prefix) return false;
-  const dequoted = command.replace(/["']/g, "");
-  return new RegExp(
-    `(?:^|[;&|()\\n\\r])\\s*${escapeRegExp(prefix)}(?=\\s|$)`,
-  ).test(dequoted);
-}
-
-function normalizeRulePath(value: string): string {
-  return value.replace(/[\\/]+/g, sep);
-}
-
-function pathPrefixMatches(prefix: string, content: string): boolean {
-  if (!prefix || !content) return false;
-  const fromBase = relative(
-    resolve(normalizeRulePath(prefix)),
-    resolve(normalizeRulePath(content)),
+  const parsed = parseContentRule(rule);
+  const prefix =
+    parsed?.tool === "bash" && parsed.pattern.endsWith(":*")
+      ? parsed.pattern.slice(0, -2)
+      : undefined;
+  const prefixWords = prefix === undefined ? null : analyzeBash(prefix).simpleWords;
+  if (prefixWords === null) return false;
+  return analyzeBash(command).commandCandidates.some((candidate) =>
+    wordsStartWith(candidate, prefixWords),
   );
+}
+
+function canonicalPath(value: string): string | undefined {
+  // Keep `..` segments intact until realpath resolves any preceding symlink.
+  // Lexically normalizing first can point at a different file than the tool opens.
+  let current = value;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return resolve(realpathSync.native(current), ...missing);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      missing.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function pathIsDescendant(prefix: string, content: string): boolean {
+  const fromBase = relative(prefix, content);
   return (
     fromBase !== "" &&
     fromBase !== ".." &&
@@ -131,20 +441,33 @@ function pathPrefixMatches(prefix: string, content: string): boolean {
   );
 }
 
-/** 单条规则是否命中（工具级 or 内容级） */
-export function ruleMatches(
+function pathPrefixMatches(prefix: string, content: string, conservative: boolean): boolean {
+  if (!prefix || !content) return false;
+  const lexicalPrefix = resolve(prefix);
+  const lexicalContent = resolve(content);
+  const realPrefix = canonicalPath(prefix);
+  const realContent = canonicalPath(content);
+  const canonicalMatch =
+    realPrefix !== undefined &&
+    realContent !== undefined &&
+    pathIsDescendant(realPrefix, realContent);
+  return canonicalMatch || (conservative && pathIsDescendant(lexicalPrefix, lexicalContent));
+}
+
+function ruleMatchesWithPolicy(
   rule: string,
   toolName: string,
   args?: Record<string, unknown>,
+  conservativePaths = false,
 ): boolean {
-  const m = /^([^()]+)\((.*)\)$/.exec(rule);
-  if (!m) {
+  const parsed = parseContentRule(rule);
+  if (!parsed) {
     // 工具级：精确 或 前缀通配
     if (rule === toolName) return true;
     return rule.endsWith("*") && toolName.startsWith(rule.slice(0, -1));
   }
   // 内容级：工具名必须精确，内容精确或 "前缀:*"
-  const [, tool, pattern] = m;
+  const { tool, pattern } = parsed;
   if (tool !== toolName || !args) return false;
   const content = contentOf(toolName, args);
   if (content === undefined) return false;
@@ -152,8 +475,21 @@ export function ruleMatches(
     if (pattern.endsWith(":*")) return bashPrefixMatches(pattern.slice(0, -2), content);
     return content === pattern;
   }
-  if (pattern.endsWith(":*")) return pathPrefixMatches(pattern.slice(0, -2), content);
-  return resolve(normalizeRulePath(content)) === resolve(normalizeRulePath(pattern));
+  if (pattern.endsWith(":*")) {
+    return pathPrefixMatches(pattern.slice(0, -2), content, conservativePaths);
+  }
+  const realContent = canonicalPath(content);
+  const realPattern = canonicalPath(pattern);
+  return realContent !== undefined && realPattern !== undefined && realContent === realPattern;
+}
+
+/** 单条规则是否命中（工具级 or 内容级）；文件 scope 使用授权所需的真实路径语义。 */
+export function ruleMatches(
+  rule: string,
+  toolName: string,
+  args?: Record<string, unknown>,
+): boolean {
+  return ruleMatchesWithPolicy(rule, toolName, args);
 }
 
 function findMatch(
@@ -162,31 +498,29 @@ function findMatch(
   args: Record<string, unknown>,
   list: keyof PermissionRules,
 ): string | undefined {
-  const direct = rules.find((r) => ruleMatches(r, toolName, args));
+  const direct = rules.find((rule) =>
+    ruleMatchesWithPolicy(rule, toolName, args, list !== "allow"),
+  );
   if (direct || toolName !== "bash" || typeof args.command !== "string") return direct;
   const command = args.command;
 
   if (list !== "allow") {
-    const conservative = rules.find((rule) => bashPrefixMayMatch(rule, command));
-    if (conservative) return conservative;
+    return rules.find((rule) => bashPrefixMayMatch(rule, command));
   }
+  return undefined;
+}
 
-  const commands = splitSimpleBashCommands(command);
-  if (!commands || commands.length < 2) return undefined;
-  if (list === "allow") {
-    const coveringRules = commands.map((command) =>
-      rules.find((rule) => ruleMatches(rule, toolName, { command })),
+function hasExactBashContentRule(rules: string[], command: string): boolean {
+  return rules.some((rule) => {
+    const parsed = parseContentRule(rule);
+    return (
+      parsed?.tool === "bash" && !parsed.pattern.endsWith(":*") && parsed.pattern === command
     );
-    return coveringRules.every((rule) => rule !== undefined) ? coveringRules[0] : undefined;
-  }
-  return rules.find((rule) =>
-    commands.some((command) => ruleMatches(rule, toolName, { command })),
-  );
+  });
 }
 
 // ── safetyCheck：敏感路径 ─────────────────────────────────
 
-const SENSITIVE_SEGMENTS = [".git/", ".transup/"];
 const SENSITIVE_BASENAMES = [
   ".git",
   ".transup",
@@ -197,37 +531,108 @@ const SENSITIVE_BASENAMES = [
   ".profile",
   ".bash_profile",
 ];
+const SENSITIVE_DIRECTORY_NAMES = new Set([".git", ".transup"]);
+const SHELL_INTERPRETERS = new Set([
+  "sh",
+  "bash",
+  "zsh",
+  "dash",
+  "ksh",
+  "mksh",
+  "fish",
+  "csh",
+  "tcsh",
+]);
+const INDIRECT_WRAPPERS = new Set([
+  "eval",
+  "source",
+  ".",
+  "command",
+  "builtin",
+  "env",
+  "sudo",
+  "nohup",
+  "xargs",
+  "exec",
+]);
 
-function isSensitivePath(p: string): boolean {
-  const norm = p.replace(/\\/g, "/");
-  if (SENSITIVE_SEGMENTS.some((s) => norm.includes(s))) return true;
-  const base = norm.split("/").filter(Boolean).pop() ?? "";
-  return SENSITIVE_BASENAMES.includes(base);
+function sensitivePathName(path: string): string | undefined {
+  const resolved = resolve(path);
+  const segments = resolved.split(sep).filter(Boolean).map((segment) => segment.toLowerCase());
+  const sensitiveDirectory = segments.find((segment) => SENSITIVE_DIRECTORY_NAMES.has(segment));
+  if (sensitiveDirectory) return sensitiveDirectory;
+  const base = basename(resolved).toLowerCase();
+  return SENSITIVE_BASENAMES.includes(base) ? base : undefined;
+}
+
+function sensitiveLiteralName(source: string): string | undefined {
+  const dequoted = source.replace(/["']/g, "").toLowerCase();
+  const isNameCharacter = (char: string | undefined) =>
+    char !== undefined && /[A-Za-z0-9_.-]/.test(char);
+
+  for (const name of SENSITIVE_BASENAMES) {
+    let from = 0;
+    for (;;) {
+      const index = dequoted.indexOf(name, from);
+      if (index === -1) break;
+      const before = index === 0 ? undefined : dequoted[index - 1];
+      const after = dequoted[index + name.length];
+      if (!isNameCharacter(before) && !isNameCharacter(after)) return name;
+      from = index + name.length;
+    }
+  }
+  return undefined;
+}
+
+function interpreterSafetyTarget(command: string): string | undefined {
+  const analysis = analyzeBash(command);
+  for (const candidate of analysis.commandCandidates) {
+    const [interpreter, ...args] = candidate;
+    if (SHELL_INTERPRETERS.has(interpreter)) return "shell interpreter";
+    if (/^(?:python|pypy)(?:\d+(?:\.\d+)*)?$/.test(interpreter)) {
+      if (args.some((arg) => /^-[^-]*c/.test(arg))) return "interpreter execution";
+    } else if (/^(?:node|nodejs)(?:\d+(?:\.\d+)*)?$/.test(interpreter)) {
+      if (
+        args.some(
+          (arg) =>
+            arg.startsWith("-e") ||
+            arg.startsWith("-p") ||
+            arg === "--eval" ||
+            arg.startsWith("--eval=") ||
+            arg === "--print" ||
+            arg.startsWith("--print="),
+        )
+      ) {
+        return "interpreter execution";
+      }
+    } else if (/^(?:perl|ruby)(?:\d+(?:\.\d+)*)?$/.test(interpreter)) {
+      if (args.some((arg) => /^-[^-]*[eEc]/.test(arg))) return "interpreter execution";
+    }
+  }
+  return undefined;
 }
 
 function sensitiveShellTarget(command: string): string | undefined {
-  // Quote concatenation (for example `.zsh""rc`) must not hide a literal
-  // sensitive basename. This is detection only; it does not execute or expand.
-  const dequoted = command.replace(/["']/g, "");
-  const candidates = dequoted.split(/[\s=<>|;&()]+/).filter(Boolean);
-  const sensitive = candidates.find(isSensitivePath);
-  if (sensitive) return sensitive;
+  const literal = sensitiveLiteralName(command);
+  if (literal) return literal;
 
+  const dequoted = command.replace(/["']/g, "");
   // `git config` can write repository, global, or system configuration. Without
   // fully parsing its flags, every invocation stays behind an explicit ask.
   if (/\bgit\b[^\n;&|]*\bconfig\b/.test(dequoted)) return "git config";
 
   // Expansion and indirect shell execution can construct a sensitive target
   // that is absent from the literal command. Fail closed rather than guessing.
-  if (
-    /[$`*?\\]|\[[^\]]*\]|\{[^}]*\}|(?:<|>)\(|<<<?/.test(command)
-  ) {
+  if (/[$`*?\\]|\[[^\]]*\]|\{[^}]*\}|(?:<|>)\(|<<<?/.test(command)) {
     return "shell expansion";
   }
-  if (
-    /(?:^|[;&|\n]\s*)(?:eval|source|\.|command|env|sudo|nohup|xargs|exec)\s+/.test(dequoted) ||
-    /\b(?:bash|sh|zsh|fish)\b[^;&|\n]*\s-[A-Za-z]*c[A-Za-z]*(?:\s|$)/.test(dequoted)
-  ) {
+  const interpreter = interpreterSafetyTarget(command);
+  if (interpreter) return interpreter;
+
+  const hasIndirectWrapper = analyzeBash(command).commandCandidates.some(([name]) =>
+    INDIRECT_WRAPPERS.has(name),
+  );
+  if (hasIndirectWrapper) {
     return "shell indirection";
   }
   return undefined;
@@ -235,13 +640,15 @@ function sensitiveShellTarget(command: string): string | undefined {
 
 /** 写操作是否触碰敏感路径；命中返回引发警报的那个片段 */
 function sensitiveTarget(toolName: string, args: Record<string, unknown>): string | undefined {
-  const candidates: string[] = [];
-  if (typeof args.path === "string") candidates.push(args.path);
   if (toolName === "bash" && typeof args.command === "string") {
     const shellTarget = sensitiveShellTarget(args.command);
     if (shellTarget) return shellTarget;
   }
-  return candidates.find(isSensitivePath);
+  if (typeof args.path !== "string") return undefined;
+  const lexical = sensitivePathName(args.path);
+  if (lexical) return lexical;
+  const real = canonicalPath(args.path);
+  return real === undefined ? undefined : sensitivePathName(real);
 }
 
 // ── 判定主函数 ────────────────────────────────────────────
@@ -282,6 +689,15 @@ export function evaluatePermission(
       message:
         "当前处于 plan 模式：先只读地调研并给出完整计划，待用户批准后才能执行写操作。",
     };
+  }
+
+  if (
+    toolName === "bash" &&
+    typeof args.command === "string" &&
+    analyzeBash(args.command).simpleWords === null &&
+    !hasExactBashContentRule(ctx.rules.allow, args.command)
+  ) {
+    return { behavior: "ask", reason: { type: "default" } };
   }
 
   if (ctx.mode === "bypassPermissions") {
@@ -331,16 +747,22 @@ export function nextPermissionMode(
  */
 export function commandPrefix(command: string): string {
   const trimmed = command.trim();
-  if (/[|;&<>`$]/.test(trimmed)) return trimmed;
-  const words = trimmed.split(/\s+/);
+  const words = analyzeBash(command).simpleWords;
+  if (words === null) return trimmed;
   if (words.length <= 1) return trimmed;
   const second = words[1];
-  if (second.startsWith("-") || second.includes("/")) return words[0];
-  return `${words[0]} ${second}`;
+  const prefixWords =
+    second.startsWith("-") || second.includes("/") ? [words[0]] : words.slice(0, 2);
+  if (!prefixWords.every((word) => /^[A-Za-z0-9_@%+=:,.-]+$/.test(word))) return trimmed;
+  const prefix = prefixWords.join(" ");
+  return bashPrefixMatches(prefix, command) ? prefix : trimmed;
 }
 
 /** 由前缀生成 bash 内容规则："npm run" → "bash(npm run:*)"；整条命令 → 精确规则 */
-export function bashPrefixRule(command: string): string {
-  const prefix = commandPrefix(command);
-  return prefix === command.trim() ? `bash(${prefix})` : `bash(${prefix}:*)`;
+export function bashPrefixRule(command: string, requestedPrefix = commandPrefix(command)): string {
+  const trimmed = command.trim();
+  const prefix = requestedPrefix.trim();
+  return prefix !== trimmed && bashPrefixMatches(prefix, command)
+    ? `bash(${prefix}:*)`
+    : `bash(${trimmed})`;
 }
