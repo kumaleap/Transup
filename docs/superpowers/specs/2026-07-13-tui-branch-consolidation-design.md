@@ -63,7 +63,9 @@ branch.
 
 ## Git Strategy
 
-Work occurs in `/Users/kuma/workspace/Transup-integration` on
+Work occurs in
+`/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation`
+on
 `integration/tui-branch-consolidation`, based on `origin/main` at or after
 `1b8c767`.
 

@@ -4,14 +4,14 @@
 
 **Goal:** Repair the main-branch PTY smoke, merge the two outstanding TUI feature branches with their original ancestry, preserve both branches' behavior at shared App event handlers, and merge the verified result into local `main`.
 
-**Architecture:** Work on `integration/tui-branch-consolidation` in the existing `/Users/kuma/workspace/Transup-integration` worktree. Commit the PTY repair first, merge `message-visual`, then merge `streaming-activity`; resolve its known `App.tsx` conflict through an App-level RED/GREEN regression that proves visual tool summaries and streaming interruption behavior coexist. Verify the combined branch under Node 26 before creating a final local-main merge commit and a clean deferred-capabilities worktree.
+**Architecture:** Work on `integration/tui-branch-consolidation` in the existing `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` worktree. Commit the PTY repair first, merge `message-visual`, then merge `streaming-activity`; resolve its known `App.tsx` conflict through an App-level RED/GREEN regression that proves visual tool summaries and streaming interruption behavior coexist. Verify the combined branch under Node 26 before creating a final local-main merge commit and a clean deferred-capabilities worktree.
 
 **Tech Stack:** Node.js 26.5.0, TypeScript 6.0.3, React 19.2.7, Ink 7.1.0, Vitest 3.2.7, ink-testing-library 4.0.0, Git worktrees.
 
 ## Global Constraints
 
 - Follow `docs/superpowers/specs/2026-07-13-tui-branch-consolidation-design.md` exactly.
-- Work only in `/Users/kuma/workspace/Transup-integration` until Task 5 explicitly moves to the primary checkout.
+- Work only in `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation` until Task 5 explicitly moves to the primary checkout.
 - Preserve the original commit identities of `9cc3797` and `82767dc` through real merge commits; do not rebase, squash, or cherry-pick them.
 - Use Node `26.5.0` for every install, test, typecheck, build, and CLI smoke command.
 - Do not implement cross-process history locking, thinking rendering, `Ctrl+O`, Todo, images, or additional interaction-study 02/03 behavior.
@@ -46,7 +46,7 @@
 Run:
 
 ```bash
-cd /Users/kuma/workspace/Transup-integration
+cd /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm ci
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH node --version
 ```
@@ -58,7 +58,7 @@ Expected: install exits zero without changing `package-lock.json`; Node prints `
 Run outside the sandbox:
 
 ```bash
-cd /Users/kuma/workspace/Transup-integration
+cd /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation
 env PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:/usr/local/bin:/usr/bin:/bin /Users/kuma/.nvm/versions/node/v26.5.0/bin/npm test -- packages/cli/test/tui-input/pty-smoke.test.ts
 ```
 
@@ -430,7 +430,7 @@ Expected: no unresolved Critical or Important finding. Apply valid findings with
 
 **Files:**
 - Merge: `integration/tui-branch-consolidation` into local `main`
-- Create worktree: `/Users/kuma/workspace/Transup-deferred`
+- Create worktree: `/Users/kuma/workspace/Transup/.superpowers/worktrees/tui-deferred-capabilities`
 - Create branch: `feature/tui-deferred-capabilities`
 
 **Interfaces:**
@@ -440,8 +440,8 @@ Expected: no unresolved Critical or Important finding. Apply valid findings with
 - [ ] **Step 1: Record the verified integration tip and confirm both worktrees are safe**
 
 ```bash
-git -C /Users/kuma/workspace/Transup-integration rev-parse HEAD
-git -C /Users/kuma/workspace/Transup-integration status --short --branch
+git -C /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation rev-parse HEAD
+git -C /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-branch-consolidation status --short --branch
 git -C /Users/kuma/workspace/Transup status --short --branch
 ```
 
@@ -487,9 +487,9 @@ Expected: verification passes; all five remote feature branches are merged into 
 - [ ] **Step 5: Create the isolated deferred-capabilities worktree from consolidated main**
 
 ```bash
-git -C /Users/kuma/workspace/Transup worktree add /Users/kuma/workspace/Transup-deferred -b feature/tui-deferred-capabilities main
-git -C /Users/kuma/workspace/Transup-deferred status --short --branch
-git -C /Users/kuma/workspace/Transup-deferred merge-base --is-ancestor main HEAD
+git -C /Users/kuma/workspace/Transup worktree add /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-deferred-capabilities -b feature/tui-deferred-capabilities main
+git -C /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-deferred-capabilities status --short --branch
+git -C /Users/kuma/workspace/Transup/.superpowers/worktrees/tui-deferred-capabilities merge-base --is-ancestor main HEAD
 ```
 
 Expected: the new worktree is clean, its branch tip equals consolidated local main, and it contains none of the deferred implementations.
