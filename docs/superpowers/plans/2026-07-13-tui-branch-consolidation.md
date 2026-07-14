@@ -744,7 +744,7 @@ count includes them.
 - Consumes: reviewed 05 checkpoint, 06 tip `4e9f5fa`, `SessionStore.list(sessionDir)`, App engine/history refs, terminal/transcript screen state, and permission controller input ownership.
 - Produces: a two-parent merge with bounded status-line execution, context/cost summaries, panel routing, and `/sessions` switching while preserving all earlier contracts.
 
-- [ ] **Step 1: Confirm the exact 06 layer**
+- [x] **Step 1: Confirm the exact 06 layer**
 
 ```bash
 git status --short --branch
@@ -757,7 +757,7 @@ git merge-base --is-ancestor 2d9e17701567e7ff7b3aea773d7f30732e7c2116 4e9f5fa80d
 Expected: both 06 refs equal `4e9f5fa`; 06 is exactly two commits ahead of 05;
 the prior checkpoint is clean and the ancestry check exits zero.
 
-- [ ] **Step 2: Merge 06 with a separate real merge commit in progress**
+- [x] **Step 2: Merge 06 with a separate real merge commit in progress**
 
 ```bash
 git merge --no-commit --no-ff 4e9f5fa80dfccf05e6aab2dbad677e2924545e0d
@@ -768,7 +768,7 @@ Expected: 06 status/panel files and tests enter the index. Resolve any shared
 App/router/settings/test conflicts against the integration invariants; do not
 replace this checkpoint with 07's descendant tip.
 
-- [ ] **Step 3: Enforce combined input, session, and process behavior**
+- [x] **Step 3: Enforce combined input, session, and process behavior**
 
 The resolved input priority must be exactly:
 
@@ -794,7 +794,7 @@ git diff --name-only --diff-filter=U
 Expected: no unmerged path remains. Paths that merged cleanly remain in Git's
 existing merge index without being restaged broadly.
 
-- [ ] **Step 4: Verify the focused 06 integration gate**
+- [x] **Step 4: Verify the focused 06 integration gate**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/statusline.test.ts packages/cli/test/tui.test.tsx packages/core/test/settings.test.ts packages/cli/test/terminal.test.ts packages/cli/test/transcript.test.tsx packages/cli/test/permission-options.test.ts packages/core/test/permissions.test.ts packages/cli/test/tui-input/keybinding-router.test.ts packages/cli/test/tui-input/text-input.test.tsx packages/cli/test/tui-activity/frames.test.ts packages/cli/test/tui-activity/line-commit.test.ts packages/cli/test/tui-activity/stall.test.ts packages/cli/test/tui-activity/status-line.test.ts
@@ -807,7 +807,7 @@ suites pass, typecheck exits zero, and the staged merge is whitespace-clean.
 Add a RED integration regression first if a conflict exposes an uncovered
 behavioral loss.
 
-- [ ] **Step 5: Commit and review the 06 checkpoint**
+- [x] **Step 5: Commit and review the 06 checkpoint**
 
 ```bash
 git diff --name-only --diff-filter=U
@@ -820,6 +820,14 @@ git status --short --branch
 Expected: the merge commit has two parents, exact 06 tip is an ancestor, the
 worktree is clean, and an independent Task 6 review approves both spec and code
 quality with no Critical or Important finding.
+
+Recorded result: merge `6567506`, process-tree/atomic-transition fix `49e6bd0`,
+and exit/permission-priority fix `99367b7`. The final focused gate passed
+271/271, typecheck and diff-check were clean, and final re-review approved spec
+and code quality with no Critical or Important finding. Residual platform risk:
+real descendant termination was exercised on macOS/POSIX; the Windows
+`taskkill /T /F` path matches the existing bash-tool pattern but was not run on
+this host.
 
 ---
 
