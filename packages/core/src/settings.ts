@@ -1,16 +1,17 @@
 /**
  * 项目设置 —— .transup/settings.json（+ settings.local.json）
  *
- * 两层文件，读取时合并：
+ * 两层工作区文件，读取时先按 workspace trust 过滤再合并：
  *   settings.json        项目级，进版本库，团队共享
  *   settings.local.json  个人级，应加入 gitignore；"不再询问"默认写这里
- * 合并规则：mcpServers 按名覆盖（local 优先）；权限三列表拼接（两层都生效）；
+ * 未信任时只保留 deny/ask；信任后 mcpServers 按名覆盖（local 优先），权限列表拼接；
  * defaultMode 取 local，缺省回退项目级。
  *
  * 权限规则语法见 permissions.ts（工具级 / 前缀通配 / 内容级）。
  */
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
+import { dirname, join } from "node:path";
 import type { McpServerConfig } from "./tools/mcp.js";
 import {
   ruleMatches,
@@ -42,6 +43,20 @@ export interface Settings {
 const SETTINGS_DIR = ".transup";
 const SETTINGS_FILE = "settings.json";
 const LOCAL_SETTINGS_FILE = "settings.local.json";
+const TRUST_STORE_VERSION = 1;
+const TRUST_STORE_FILE = "trusted-workspaces.json";
+
+interface WorkspaceTrustStore {
+  version: typeof TRUST_STORE_VERSION;
+  trustedWorkspaces: string[];
+}
+
+export interface LoadSettingsOptions {
+  /** 被设置文件控制的工作区；信任比较前会 canonicalize。 */
+  workspace?: string;
+  /** 仅供宿主/测试注入；CLI 默认使用 OS 账户配置目录。 */
+  trustStorePath?: string;
+}
 
 const FILE_FOR_DESTINATION: Record<Exclude<PermissionDestination, "session">, string> = {
   projectSettings: SETTINGS_FILE,
@@ -56,12 +71,79 @@ async function loadFile(dir: string, file: string): Promise<Settings> {
   }
 }
 
-/** 读取并合并两层设置（只用于消费；持久化必须写单层文件，见 persist*） */
-export async function loadSettings(dir: string = SETTINGS_DIR): Promise<Settings> {
-  const project = await loadFile(dir, SETTINGS_FILE);
-  const local = await loadFile(dir, LOCAL_SETTINGS_FILE);
+/** 信任状态只保存在 OS 账户配置目录，绝不放进工作区的 .transup。 */
+export function defaultTrustStorePath(homeDir: string = userInfo().homedir): string {
+  return join(homeDir, ".config", "transup", TRUST_STORE_FILE);
+}
 
-  const merged: Settings = { ...project };
+function parseTrustStore(raw: string): WorkspaceTrustStore | null {
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== "object") return null;
+    const candidate = value as Partial<WorkspaceTrustStore>;
+    if (candidate.version !== TRUST_STORE_VERSION) return null;
+    if (!Array.isArray(candidate.trustedWorkspaces)) return null;
+    if (!candidate.trustedWorkspaces.every((entry) => typeof entry === "string")) return null;
+    return {
+      version: TRUST_STORE_VERSION,
+      trustedWorkspaces: candidate.trustedWorkspaces,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readTrustStore(path: string): Promise<WorkspaceTrustStore | null> {
+  try {
+    return parseTrustStore(await readFile(path, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+export async function isWorkspaceTrusted(
+  workspace: string = process.cwd(),
+  trustStorePath: string = defaultTrustStorePath(),
+): Promise<boolean> {
+  try {
+    const [canonical, store] = await Promise.all([
+      realpath(workspace),
+      readTrustStore(trustStorePath),
+    ]);
+    return store?.trustedWorkspaces.includes(canonical) ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/** 显式信任动作；返回持久化后的 canonical workspace，便于 CLI 回显。 */
+export async function trustWorkspace(
+  workspace: string = process.cwd(),
+  trustStorePath: string = defaultTrustStorePath(),
+): Promise<string> {
+  const canonical = await realpath(workspace);
+  const existing = await readTrustStore(trustStorePath);
+  const trustedWorkspaces = existing?.trustedWorkspaces ?? [];
+  if (!trustedWorkspaces.includes(canonical)) trustedWorkspaces.push(canonical);
+
+  await mkdir(dirname(trustStorePath), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${trustStorePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(
+      temporaryPath,
+      JSON.stringify({ version: TRUST_STORE_VERSION, trustedWorkspaces }, null, 2) + "\n",
+      { encoding: "utf-8", mode: 0o600, flag: "wx" },
+    );
+    await rename(temporaryPath, trustStorePath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+  return canonical;
+}
+
+function mergeSettingsLayers(project: Settings, local: Settings): Settings {
+  const merged: Settings = { ...project, ...local };
   if (project.mcpServers || local.mcpServers) {
     merged.mcpServers = { ...project.mcpServers, ...local.mcpServers };
   }
@@ -74,6 +156,32 @@ export async function loadSettings(dir: string = SETTINGS_DIR): Promise<Settings
     };
   }
   return merged;
+}
+
+function restrictUntrustedLayers(project: Settings, local: Settings): Settings {
+  if (!project.permissions && !local.permissions) return {};
+  return {
+    permissions: {
+      allow: [],
+      deny: [...(project.permissions?.deny ?? []), ...(local.permissions?.deny ?? [])],
+      ask: [...(project.permissions?.ask ?? []), ...(local.permissions?.ask ?? [])],
+      defaultMode: undefined,
+    },
+  };
+}
+
+/** 先保留两层来源完成信任过滤，再按 local 优先规则合并。 */
+export async function loadSettings(
+  dir: string = SETTINGS_DIR,
+  options: LoadSettingsOptions = {},
+): Promise<Settings> {
+  const project = await loadFile(dir, SETTINGS_FILE);
+  const local = await loadFile(dir, LOCAL_SETTINGS_FILE);
+  const trusted = await isWorkspaceTrusted(
+    options.workspace ?? process.cwd(),
+    options.trustStorePath ?? defaultTrustStorePath(),
+  );
+  return trusted ? mergeSettingsLayers(project, local) : restrictUntrustedLayers(project, local);
 }
 
 /** 覆写项目级设置文件（不触碰 local 层） */

@@ -26,8 +26,7 @@ import {
   buildProjectContext,
   builtinTools,
   createTaskTool,
-  connectAllMcpServers,
-  loadSettings,
+  trustWorkspace,
   type Provider,
   type Message,
   type Tool,
@@ -40,6 +39,7 @@ import { runDoctor } from "./doctor.js";
 import { TraceRecorder, renderTraceFile } from "./trace.js";
 import { runDogfood } from "./dogfood.js";
 import { ensureProviderConfigured } from "./setup.js";
+import { prepareWorkspaceStartup } from "./workspace-startup.js";
 
 // 从 cwd 向上逐级找最近的 .env 再加载。
 // 关键：`npm start -w transup` 会把 cwd 切到 packages/cli，直接读 "./.env"
@@ -72,6 +72,7 @@ const HELP = `transup — AI coding agent（任何模型都是一等公民）
   transup -p "任务"           headless 模式：非交互跑完一轮就退出
                               （stdout 只输出正文，过程信息在 stderr）
   transup -p "任务" --allow-all   headless 且跳过写操作确认（仅可信环境）
+  transup trust               信任当前工作区，启用其 MCP、状态行和权限配置
   transup doctor              检查 Node / Provider / settings / 终端环境
   transup replay <trace.jsonl> 以可读时间线重放 .transup/traces 里的事件
   transup dogfood             验证 fixtures/dogfood trace 样本
@@ -103,6 +104,17 @@ if (flag("--version") || flag("-v")) {
   process.exit(0);
 }
 
+if (argv[0] === "trust") {
+  try {
+    const workspace = await trustWorkspace(process.cwd());
+    console.log(`已信任工作区：${workspace}`);
+    process.exit(0);
+  } catch (error) {
+    console.error(`无法信任当前工作区：${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
 if (argv[0] === "replay") {
   const tracePath = argv[1];
   if (!tracePath) {
@@ -123,9 +135,8 @@ if ((flag("-p") || flag("--print")) && !headlessPrompt) {
   process.exit(1);
 }
 
-const settings = await loadSettings();
-
 if (argv[0] === "doctor" || flag("--doctor")) {
+  const { settings } = await prepareWorkspaceStartup({ connectMcp: false });
   process.exit(await runDoctor({ settings }));
 }
 
@@ -210,8 +221,10 @@ async function resolveSession(): Promise<{ id: string; history: Message[] }> {
 
 const provider = createProvider();
 const projectContext = await buildProjectContext(process.cwd());
-const mcp = await connectAllMcpServers(settings.mcpServers ?? {}, (name, err) => {
-  console.error(color.red(`MCP server "${name}" 连接失败：${err.message}（已跳过）`));
+const { settings, mcp } = await prepareWorkspaceStartup({
+  onMcpError: (name, err) => {
+    console.error(color.red(`MCP server "${name}" 连接失败：${err.message}（已跳过）`));
+  },
 });
 const tools: Tool[] = [...builtinTools, createTaskTool(provider), ...mcp.tools];
 const { id, history } = await resolveSession();

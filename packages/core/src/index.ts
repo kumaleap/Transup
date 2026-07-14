@@ -21,7 +21,11 @@ export {
   persistAllow,
   persistPermissionRule,
   settingsRules,
+  defaultTrustStorePath,
+  isWorkspaceTrusted,
+  trustWorkspace,
   type Settings,
+  type LoadSettingsOptions,
 } from "./settings.js";
 export {
   evaluatePermission,
