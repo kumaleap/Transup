@@ -1,5 +1,8 @@
 /** statusline 命令执行：JSON stdin、超时、非 0 静默、ANSI 透传 */
 import { describe, it, expect } from "vitest";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runStatusLineCommand, type StatusLineInput } from "../src/tui/statusline.js";
 import { renderContextGrid, renderContextUsage } from "../src/tui/context-grid.js";
 import { formatCostSummary } from "../src/tui/cost-summary.js";
@@ -14,6 +17,20 @@ const input: StatusLineInput = {
 };
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function delayedDescendantCommand(marker: string, script: string): string {
+  writeFileSync(
+    script,
+    [
+      'const { writeFileSync } = require("node:fs");',
+      `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, "alive"), 250);`,
+      "setTimeout(() => process.exit(0), 350);",
+    ].join("\n"),
+  );
+  return `trap '' HUP; ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} & wait`;
+}
 
 describe("runStatusLineCommand", () => {
   it("JSON 经 stdin 传入，脚本可以取任意字段", async () => {
@@ -38,6 +55,37 @@ describe("runStatusLineCommand", () => {
     const out = await runStatusLineCommand({ command: "sleep 10", timeoutMs: 120 }, input);
     expect(out).toBeNull();
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it("超时会终止 shell 的真实后代进程", async () => {
+    if (process.platform === "win32") return;
+    const dir = mkdtempSync(join(tmpdir(), "transup-statusline-timeout-"));
+    const marker = join(dir, "descendant-alive");
+    try {
+      const command = delayedDescendantCommand(marker, join(dir, "descendant.cjs"));
+      expect(await runStatusLineCommand({ command, timeoutMs: 60 }, input)).toBeNull();
+      await wait(450);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("AbortController 会终止 shell 的真实后代进程", async () => {
+    if (process.platform === "win32") return;
+    const dir = mkdtempSync(join(tmpdir(), "transup-statusline-abort-"));
+    const marker = join(dir, "descendant-alive");
+    try {
+      const command = delayedDescendantCommand(marker, join(dir, "descendant.cjs"));
+      const controller = new AbortController();
+      const result = runStatusLineCommand({ command }, input, controller.signal);
+      setTimeout(() => controller.abort(), 60);
+      expect(await result).toBeNull();
+      await wait(450);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("ANSI 颜色原样透传", async () => {

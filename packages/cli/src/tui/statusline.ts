@@ -10,7 +10,7 @@
  *     不能因为用户脚本坏了打扰主流程
  *   - 触发方 300ms debounce + 取消 in-flight（见 use-status-line.ts）
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 /** 喂给用户命令的会话状态快照（字段名对齐 Claude Code，脚本可迁移） */
 export interface StatusLineInput {
@@ -35,6 +35,26 @@ export interface StatusLineCommand {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
+function killTree(pid: number | undefined): void {
+  if (pid == null) return;
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"]);
+    if (result.status === 0) return;
+  } else {
+    try {
+      process.kill(-pid, "SIGKILL");
+      return;
+    } catch {
+      // Fall through to the direct-process fallback.
+    }
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    /* Process already exited. */
+  }
+}
+
 /**
  * 跑一次用户命令。任何失败（超时/非 0/信号/spawn 报错）都返回 null。
  * stdout 按行 trim 后重新拼接（去掉尾部空行，保留中间的多行输出）。
@@ -50,34 +70,38 @@ export function runStatusLineCommand(
     const child = spawn(config.command, {
       shell: true,
       stdio: ["pipe", "pipe", "ignore"],
+      detached: process.platform !== "win32",
     });
 
     let out = "";
     let settled = false;
+    let terminating = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const settle = (value: string | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
+      child.stdin.destroy();
+      child.stdout.destroy();
       resolve(value);
     };
 
-    const kill = () => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* 已退出 */
-      }
+    const terminate = () => {
+      if (settled || terminating) return;
+      terminating = true;
+      killTree(child.pid);
+      // A leaked descendant holding either pipe must not keep the close event open.
+      child.stdin.destroy();
+      child.stdout.destroy();
     };
     const onAbort = () => {
-      kill();
-      settle(null);
+      terminate();
     };
     signal?.addEventListener("abort", onAbort);
 
-    const timer = setTimeout(() => {
-      kill();
-      settle(null);
+    timer = setTimeout(() => {
+      terminate();
     }, config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
     child.stdout.setEncoding("utf-8");
@@ -86,7 +110,7 @@ export function runStatusLineCommand(
     });
     child.on("error", () => settle(null));
     child.on("close", (code) => {
-      if (code !== 0) return settle(null);
+      if (terminating || code !== 0) return settle(null);
       const text = out
         .split("\n")
         .map((l) => l.trimEnd())

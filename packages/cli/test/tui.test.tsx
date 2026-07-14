@@ -1944,6 +1944,129 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("/sessions 加载期间阻止旧引擎提交与竞争切换", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-pending-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    let releaseLoad!: (history: Message[]) => void;
+    const pendingLoad = new Promise<Message[]>((resolve) => {
+      releaseLoad = resolve;
+    });
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "load")
+      .mockImplementation(function () {
+        return this.id === "target-session" ? pendingLoad : Promise.resolve([]);
+      });
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    try {
+      await flush();
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      stdin.write("1");
+      await vi.waitFor(() => expect(loadSpy).toHaveBeenCalled(), { timeout: 2000 });
+
+      stdin.write("不能发给旧引擎");
+      stdin.write("\r");
+      await flush();
+      expect(provider.streamCalls).toBe(0);
+      expect(lastFrame()).toContain("正在加载会话 target-session");
+
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await flush();
+      expect(lastFrame()).not.toContain("切换会话");
+
+      releaseLoad([{ role: "user", content: "目标会话历史" }]);
+      await vi.waitFor(() => expect(lastFrame()).toContain("已切换到会话 target-session"), {
+        timeout: 2000,
+      });
+      stdin.write("切换后提问");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(provider.streamCalls).toBe(1), { timeout: 2000 });
+      expect(provider.requests[0]).toEqual(
+        expect.arrayContaining([{ role: "user", content: "目标会话历史" }]),
+      );
+      expect(provider.lastUserContent).toBe("切换后提问");
+    } finally {
+      releaseLoad([]);
+      unmount();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("/sessions 在 load 后构建失败时保留原会话并释放输入", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-atomic-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "load")
+      .mockResolvedValue([{ role: "user", content: "目标会话历史" }]);
+    const contextSpy = vi
+      .spyOn(transupCore.AgentEngine.prototype, "contextUsage")
+      .mockImplementationOnce(() => {
+        throw new Error("context failed after load");
+      });
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[{ role: "user", content: "原会话历史" }]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    try {
+      await flush();
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      stdin.write("1");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("切换会话失败：context failed after load"),
+        { timeout: 2000 },
+      );
+      expect(lastFrame()).not.toContain("正在加载会话");
+
+      stdin.write("失败后提问");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(provider.streamCalls).toBe(1), { timeout: 2000 });
+      expect(provider.requests[0]).toEqual(
+        expect.arrayContaining([{ role: "user", content: "原会话历史" }]),
+      );
+      expect(provider.requests[0]).not.toEqual(
+        expect.arrayContaining([{ role: "user", content: "目标会话历史" }]),
+      );
+
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toMatch(
+        /target-session\s+当前/,
+      );
+    } finally {
+      unmount();
+      contextSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
   it("settings.statusLine：命令输出显示在状态栏上方", async () => {
     const provider = new MockProvider([{ content: "好" }]);
     const { stdin, lastFrame, unmount } = render(

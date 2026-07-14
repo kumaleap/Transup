@@ -169,6 +169,9 @@ export function App(props: AppProps) {
   // 命令面板（/sessions 等）：同一时刻至多一个
   const [panel, setPanel] = useState<PanelRequest | null>(null);
   const panelIdRef = useRef(0);
+  const [sessionSwitching, setSessionSwitching] = useState<string | null>(null);
+  const sessionSwitchPendingRef = useRef(false);
+  const mountedRef = useRef(true);
   const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
     props.settings.permissions?.defaultMode ?? "default",
   );
@@ -393,6 +396,13 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // ── 退出统计：卸载时把 /cost 同款汇总交给宿主打印 ────────
   const onExitStatsRef = useRef(props.onExitStats);
   onExitStatsRef.current = props.onExitStats;
@@ -443,7 +453,7 @@ export function App(props: AppProps) {
   );
 
   const inputController = useInputController({
-    active: !running,
+    active: !running && sessionSwitching === null,
     historyPath: props.historyPath,
     onSubmit,
     onExit: exit,
@@ -547,6 +557,7 @@ export function App(props: AppProps) {
   useInput((input, key) => {
     const stroke = normalizeKeystroke(input, key);
     lastInputAt.current = Date.now();
+    if (sessionSwitchPendingRef.current) return;
     if (!(stroke.ctrl && stroke.input === "c")) {
       abortExitArmedRef.current = false;
     }
@@ -582,7 +593,12 @@ export function App(props: AppProps) {
     lastInputAt.current = Date.now();
     if (!submitPendingRef.current) inputController.handlePaste(text);
   }, {
-    isActive: !running && confirmQueue.length === 0 && screen === "prompt" && !panel,
+    isActive:
+      !running &&
+      confirmQueue.length === 0 &&
+      screen === "prompt" &&
+      !panel &&
+      sessionSwitching === null,
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -642,17 +658,27 @@ export function App(props: AppProps) {
           })),
           (sessionId) => {
             if (sessionId === sessionIdRef.current) return;
+            if (sessionSwitchPendingRef.current) return;
+            sessionSwitchPendingRef.current = true;
+            setSessionSwitching(sessionId);
             void (async () => {
               try {
                 const history = await new SessionStore(sessionId, props.sessionDir).load();
+                if (!mountedRef.current) return;
+                const nextEngine = createEngine(sessionId, history);
+                const { percent } = nextEngine.contextUsage();
+                if (!mountedRef.current) return;
+                engineRef.current = nextEngine;
                 sessionIdRef.current = sessionId;
-                engineRef.current = createEngine(sessionId, history);
-                const { percent } = engineRef.current.contextUsage();
                 setStatus((s) => ({ ...s, sessionId, contextPercent: percent }));
                 info(`已切换到会话 ${sessionId}（${history.length} 条消息）`, "green");
               } catch (error) {
+                if (!mountedRef.current) return;
                 const detail = error instanceof Error ? error.message : String(error);
                 info(`切换会话失败：${detail}`, "red");
+              } finally {
+                sessionSwitchPendingRef.current = false;
+                if (mountedRef.current) setSessionSwitching(null);
               }
             })();
           },
@@ -929,6 +955,7 @@ export function App(props: AppProps) {
   const bottom = (
     <>
       {!transcriptMode &&
+        sessionSwitching === null &&
         !panelController.view &&
         (permissionController.view ? null : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
@@ -949,6 +976,9 @@ export function App(props: AppProps) {
             />
           </Box>
         ))}
+      {!transcriptMode && sessionSwitching && (
+        <Text dimColor>正在加载会话 {sessionSwitching}...</Text>
+      )}
       {!transcriptMode && permissionMode !== "default" && (
         <Text color={MODE_META[permissionMode].color}>
           {MODE_META[permissionMode].symbol} {MODE_META[permissionMode].title} on{" "}
