@@ -2007,6 +2007,70 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   });
 
+  it("/sessions 加载期间保留 Ctrl+C 退出并丢弃卸载后的完成", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-exit-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    let releaseLoad!: (history: Message[]) => void;
+    const pendingLoad = new Promise<Message[]>((resolve) => {
+      releaseLoad = resolve;
+    });
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "load")
+      .mockImplementation(function () {
+        return this.id === "target-session" ? pendingLoad : Promise.resolve([]);
+      });
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
+    );
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 2000,
+      });
+      instance.stdin.write("1");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("正在加载会话"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(50);
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), { timeout: 2000 });
+
+      instance.stdin.write("退出后输入");
+      await flush();
+      expect(instance.lastFrame()).not.toContain("退出后输入");
+
+      releaseLoad([{ role: "user", content: "不应安装的历史" }]);
+      await flush();
+      expect(onExitStats).toHaveBeenCalledOnce();
+      expect(instance.lastFrame()).not.toContain("已切换到会话 target-session");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      releaseLoad([]);
+      instance.unmount();
+      errorSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
   it("/sessions 在 load 后构建失败时保留原会话并释放输入", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-atomic-"));
     writeFileSync(join(dir, "target-session.jsonl"), "{}\n");

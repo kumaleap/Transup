@@ -453,7 +453,7 @@ export function App(props: AppProps) {
   );
 
   const inputController = useInputController({
-    active: !running && sessionSwitching === null,
+    active: !running,
     historyPath: props.historyPath,
     onSubmit,
     onExit: exit,
@@ -557,11 +557,11 @@ export function App(props: AppProps) {
   useInput((input, key) => {
     const stroke = normalizeKeystroke(input, key);
     lastInputAt.current = Date.now();
-    if (sessionSwitchPendingRef.current) return;
     if (!(stroke.ctrl && stroke.input === "c")) {
       abortExitArmedRef.current = false;
     }
-    const inputContext = confirmQueueRef.current.length > 0
+    const permissionActive = confirmQueueRef.current.length > 0;
+    const inputContext = permissionActive
       ? "permission"
       : panelRef.current
         ? "panel"
@@ -570,14 +570,23 @@ export function App(props: AppProps) {
           : inputController.isHistorySearchActive()
             ? "history-search"
             : "editor";
+    const consumeForSessionSwitch = sessionSwitchPendingRef.current && !permissionActive;
     routeKeystroke(stroke, inputContext, {
-      global: handleGlobalKey,
+      global: (globalStroke) =>
+        consumeForSessionSwitch && !(globalStroke.ctrl && globalStroke.input === "c")
+          ? false
+          : handleGlobalKey(globalStroke),
       permission: (permStroke) => permissionController.handleKey(permStroke),
-      panel: (panelStroke) => panelController.handleKey(panelStroke),
-      transcript: handleTranscriptKey,
+      panel: (panelStroke) =>
+        consumeForSessionSwitch || panelController.handleKey(panelStroke),
+      transcript: (transcriptStroke) =>
+        consumeForSessionSwitch || handleTranscriptKey(transcriptStroke),
       historySearch: (searchStroke) =>
-        submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
+        consumeForSessionSwitch ||
+        submitPendingRef.current ||
+        inputController.handleHistorySearchKey(searchStroke),
       editor: (editorStroke) => {
+        if (consumeForSessionSwitch) return true;
         // Shift+Tab 循环权限模式（运行中也生效 —— acceptEdits 可给后续弹窗放行）
         if (editorStroke.name === "tab" && editorStroke.shift) {
           cyclePermissionMode();
