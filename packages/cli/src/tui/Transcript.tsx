@@ -30,6 +30,8 @@ export type TranscriptItem =
       argSummary: string;
       /** 结果预览行（已截断，可含局部 ANSI 样式）；流式显示过的长输出这里只留统计 */
       preview: string;
+      /** 未截断的完整输出 —— 主屏不显示，Ctrl+O 的全文屏用它 */
+      full?: string;
       isError: boolean;
     }
   /** 结构化错误（API/系统/命令错误）：⎿ 缩进 + 红色（规格 §1.5） */

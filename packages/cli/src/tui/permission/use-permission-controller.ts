@@ -40,6 +40,8 @@ export interface PermissionController {
 export function usePermissionController(
   confirm: ToolUseConfirm | null,
   queueLength: number,
+  /** 对话框内容可用列数（终端宽度变化时 diff 预览要跟着重排） */
+  width?: number,
 ): PermissionController {
   const focusRef = useRef(0);
   const editingRef = useRef<PermissionEditing | null>(null);
@@ -55,7 +57,10 @@ export function usePermissionController(
     setEditingState(v);
   };
 
-  const model = useMemo(() => (confirm ? buildPermissionView(confirm) : null), [confirm]);
+  const model = useMemo(
+    () => (confirm ? buildPermissionView(confirm, width) : null),
+    [confirm, width],
+  );
 
   // 换了一个待确认项 → 焦点与编辑态清零
   useEffect(() => {
