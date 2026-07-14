@@ -853,7 +853,7 @@ this host.
 - Consumes: reviewed 06 checkpoint, 07 tip `4f6d30f`, App transcript and panel state, `compact_end`, tool progress channels, and session-store helpers.
 - Produces: a two-parent merge with compact UX, resume notices/labels, and stable read-only/subagent progress while retaining 01-06 behavior.
 
-- [ ] **Step 1: Confirm the exact 07 layer**
+- [x] **Step 1: Confirm the exact 07 layer**
 
 ```bash
 git status --short --branch
@@ -866,7 +866,7 @@ git merge-base --is-ancestor 4e9f5fa80dfccf05e6aab2dbad677e2924545e0d 4f6d30f9f3
 Expected: both 07 refs equal `4f6d30f`; 07 is exactly two commits ahead of 06;
 the worktree is clean and the ancestry check exits zero.
 
-- [ ] **Step 2: Merge 07 as the final stacked checkpoint**
+- [x] **Step 2: Merge 07 as the final stacked checkpoint**
 
 ```bash
 git merge --no-commit --no-ff 4f6d30f9f364c2ab7f083b8f1bf014811eb2b549
@@ -877,7 +877,7 @@ Expected: core-mechanics source/tests enter the index. Resolve App/transcript
 and engine/session conflicts without dropping visual summaries, streaming
 ordering, authorization, layout, terminal, panel, or session-switch behavior.
 
-- [ ] **Step 3: Verify compact, resume, and progress composition**
+- [x] **Step 3: Verify compact, resume, and progress composition**
 
 The normal screen shows the compact boundary but not its full summary; the
 Ctrl+O transcript screen expands that summary. Automatic and manual compaction
@@ -887,7 +887,7 @@ labels skip system injection and honor the selected session directory.
 Read-only and subagent progress stays ordered `tool_start -> progress* ->
 tool_end`, and no progress path bypasses the existing tool/permission lifecycle.
 
-- [ ] **Step 4: Add mutation-backed regressions for the real subagent bridge and parallel progress channels**
+- [x] **Step 4: Add mutation-backed regressions for the real subagent bridge and parallel progress channels**
 
 In `packages/core/test/subagent.test.ts`, use the existing `MockProvider` and
 `createTaskTool()` to exercise the real task tool rather than a custom probe:
@@ -1031,7 +1031,7 @@ git diff --name-only --diff-filter=U
 
 Expected: no unmerged path remains.
 
-- [ ] **Step 5: Verify the focused 07 integration gate**
+- [x] **Step 5: Verify the focused 07 integration gate**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/core/test/engine.test.ts packages/core/test/session.test.ts packages/core/test/subagent.test.ts packages/core/test/streaming.test.ts packages/cli/test/tui.test.tsx packages/cli/test/statusline.test.ts packages/cli/test/terminal.test.ts packages/cli/test/transcript.test.tsx packages/cli/test/permission-options.test.ts packages/core/test/permissions.test.ts packages/core/test/settings.test.ts packages/core/test/registry.test.ts packages/cli/test/tui-input/keybinding-router.test.ts packages/cli/test/tui-input/text-input.test.tsx packages/cli/test/tui-activity/frames.test.ts packages/cli/test/tui-activity/line-commit.test.ts packages/cli/test/tui-activity/stall.test.ts packages/cli/test/tui-activity/status-line.test.ts
@@ -1049,7 +1049,7 @@ Expected: all focused core/CLI suites pass, typecheck exits zero, staged content
 is whitespace-clean, and PTY reports 1/1 with zero skips. Add a RED regression
 before any integration fix not already covered by the source branch tests.
 
-- [ ] **Step 6: Commit and review the 07 checkpoint**
+- [x] **Step 6: Commit and review the 07 checkpoint**
 
 ```bash
 git diff --name-only --diff-filter=U
@@ -1062,6 +1062,15 @@ git status --short --branch
 Expected: the merge commit has two parents, exact 07 tip is an ancestor, the
 worktree is clean, and an independent Task 7 review approves both spec and code
 quality with no Critical or Important finding.
+
+Recorded result: merge `1ed5fe6` and rejected-progress-channel fix `a9d7db1`.
+The mutation RED ran 10 tests with exactly 2 failures; restored 07 was 10/10.
+The rejection regression was 5/6 RED and 6/6 GREEN. The final focused gate
+passed 313/313, typecheck was clean, real PTY passed 1/1 with zero skips, and
+final re-review approved with no Critical or Important finding. Minors tracked
+for final review: the compact App regression does not explicitly assert the
+`Compacting` during-state, and the resume notice regression does not explicitly
+assert zero provider calls.
 
 ---
 
