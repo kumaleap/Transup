@@ -172,4 +172,75 @@ describe("bash 流式输出", () => {
       "end:t2",
     ]);
   });
+
+  it("后启动的并行只读调用被拒绝时不产生未处理拒绝", async () => {
+    const permissionError = new Error("permission failed before turn");
+    let secondRejected = false;
+    let firstObservedSecond = false;
+    const first = {
+      name: "first_waiting_probe",
+      description: "first",
+      schema: z.object({}),
+      readOnly: true,
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        firstObservedSecond = secondRejected;
+        return "first-done";
+      },
+    };
+    const second = {
+      name: "second_rejected_probe",
+      description: "second",
+      schema: z.object({}),
+      readOnly: true,
+      async execute() {
+        return "second-done";
+      },
+    };
+    class RejectingProvider implements Provider {
+      readonly id = "mock";
+      readonly model = "m";
+      async *stream(): AsyncIterable<ProviderEvent> {
+        yield {
+          type: "message_done",
+          content: "",
+          toolCalls: [
+            {id: "t1", name: first.name, args: "{}"},
+            {id: "t2", name: second.name, args: "{}"},
+          ],
+        };
+      }
+    }
+    const dir = await mkdtemp(join(tmpdir(), "transup-rejected-progress-"));
+    const engine = new AgentEngine({
+      provider: new RejectingProvider(),
+      canUseTool: async (toolName) => {
+        if (toolName === second.name) {
+          secondRejected = true;
+          throw permissionError;
+        }
+        return {behavior: "allow" as const};
+      },
+      session: new SessionStore("rejected-progress", dir),
+      tools: [first, second],
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const run = (async () => {
+        for await (const _event of engine.runTurn("并行运行")) {
+          // Consume events until the original execution promise rejects.
+        }
+      })();
+      await expect(run).rejects.toBe(permissionError);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(firstObservedSecond).toBe(true);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

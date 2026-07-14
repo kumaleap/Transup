@@ -43,10 +43,11 @@ interface ProgressChannel {
 
 function openChannel(result: Promise<ToolResult>): ProgressChannel {
   const channel: ProgressChannel = { queue: [], wake: null, settled: false };
-  void result.finally(() => {
+  const settle = () => {
     channel.settled = true;
     channel.wake?.();
-  });
+  };
+  void result.then(settle, settle);
   return channel;
 }
 
