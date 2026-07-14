@@ -624,7 +624,7 @@ reported no Critical or Important finding. Full evidence is recorded in
 - Consumes: reviewed permission baseline `a4c0f43`, 05 tip `2d9e177`, visual `formatToolError()`/`summarizeToolResult()`, streaming `activeToolRef` and whole-line preview, queued permission controller, typed `previewKind: "diff"`, and cursor metric refs.
 - Produces: a two-parent merge retaining 05's layout, terminal effects, limited transcript screen, raw `TranscriptItem.full`, and width-aware permission previews without weakening visual, streaming, cursor, or authorization behavior.
 
-- [ ] **Step 1: Confirm the strict stack and clean merge baseline**
+- [x] **Step 1: Confirm the strict stack and clean merge baseline**
 
 Run:
 
@@ -641,7 +641,7 @@ Expected: the integration worktree is clean; both 05 refs equal `2d9e177`; 05
 is exactly two commits ahead of permission tip `f630e23`; the ancestry check
 exits zero.
 
-- [ ] **Step 2: Start the real 05 merge**
+- [x] **Step 2: Start the real 05 merge**
 
 ```bash
 git merge --no-commit --no-ff 2d9e17701567e7ff7b3aea773d7f30732e7c2116
@@ -652,7 +652,7 @@ Expected: Git stages the 05 layout, transcript, terminal, and tests and stops
 on shared App/permission integration paths. Do not abort, rebase, squash,
 cherry-pick, or replace this with a direct 07 merge.
 
-- [ ] **Step 3: Resolve shared files to the combined 04+05 contract**
+- [x] **Step 3: Resolve shared files to the combined 04+05 contract**
 
 The resolved `App.tsx` must use `Layout` slots and retain all of the following:
 
@@ -683,7 +683,7 @@ git diff --name-only --diff-filter=U
 
 Expected: no unmerged path remains.
 
-- [ ] **Step 4: Verify the focused 05 integration gate**
+- [x] **Step 4: Verify the focused 05 integration gate**
 
 ```bash
 PATH=/Users/kuma/.nvm/versions/node/v26.5.0/bin:$PATH npm test -- packages/cli/test/terminal.test.ts packages/cli/test/tui.test.tsx packages/cli/test/transcript.test.tsx packages/cli/test/permission-options.test.ts packages/core/test/permissions.test.ts packages/cli/test/tui-input/keybinding-router.test.ts packages/cli/test/tui-input/text-input.test.tsx packages/cli/test/tui-activity/frames.test.ts packages/cli/test/tui-activity/line-commit.test.ts packages/cli/test/tui-activity/stall.test.ts packages/cli/test/tui-activity/status-line.test.ts
@@ -702,7 +702,7 @@ typecheck exits zero, staged content is whitespace-clean, and PTY reports one
 pass with zero skips. Any integration regression is first frozen with a failing
 test, then fixed narrowly before repeating this gate.
 
-- [ ] **Step 5: Commit and review the 05 checkpoint**
+- [x] **Step 5: Commit and review the 05 checkpoint**
 
 ```bash
 git diff --name-only --diff-filter=U
@@ -715,6 +715,12 @@ git status --short --branch
 Expected: the merge commit has two parents, exact 05 tip is an ancestor, the
 worktree is clean, and an independent Task 5 review reports both spec
 compliance and code quality approved with no Critical or Important finding.
+
+Recorded result: merge `8554240`, focused 246/246, typecheck clean, real PTY
+1/1 with zero skips, and independent review approved with no Critical or
+Important finding. Minor tracked for final review: `TranscriptScreen.FullItem`
+does not render `error` or future `bash-input` items even though the screen
+count includes them.
 
 ---
 
