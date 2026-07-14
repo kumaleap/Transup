@@ -28,6 +28,15 @@ export interface Settings {
     /** 启动时的权限模式；bypassPermissions 写在这里即声明 bypass 可用 */
     defaultMode?: PermissionMode;
   };
+  /**
+   * 自定义状态行：一条 shell 命令，会话状态以 JSON 经 stdin 传入，
+   * stdout 显示在状态栏上方（支持 ANSI 颜色）。字段见 cli 的 statusline.ts。
+   */
+  statusLine?: {
+    command: string;
+    /** 命令执行超时（默认 5000ms），超时静默丢弃 */
+    timeoutMs?: number;
+  };
 }
 
 const SETTINGS_DIR = ".transup";

@@ -243,6 +243,7 @@ if (headlessPrompt) {
 }
 
 // ── 交互：Ink TUI ───────────────────────────────────────────
+let exitStats = "";
 const instance = render(
   createElement(App, {
     provider,
@@ -254,10 +255,15 @@ const instance = render(
     mcpToolCount: mcp.tools.length,
     version: VERSION,
     trace,
+    onExitStats: (summary) => {
+      exitStats = summary;
+    },
   }),
   { exitOnCtrlC: false },
 );
 
 await instance.waitUntilExit();
+// TUI 已卸载，stdout 归还给普通打印 —— 退出时给一份 /cost 同款汇总
+if (exitStats) console.log(`\n${exitStats}`);
 await mcp.close();
 process.exit(0);

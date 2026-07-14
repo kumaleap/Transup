@@ -63,6 +63,11 @@ import { TranscriptScreen } from "./TranscriptScreen.js";
 import { useTerminalStatus } from "./terminal/use-terminal-status.js";
 import { useTerminalNotifications } from "./terminal/use-terminal-notifications.js";
 import type { TerminalWriter } from "./terminal/writer.js";
+import { useStatusLine } from "./use-status-line.js";
+import { renderContextUsage } from "./context-grid.js";
+import { formatCostSummary, type UsageTotals } from "./cost-summary.js";
+import { Panel } from "./panel/Panel.js";
+import { usePanelController, type PanelRequest } from "./panel/use-panel-controller.js";
 import { StatusBar, type StatusInfo } from "./StatusBar.js";
 import {
   normalizeKeystroke,
@@ -101,6 +106,8 @@ export interface AppProps {
   terminalWrite?: TerminalWriter;
   /** 环境变量覆盖（测试用）：通知频道与阈值从这里读 */
   env?: NodeJS.ProcessEnv;
+  /** 退出时回调用量汇总（index.ts 用它在 TUI 卸载后打印 /cost 同款统计） */
+  onExitStats?: (summary: string) => void;
 }
 
 const HELP = `命令：
@@ -109,7 +116,7 @@ const HELP = `命令：
   /compact       手动压缩上下文
   /cost          本次运行累计 token 用量
   /context       当前上下文水位
-  /sessions      列出历史会话（用 --resume <id> 恢复）
+  /sessions      选择并切换历史会话
   exit / quit    退出
 输入技巧：
   @路径          引用文件，内容自动附加到消息（如 "解释 @src/index.ts"）
@@ -159,6 +166,9 @@ export function App(props: AppProps) {
   // 主屏 / 会话全文屏（Ctrl+O）—— 规格 05 §1.2 的"屏幕"就是这么个 state
   const [screen, setScreen] = useState<"prompt" | "transcript">("prompt");
   const [transcriptExpanded, setTranscriptExpanded] = useState(false);
+  // 命令面板（/sessions 等）：同一时刻至多一个
+  const [panel, setPanel] = useState<PanelRequest | null>(null);
+  const panelIdRef = useRef(0);
   const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
     props.settings.permissions?.defaultMode ?? "default",
   );
@@ -175,7 +185,9 @@ export function App(props: AppProps) {
   const runningRef = useRef(false);
   const submitPendingRef = useRef(false);
   const abortExitArmedRef = useRef(false);
-  const totals = useRef({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  const totals = useRef<UsageTotals>({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  // 会话墙钟起点：/cost 与退出汇总的时长基准
+  const sessionStartAt = useRef(Date.now());
   // 最近一次按键时间戳 —— 通知只在"人确实不在"时才发（ref：更新它不该重渲）
   const lastInputAt = useRef(Date.now());
   // 权限判定的三份动态输入：待确认队列 / 当前模式 / 会话内攒下的规则
@@ -217,7 +229,7 @@ export function App(props: AppProps) {
   }, []);
 
   const info = useCallback(
-    (text: string, tone: "dim" | "green" | "yellow" = "dim") =>
+    (text: string, tone: "dim" | "green" | "yellow" | "red" = "dim") =>
       push({ kind: "info", text, tone }),
     [push],
   );
@@ -381,6 +393,37 @@ export function App(props: AppProps) {
     return () => clearInterval(t);
   }, [running]);
 
+  // ── 退出统计：卸载时把 /cost 同款汇总交给宿主打印 ────────
+  const onExitStatsRef = useRef(props.onExitStats);
+  onExitStatsRef.current = props.onExitStats;
+  useEffect(
+    () => () => {
+      onExitStatsRef.current?.(
+        formatCostSummary(totals.current, Date.now() - sessionStartAt.current),
+      );
+    },
+    [],
+  );
+
+  // ── 自定义状态行（settings.statusLine 存在时才跑用户命令） ──
+  const statusLineText = useStatusLine(
+    props.settings.statusLine,
+    () => ({
+      model: { id: props.provider.model, display_name: props.provider.model },
+      workspace: { current_dir: process.cwd() },
+      version: props.version ?? "dev",
+      permission_mode: permissionModeRef.current,
+      cost: {
+        total_input_tokens: totals.current.input,
+        total_output_tokens: totals.current.output,
+        total_duration_ms: Date.now() - sessionStartAt.current,
+      },
+      context_window: { used_percentage: status.contextPercent },
+    }),
+    // 一轮落定（running 翻转）/ 权限模式 / 上下文水位变化时刷新
+    [running, permissionMode, status.contextPercent],
+  );
+
   // ── 终端带外通道：窗口标题 + 进度 + 桌面通知 ──────────────
   const activeConfirm = confirmQueue[0] ?? null;
   useTerminalStatus(
@@ -421,6 +464,28 @@ export function App(props: AppProps) {
   useEffect(() => {
     if (confirmQueue.length > 0) setScreen("prompt");
   }, [confirmQueue.length]);
+
+  const panelRef = useRef<PanelRequest | null>(null);
+  panelRef.current = panel;
+  const panelController = usePanelController(panel);
+
+  /** 打开一个命令面板；onSelect/onCancel 都先关面板再执行动作 */
+  const openPanel = (
+    title: string,
+    options: PanelRequest["options"],
+    onSelect: (value: string) => void,
+  ) => {
+    setPanel({
+      id: panelIdRef.current++,
+      title,
+      options,
+      onSelect: (value) => {
+        setPanel(null);
+        onSelect(value);
+      },
+      onCancel: () => setPanel(null),
+    });
+  };
 
   const rejectAllConfirms = (): boolean => {
     const pending = confirmQueueRef.current;
@@ -487,14 +552,17 @@ export function App(props: AppProps) {
     }
     const inputContext = confirmQueueRef.current.length > 0
       ? "permission"
-      : screenRef.current === "transcript"
-        ? "transcript"
-        : inputController.isHistorySearchActive()
-          ? "history-search"
-          : "editor";
+      : panelRef.current
+        ? "panel"
+        : screenRef.current === "transcript"
+          ? "transcript"
+          : inputController.isHistorySearchActive()
+            ? "history-search"
+            : "editor";
     routeKeystroke(stroke, inputContext, {
       global: handleGlobalKey,
       permission: (permStroke) => permissionController.handleKey(permStroke),
+      panel: (panelStroke) => panelController.handleKey(panelStroke),
       transcript: handleTranscriptKey,
       historySearch: (searchStroke) =>
         submitPendingRef.current || inputController.handleHistorySearchKey(searchStroke),
@@ -514,7 +582,7 @@ export function App(props: AppProps) {
     lastInputAt.current = Date.now();
     if (!submitPendingRef.current) inputController.handlePaste(text);
   }, {
-    isActive: !running && confirmQueue.length === 0 && screen === "prompt",
+    isActive: !running && confirmQueue.length === 0 && screen === "prompt" && !panel,
   });
 
   // ── 斜杠命令 ──────────────────────────────────────────────
@@ -551,29 +619,44 @@ export function App(props: AppProps) {
         return true;
       }
       case "/cost": {
-        const t = totals.current;
-        const cache =
-          t.cacheRead > 0 || t.cacheWrite > 0
-            ? `\n  缓存命中 ${t.cacheRead} / 写入 ${t.cacheWrite}`
-            : "";
-        info(`累计 tokens：输入 ${t.input} / 输出 ${t.output}${cache}`);
+        info(formatCostSummary(totals.current, Date.now() - sessionStartAt.current));
         return true;
       }
       case "/context": {
-        const { chars, percent } = engineRef.current!.contextUsage();
-        info(`上下文：${Math.round(chars / 1000)}k 字符（预算的 ${percent}%）`);
+        const usage = engineRef.current!.contextUsage();
+        info(renderContextUsage(usage, props.provider.model, columns));
         return true;
       }
       case "/sessions": {
-        const ids = await SessionStore.list();
+        const ids = await SessionStore.list(props.sessionDir);
         if (ids.length === 0) {
           info("暂无历史会话");
-        } else {
-          const lines = ids
-            .slice(0, 10)
-            .map((id) => `  ${id === sessionIdRef.current ? "▸" : " "} ${id}`);
-          info(lines.join("\n") + "\n恢复方式：npm start -- --resume <id>");
+          return true;
         }
+        openPanel(
+          "切换会话",
+          ids.map((sessionId) => ({
+            value: sessionId,
+            label: sessionId,
+            description: sessionId === sessionIdRef.current ? "当前" : undefined,
+          })),
+          (sessionId) => {
+            if (sessionId === sessionIdRef.current) return;
+            void (async () => {
+              try {
+                const history = await new SessionStore(sessionId, props.sessionDir).load();
+                sessionIdRef.current = sessionId;
+                engineRef.current = createEngine(sessionId, history);
+                const { percent } = engineRef.current.contextUsage();
+                setStatus((s) => ({ ...s, sessionId, contextPercent: percent }));
+                info(`已切换到会话 ${sessionId}（${history.length} 条消息）`, "green");
+              } catch (error) {
+                const detail = error instanceof Error ? error.message : String(error);
+                info(`切换会话失败：${detail}`, "red");
+              }
+            })();
+          },
+        );
         return true;
       }
       default:
@@ -846,6 +929,7 @@ export function App(props: AppProps) {
   const bottom = (
     <>
       {!transcriptMode &&
+        !panelController.view &&
         (permissionController.view ? null : (
           // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
           <Box
@@ -871,6 +955,11 @@ export function App(props: AppProps) {
           <Text dimColor>(shift+tab 循环)</Text>
         </Text>
       )}
+      {statusLineText && (
+        <Text dimColor wrap="truncate">
+          {statusLineText}
+        </Text>
+      )}
       <StatusBar status={status} />
     </>
   );
@@ -883,6 +972,8 @@ export function App(props: AppProps) {
       overlay={
         !transcriptMode && permissionController.view ? (
           <PermissionDialog view={permissionController.view} />
+        ) : !transcriptMode && panelController.view ? (
+          <Panel view={panelController.view} />
         ) : null
       }
       bottom={bottom}
