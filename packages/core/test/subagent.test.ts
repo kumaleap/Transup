@@ -59,6 +59,25 @@ describe("task 子 agent", () => {
     expect(tool.readOnly).toBe(true);
   });
 
+  it("真实 task 工具把子 agent 的工具调用透出为进度", async () => {
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{id: "s1", name: "list_dir", args: '{"path":"."}'}],
+      },
+      {content: "结论完成"},
+    ]);
+    const progress: string[] = [];
+
+    const result = await createTaskTool(provider).execute(
+      {description: "检查当前目录"},
+      (chunk) => progress.push(chunk),
+    );
+
+    expect(progress).toEqual(["→ list_dir .\n"]);
+    expect(result).toContain("结论完成");
+  });
+
   it("子任务超迭代上限 → 返回部分结论而非报错", async () => {
     const loop = Array.from({ length: 20 }, () => ({
       content: "还在找…", toolCalls: [{ id: `x${Math.random()}`, name: "list_dir", args: "{}" }],

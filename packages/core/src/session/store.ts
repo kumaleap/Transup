@@ -10,11 +10,15 @@
  *
  * 存储位置：<项目>/.transup/sessions/<sessionId>.jsonl
  */
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Message } from "../provider/types.js";
 
 const DEFAULT_DIR = ".transup/sessions";
+
+/** lite read 的读取窗口：会话列表标题只需要文件头，不值得全量 parse */
+const HEAD_BYTES = 65536;
+const TITLE_MAX = 60;
 
 export class SessionStore {
   readonly id: string;
@@ -67,6 +71,41 @@ export class SessionStore {
         .reverse();
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * 提取首条真实用户输入做会话列表标题（规格 07 §2.1 的 lite read：
+   * 只读文件头 64KB，长会话不全量 parse —— 列表页秒开的关键）。
+   * 跳过系统注入（[系统提示]…）；取首行、截断到 60 字符。
+   */
+  static async firstPrompt(id: string, dir: string = DEFAULT_DIR): Promise<string | null> {
+    let handle;
+    try {
+      handle = await open(join(dir, `${id}.jsonl`), "r");
+    } catch {
+      return null;
+    }
+    try {
+      const buffer = Buffer.alloc(HEAD_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0);
+      for (const line of buffer.subarray(0, bytesRead).toString("utf-8").split("\n")) {
+        if (!line.trim()) continue;
+        let message: Message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue; // 窗口边界截断的行 / 损坏行
+        }
+        if (message.role !== "user" || typeof message.content !== "string") continue;
+        const text = message.content.trim();
+        if (!text || text.startsWith("[系统提示]")) continue;
+        const first = text.split("\n")[0];
+        return first.length > TITLE_MAX ? first.slice(0, TITLE_MAX) + "…" : first;
+      }
+      return null;
+    } finally {
+      await handle.close();
     }
   }
 

@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
 import { SessionStore } from "../src/session/store.js";
@@ -88,5 +89,87 @@ describe("bash 流式输出", () => {
     const end = types.indexOf("tool_end");
     expect(start).toBeLessThan(progress);
     expect(progress).toBeLessThan(end);
+  });
+
+  it("并行只读调用各自缓冲进度，并按调用顺序输出事件", async () => {
+    let secondStarted = false;
+    let firstObservedSecond = false;
+    const first = {
+      name: "first_probe",
+      description: "first",
+      schema: z.object({}),
+      readOnly: true,
+      async execute(_args: object, onProgress?: (chunk: string) => void) {
+        onProgress?.("first-start\n");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        firstObservedSecond = secondStarted;
+        onProgress?.("first-end\n");
+        return "first-done";
+      },
+    };
+    const second = {
+      name: "second_probe",
+      description: "second",
+      schema: z.object({}),
+      readOnly: true,
+      async execute(_args: object, onProgress?: (chunk: string) => void) {
+        secondStarted = true;
+        onProgress?.("second-only\n");
+        return "second-done";
+      },
+    };
+    class ParallelProvider implements Provider {
+      readonly id = "mock";
+      readonly model = "m";
+      private step = 0;
+      async *stream(): AsyncIterable<ProviderEvent> {
+        if (this.step++ === 0) {
+          yield {
+            type: "message_done",
+            content: "",
+            toolCalls: [
+              {id: "t1", name: "first_probe", args: "{}"},
+              {id: "t2", name: "second_probe", args: "{}"},
+            ],
+          };
+        } else {
+          yield {type: "message_done", content: "完成", toolCalls: []};
+        }
+      }
+    }
+    const dir = await mkdtemp(join(tmpdir(), "transup-parallel-progress-"));
+    const engine = new AgentEngine({
+      provider: new ParallelProvider(),
+      canUseTool: allow,
+      session: new SessionStore("parallel", dir),
+      tools: [first, second],
+    });
+    const events: AgentEvent[] = [];
+    for await (const event of engine.runTurn("并行运行")) events.push(event);
+
+    expect(firstObservedSecond).toBe(true);
+    expect(
+      events
+        .filter((ev) =>
+          ev.type === "tool_start" ||
+          ev.type === "tool_progress" ||
+          ev.type === "tool_end",
+        )
+        .map((ev) => {
+          if (ev.type === "tool_start") return `start:${ev.call.id}`;
+          if (ev.type === "tool_progress") {
+            return `progress:${ev.call.id}:${ev.chunk.trim()}`;
+          }
+          return `end:${ev.call.id}`;
+        }),
+    ).toEqual([
+      "start:t1",
+      "progress:t1:first-start",
+      "progress:t1:first-end",
+      "end:t1",
+      "start:t2",
+      "progress:t2:second-only",
+      "end:t2",
+    ]);
   });
 });

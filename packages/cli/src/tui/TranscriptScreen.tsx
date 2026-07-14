@@ -75,6 +75,16 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
         </Box>
       );
     }
+    case "compact":
+      // 全文屏是唯一能看到压缩摘要正文的地方（主屏只有一行边界卡）
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text color={T.primary}>✻ 对话已在此处压缩，摘要如下：</Text>
+          <Box marginLeft={2}>
+            <Text dimColor>{item.summary}</Text>
+          </Box>
+        </Box>
+      );
     case "info":
     case "banner":
       return null; // 启动横幅与过程提示不是会话内容，全文里省掉

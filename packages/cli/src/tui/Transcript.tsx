@@ -36,7 +36,15 @@ export type TranscriptItem =
     }
   /** 结构化错误（API/系统/命令错误）：⎿ 缩进 + 红色（规格 §1.5） */
   | { id: number; kind: "error"; text: string }
-  | { id: number; kind: "info"; text: string; tone: "dim" | "green" | "yellow" | "red" };
+  | { id: number; kind: "info"; text: string; tone: "dim" | "green" | "yellow" | "red" }
+  | {
+      id: number;
+      kind: "compact";
+      beforeChars: number;
+      afterChars: number;
+      /** 摘要正文 —— 主屏只显示一行边界卡，全文屏（Ctrl+O）展开正文 */
+      summary: string;
+    };
 
 /**
  * 局部内联样式 —— 闭合码用 22/39 而非 0：嵌在外层 dim/颜色里不会把
@@ -312,6 +320,18 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
         <Box>
           <Text dimColor={item.tone === "dim"} color={toneColor}>
             {item.text}
+          </Text>
+        </Box>
+      );
+    }
+    case "compact": {
+      // 压缩边界卡：一行低调标记，完整摘要在全文屏（规格 07 §1.2 三段式的"事后"）
+      const kb = (n: number) => `${Math.round(n / 1000)}k`;
+      return (
+        <Box marginTop={1}>
+          <Text color={T.primary}>✻ </Text>
+          <Text dimColor>
+            对话已压缩（{kb(item.beforeChars)} → {kb(item.afterChars)} 字符）· Ctrl+O 查看完整摘要
           </Text>
         </Box>
       );

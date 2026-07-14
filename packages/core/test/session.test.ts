@@ -43,4 +43,19 @@ describe("SessionStore", () => {
     await new SessionStore("2026-06-30", dir).append({ role: "user", content: "b" });
     expect(await SessionStore.latestId(dir)).toBe("2026-06-30");
   });
+
+  it("firstPrompt：取首条真实用户输入，跳过系统注入，首行截断", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("s3", dir);
+    await s.append({ role: "user", content: "[系统提示] 对话历史已被压缩。" }); // 注入不算
+    await s.append({ role: "user", content: "帮我修登录页的 bug\n补充：报错在控制台" });
+    await s.append({ role: "assistant", content: "好" });
+    expect(await SessionStore.firstPrompt("s3", dir)).toBe("帮我修登录页的 bug");
+
+    const long = new SessionStore("s4", dir);
+    await long.append({ role: "user", content: "长".repeat(80) });
+    expect(await SessionStore.firstPrompt("s4", dir)).toBe("长".repeat(60) + "…");
+
+    expect(await SessionStore.firstPrompt("不存在", dir)).toBeNull();
+  });
 });
