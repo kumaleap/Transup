@@ -92,4 +92,24 @@ describe("trace replay renderer", () => {
     expect(text).toContain("[1] tool_end: list_dir ok README.md");
     expect(text).toContain("[1] turn_end: done");
   });
+
+  it("strips terminal controls from replayed provider events and metadata", () => {
+    const poison = "before\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7fafter";
+    const text = renderTrace([
+      {
+        version: 1,
+        timestamp: "2026-07-09T00:00:00.000Z",
+        sessionId: poison,
+        providerId: poison,
+        model: poison,
+        cwd: poison,
+        turn: 1,
+        event: { type: "text_delta", text: poison },
+      },
+    ]);
+
+    expect(text).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    expect(text).toContain("before");
+    expect(text).toContain("after");
+  });
 });

@@ -10,7 +10,7 @@
 import React from "react";
 import { relative, isAbsolute } from "node:path";
 import {Box, Text} from "./runtime/index.js";
-import { renderMarkdown } from "../highlight.js";
+import { renderMarkdown, sanitizeTerminalText } from "../highlight.js";
 import { T } from "../theme.js";
 import { Banner, type BannerInfo } from "./Banner.js";
 import { DOT, POINTER, RESULT_MARK } from "./figures.js";
@@ -60,15 +60,18 @@ export const inline = {
 const moreLines = (n: number) => inline.dim(`… +${n} 行`);
 
 export function formatArgs(args: Record<string, unknown>): string {
-  return Object.entries(args)
+  return sanitizeTerminalText(Object.entries(args)
     .map(([k, v]) => `${k}: ${JSON.stringify(v)}`)
     .join(", ")
-    .slice(0, 120);
+    .slice(0, 120), { preserveNewlines: false, preserveTabs: false });
 }
 
 /** 绝对路径尽量相对化（规格 §2.2 非 verbose 用 getDisplayPath 相对路径） */
 function displayPath(p: unknown): string {
-  const raw = String(p ?? "");
+  const raw = sanitizeTerminalText(String(p ?? ""), {
+    preserveNewlines: false,
+    preserveTabs: false,
+  });
   if (!raw) return raw;
   try {
     const rel = relative(process.cwd(), raw);
@@ -83,10 +86,11 @@ function displayPath(p: unknown): string {
 const CMD_MAX_LINES = 2;
 const CMD_MAX_CHARS = 160;
 function truncateCommand(cmd: string): string {
-  const lines = cmd.split("\n");
+  const safe = sanitizeTerminalText(cmd);
+  const lines = safe.split("\n");
   let out = lines.slice(0, CMD_MAX_LINES).join("\n");
   if (out.length > CMD_MAX_CHARS) out = out.slice(0, CMD_MAX_CHARS);
-  return out.length < cmd.length ? out + "…" : out;
+  return out.length < safe.length ? out + "…" : out;
 }
 
 /**
@@ -108,22 +112,39 @@ export function summarizeToolCall(
     case "write_file":
       return { displayName: "Create", argSummary: displayPath(args.path) };
     case "grep": {
-      const parts = [`pattern: ${JSON.stringify(String(args.pattern ?? ""))}`];
+      const safePattern = sanitizeTerminalText(String(args.pattern ?? ""));
+      const parts = [`pattern: ${JSON.stringify(safePattern)}`];
       if (args.path != null) parts.push(`path: ${JSON.stringify(displayPath(args.path))}`);
-      return { displayName: name, argSummary: parts.join(", ") };
+      return {
+        displayName: name,
+        argSummary: sanitizeTerminalText(parts.join(", "), {
+          preserveNewlines: false,
+          preserveTabs: false,
+        }),
+      };
     }
     default:
-      return { displayName: name, argSummary: formatArgs(args) };
+      return {
+        displayName: sanitizeTerminalText(name, {
+          preserveNewlines: false,
+          preserveTabs: false,
+        }),
+        argSummary: formatArgs(args),
+      };
   }
 }
 
-/** 工具结果 → 预览字符串（最多 3 行 + dim 的剩余行数） */
-export function previewResult(content: string, streamed: boolean): string {
+function previewSafeResult(content: string, streamed: boolean): string {
   const lines = content.split("\n");
   if (streamed) return `(已流式显示，共 ${lines.length} 行)`;
   // 只剩 1 行时直接显示，避免"… +1 行"的尴尬
   if (lines.length <= 4) return content;
   return `${lines.slice(0, 3).join("\n")}\n${moreLines(lines.length - 3)}`;
+}
+
+/** 工具结果 → 预览字符串（最多 3 行 + dim 的剩余行数） */
+export function previewResult(content: string, streamed: boolean): string {
+  return previewSafeResult(sanitizeTerminalText(content), streamed);
 }
 
 /** bash 输出里 [stderr] 起的块逐行标红（规格 §2.3：stderr 用 error 色） */
@@ -140,7 +161,8 @@ function colorBashStderr(content: string): string {
  * 拿不准的工具退回通用 3 行预览。
  */
 export function summarizeToolResult(name: string, content: string, streamed: boolean): string {
-  if (streamed) return previewResult(content, true);
+  content = sanitizeTerminalText(content);
+  if (streamed) return previewSafeResult(content, true);
   switch (name) {
     case "read_file": {
       // read_file 每行带行号返回；末尾可能挂一行分页提示，不计入行数
@@ -163,9 +185,9 @@ export function summarizeToolResult(name: string, content: string, streamed: boo
     }
     case "bash":
       if (content === "(命令执行成功，无输出)") return inline.dim("(无输出)");
-      return previewResult(colorBashStderr(content), false);
+      return previewSafeResult(colorBashStderr(content), false);
     default:
-      return previewResult(content, false);
+      return previewSafeResult(content, false);
   }
 }
 
@@ -176,7 +198,7 @@ export function summarizeToolResult(name: string, content: string, streamed: boo
  */
 const TOOL_ERROR_MAX_LINES = 10;
 export function formatToolError(content: string): string {
-  let text = content.replace(/<\/?(?:tool_use_error|error)>/g, "").trim();
+  let text = sanitizeTerminalText(content).replace(/<\/?(?:tool_use_error|error)>/g, "").trim();
   if (!/^error\b/i.test(text)) text = `Error: ${text}`;
   const lines = text.split("\n");
   if (lines.length <= TOOL_ERROR_MAX_LINES) return text;
@@ -190,6 +212,7 @@ export function formatToolError(content: string): string {
 /** API/系统错误截断（规格 §1.5）：非 verbose 截到 1000 字符加 … */
 const API_ERROR_MAX_CHARS = 1000;
 export function formatApiError(text: string): string {
+  text = sanitizeTerminalText(text);
   return text.length > API_ERROR_MAX_CHARS ? text.slice(0, API_ERROR_MAX_CHARS) + "…" : text;
 }
 
@@ -243,7 +266,8 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
       return <Banner info={item.info} />;
     case "user": {
       // 灰底整条 + subtle 的 ❯ 前缀（规格 §1.4）；前缀独立成列，正文折行悬挂对齐
-      const t = truncateUserText(item.text);
+      const safeText = sanitizeTerminalText(item.text);
+      const t = truncateUserText(safeText);
       return (
         <Box marginTop={1} paddingRight={1} backgroundColor={T.userMessageBg}>
           <Box flexShrink={0}>
@@ -257,7 +281,7 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
                 {t.tail}
               </Text>
             ) : (
-              <Text>{item.text}</Text>
+              <Text>{safeText}</Text>
             )}
           </Box>
         </Box>
@@ -271,7 +295,7 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
             <Text color={T.bashAccent}>! </Text>
           </Box>
           <Box flexGrow={1} flexShrink={1}>
-            <Text>{item.text}</Text>
+            <Text>{sanitizeTerminalText(item.text)}</Text>
           </Box>
         </Box>
       );
@@ -297,8 +321,17 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
             </Box>
             <Box flexGrow={1} flexShrink={1}>
               <Text wrap="truncate-end">
-                <Text bold>{item.name}</Text>
-                {item.argSummary ? <Text>({item.argSummary})</Text> : null}
+                <Text bold>
+                  {sanitizeTerminalText(item.name, {
+                    preserveNewlines: false,
+                    preserveTabs: false,
+                  })}
+                </Text>
+                {item.argSummary ? (
+                  <Text>
+                    ({sanitizeTerminalText(item.argSummary)})
+                  </Text>
+                ) : null}
               </Text>
             </Box>
           </Box>
@@ -311,7 +344,7 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
       );
     case "error":
       // 结构化错误：⎿ 缩进 + 红色（文案已由 formatToolError/formatApiError 规范化）
-      return <ResultLine color={T.danger}>{item.text}</ResultLine>;
+      return <ResultLine color={T.danger}>{sanitizeTerminalText(item.text)}</ResultLine>;
     case "info": {
       const toneColor = { green: T.success, yellow: T.warn, red: T.danger }[
         item.tone as "green" | "yellow" | "red"
@@ -319,7 +352,7 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
       return (
         <Box>
           <Text dimColor={item.tone === "dim"} color={toneColor}>
-            {item.text}
+            {sanitizeTerminalText(item.text)}
           </Text>
         </Box>
       );

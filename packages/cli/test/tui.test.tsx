@@ -1919,6 +1919,30 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("provider 流式文本和 Ctrl+O replay 共享终端控制净化边界", async () => {
+    const poison = "safe\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7f text";
+    const provider = new MockProvider([{ content: poison }]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("stream poison");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("safe"), { timeout: 3000 });
+
+    for (const frame of [lastFrame() ?? ""]) {
+      expect(frame).not.toContain("\x1b]52;");
+      expect(frame).not.toContain("\x1b[31m");
+      expect(frame).not.toMatch(/[\x7f-\x9f]/);
+    }
+
+    stdin.write("\x0f");
+    await flush();
+    const replay = lastFrame() ?? "";
+    expect(replay).not.toContain("\x1b]52;");
+    expect(replay).not.toContain("\x1b[31m");
+    expect(replay).not.toMatch(/[\x7f-\x9f]/);
+    unmount();
+  });
+
   it("中断后渲染 dim 提示行，已流出的部分文本固化进记录", async () => {
     const { stdin, lastFrame, unmount } = render(makeApp(new AbortableProvider()));
     await flush();
@@ -2471,6 +2495,54 @@ describe("TUI", {timeout: 30_000}, () => {
       timeout: 3000,
     });
     await vi.waitFor(() => expect(lastFrame()).toContain("结论出来了"), { timeout: 3000 });
+    unmount();
+  });
+
+  it("live grep 活动行的模型参数在 producer 处剥离 C1", async () => {
+    const poison = "before\x9b31m\x9d8;;evil\x9c\x7fafter";
+    const slowGrep = {
+      name: "grep",
+      description: "slow grep fixture",
+      schema: z.object({ pattern: z.string() }),
+      readOnly: true,
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return "done";
+      },
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "poisoned-grep", name: "grep", args: JSON.stringify({ pattern: poison }) },
+        ],
+      },
+      { content: "grep completed safely" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[...builtinTools, slowGrep]}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("run poisoned grep");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("grep(pattern:"), { timeout: 3000 });
+    const active = lastFrame() ?? "";
+    expect(active).not.toMatch(/[\x7f-\x9f]/);
+    expect(active).toContain("before");
+    expect(active).toContain("after");
+    await vi.waitFor(() => expect(lastFrame()).toContain("grep completed safely"), {
+      timeout: 3000,
+    });
     unmount();
   });
 

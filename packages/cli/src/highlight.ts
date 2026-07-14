@@ -9,6 +9,39 @@ import { color } from "./ui.js";
 // 表格对齐需要 CJK 感知的显示宽度，复用 banner 的实现（纯函数，无 TUI 依赖）
 import { displayWidth } from "./tui/banner-render.js";
 
+export interface TerminalTextOptions {
+  preserveNewlines?: boolean;
+  preserveTabs?: boolean;
+}
+
+/** Provider/tool prose boundary: remove C0/C1/DEL while preserving intentional layout only. */
+export function sanitizeTerminalText(
+  text: string,
+  options: TerminalTextOptions = {},
+): string {
+  const preserveNewlines = options.preserveNewlines ?? true;
+  const preserveTabs = options.preserveTabs ?? true;
+  let out = "";
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if (code <= 0x1f) {
+      if ((code === 0x0a && preserveNewlines) || (code === 0x09 && preserveTabs)) out += char;
+      continue;
+    }
+    if (code === 0x7f || (code >= 0x80 && code <= 0x9f)) continue;
+    out += char;
+  }
+  return out;
+}
+
+function hasTerminalControl(text: string): boolean {
+  for (const char of text) {
+    const code = char.codePointAt(0)!;
+    if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) return true;
+  }
+  return false;
+}
+
 // ── 语言定义 ────────────────────────────────────────────────
 interface LangDef {
   /** 单行注释前缀（正则片段） */
@@ -71,6 +104,7 @@ const LANGS: Record<string, LangDef> = {
 // 用占位符避免二次匹配污染（关键字正则不会命中已含 ANSI 码的片段，
 // 但字符串里的关键字会 —— 所以字符串先行）。
 export function highlightCodeLine(line: string, lang: LangDef): string {
+  line = sanitizeTerminalText(line, { preserveNewlines: false, preserveTabs: true });
   let comment = "";
   let code = line;
   if (lang.lineComment) {
@@ -120,6 +154,7 @@ function highlightKeywords(text: string, keywords: Set<string>): string {
 
 /** diff 行：+ 绿 / - 红 / @@ 青，其余原样 */
 export function highlightDiffLine(line: string): string {
+  line = sanitizeTerminalText(line, { preserveNewlines: false, preserveTabs: true });
   if (line.startsWith("+") && !line.startsWith("+++")) return color.green(line);
   if (line.startsWith("-") && !line.startsWith("---")) return color.red(line);
   if (line.startsWith("@@")) return color.cyan(line);
@@ -133,32 +168,57 @@ const BOLD_RE = /\*\*([^*\n]+)\*\*/g;
 const EM_STAR_RE = /\*([^\s*](?:[^*\n]*[^\s*])?)\*/g;
 // _em_：两侧必须不是单词字符，避免误伤 snake_case
 const EM_UNDERSCORE_RE = /(?<![\w_])_([^\s_](?:[^_\n]*[^\s_])?)_(?![\w_])/g;
-const LINK_RE = /\[([^\]\n]+)\]\(([^)\s]+)\)/g;
+const LINK_RE = /\[([^\n]*?)\]\(([^)\n]*)\)/g;
 const BARE_URL_RE = /https?:\/\/[^\s)\]>]+/g;
 const REPO_ISSUE_RE = /\b([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#(\d+)\b/g;
 
 /** OSC 8 终端超链接：现代终端可点击，不支持的终端只显示 text（转义序列零宽） */
-function hyperlink(url: string, text: string): string {
-  return `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+function safeHyperlinkDestination(raw: string): string | null {
+  if (!raw || /\s/.test(raw) || hasTerminalControl(raw)) return null;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  } catch {
+    return null;
+  }
+  return sanitizeTerminalText(raw, { preserveNewlines: false, preserveTabs: false });
+}
+
+function hyperlink(rawUrl: string, rawText: string): string {
+  const text = sanitizeTerminalText(rawText, { preserveNewlines: false, preserveTabs: false });
+  const url = safeHyperlinkDestination(rawUrl);
+  return url === null ? text : `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
 }
 
 /**
  * 行内元素渲染。三步走：
- * 1. codespan / 链接先摘成 \x00N\x00 占位符 —— 其内容不参与后续替换
+ * 1. codespan / 链接先摘成内部占位符 —— 其内容不参与后续替换
  *    （比如 URL 里的下划线不能被当成 _em_，OSC 8 里的 URL 不能被裸 URL 再包一层）
  * 2. bold → em（顺序重要：先消耗 ** 再匹配单 *）
  * 3. 占位符回填
  * 删除线 ~~ 特意不处理：模型常用 ~ 表约数（如 ~3s），按原样输出最不容易出错。
  */
 function renderInline(line: string): string {
+  const SLOT_OPEN = "\ue000";
+  const SLOT_CLOSE = "\ue001";
   const slots: string[] = [];
-  const stash = (s: string) => `\x00${slots.push(s) - 1}\x00`;
+  const stash = (s: string) => `${SLOT_OPEN}${slots.push(s) - 1}${SLOT_CLOSE}`;
+  line = line.replace(/[\ue000\ue001]/g, "�");
 
-  let s = line.replace(INLINE_CODE_RE, (_, code) => stash(color.cyan(code)));
+  let s = line.replace(INLINE_CODE_RE, (_, code) =>
+    stash(color.cyan(sanitizeTerminalText(code, { preserveNewlines: false, preserveTabs: true }))),
+  );
 
   s = s.replace(LINK_RE, (_, text: string, url: string) => {
     // mailto 剥成纯邮箱文本——终端里点邮件链接没有意义
-    if (url.startsWith("mailto:")) return stash(url.slice("mailto:".length));
+    if (url.startsWith("mailto:")) {
+      return stash(
+        sanitizeTerminalText(url.slice("mailto:".length), {
+          preserveNewlines: false,
+          preserveTabs: false,
+        }),
+      );
+    }
     // text 与 url 相同时效果一样，无需分支
     return stash(hyperlink(url, text));
   });
@@ -166,18 +226,25 @@ function renderInline(line: string): string {
     // 句尾标点不算 URL 的一部分（"见 https://x.com。" 的句号）
     const tail = url.match(/[.,;:!?、。，；]+$/)?.[0] ?? "";
     const clean = url.slice(0, url.length - tail.length);
-    return stash(hyperlink(clean, clean)) + tail;
+    return stash(hyperlink(clean, clean)) + sanitizeTerminalText(tail, {
+      preserveNewlines: false,
+      preserveTabs: false,
+    });
   });
   // owner/repo#123 → GitHub issue 超链接（显示文本不变）
   s = s.replace(REPO_ISSUE_RE, (m, repo, num) =>
     stash(hyperlink(`https://github.com/${repo}/issues/${num}`, m)),
   );
 
+  s = sanitizeTerminalText(s, { preserveNewlines: false, preserveTabs: true });
+
   s = s.replace(BOLD_RE, (_, t) => color.bold(t));
   s = s.replace(EM_STAR_RE, (_, t) => color.italic(t));
   s = s.replace(EM_UNDERSCORE_RE, (_, t) => color.italic(t));
 
-  return s.replace(/\x00(\d+)\x00/g, (_, i) => slots[Number(i)]);
+  return s.replace(new RegExp(`${SLOT_OPEN}(\\d+)${SLOT_CLOSE}`, "g"), (_, i) =>
+    slots[Number(i)] ?? "",
+  );
 }
 
 // ── Markdown：列表 ──────────────────────────────────────────
@@ -401,15 +468,27 @@ export function renderMarkdown(text: string): string {
       const tag = fence[1].toLowerCase();
       const isDiff = tag === "diff" || tag === "patch";
       const lang = LANGS[tag] ?? null;
-      const buf = [color.dim(line)];
+      const buf = [
+        color.dim(sanitizeTerminalText(line, { preserveNewlines: false, preserveTabs: true })),
+      ];
       i++;
       while (i < lines.length && !/^\s*```/.test(lines[i])) {
         const l = lines[i];
-        buf.push(isDiff ? highlightDiffLine(l) : lang ? highlightCodeLine(l, lang) : l);
+        buf.push(
+          isDiff
+            ? highlightDiffLine(l)
+            : lang
+              ? highlightCodeLine(l, lang)
+              : sanitizeTerminalText(l, { preserveNewlines: false, preserveTabs: true }),
+        );
         i++;
       }
       if (i < lines.length) {
-        buf.push(color.dim(lines[i]));
+        buf.push(
+          color.dim(
+            sanitizeTerminalText(lines[i], { preserveNewlines: false, preserveTabs: true }),
+          ),
+        );
         i++;
       }
       blocks.push(buf.join("\n"));

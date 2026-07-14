@@ -44,7 +44,7 @@ import {
 } from "@transup/core";
 import { T } from "../theme.js";
 import { expandFileRefs } from "../input.js";
-import { renderMarkdown } from "../highlight.js";
+import { renderMarkdown, sanitizeTerminalText } from "../highlight.js";
 import {
   DOT,
   ResultLine,
@@ -237,7 +237,7 @@ export function App(props: AppProps) {
 
   const info = useCallback(
     (text: string, tone: "dim" | "green" | "yellow" | "red" = "dim") =>
-      push({ kind: "info", text, tone }),
+      push({ kind: "info", text: sanitizeTerminalText(text), tone }),
     [push],
   );
 
@@ -410,7 +410,7 @@ export function App(props: AppProps) {
           kind: "compact",
           beforeChars: compactBeforeRef.current,
           afterChars: ev.afterChars,
-          summary: ev.summary,
+          summary: sanitizeTerminalText(ev.summary),
         });
       } else if (!ev.ok) {
         info("⟳ 压缩失败，已退回截断策略", "red");
@@ -803,7 +803,9 @@ export function App(props: AppProps) {
             if (tool) {
               stallTrackerRef.current?.observeProgress(Date.now());
               tool.streamed = true;
-              const lines = (tool.tail.join("\n") + ev.chunk).split("\n");
+              const lines = (
+                tool.tail.join("\n") + sanitizeTerminalText(ev.chunk)
+              ).split("\n");
               tool.tail = lines.slice(-TAIL_LINES);
               activeToolRef.current = tool;
               setActiveTool({ ...tool });
@@ -820,7 +822,7 @@ export function App(props: AppProps) {
               preview: ev.isError
                 ? formatToolError(ev.content)
                 : summarizeToolResult(ev.call.name, ev.content, streamed),
-              full: ev.content, // 主屏截断，Ctrl+O 全文屏要看未截断的原文
+              full: sanitizeTerminalText(ev.content), // Ctrl+O 展开的是净化后的完整原文
               isError: ev.isError,
             });
             tool = null;
@@ -841,7 +843,10 @@ export function App(props: AppProps) {
             stream = "";
             setStreamText("");
             info(
-              `⚠ 模型调用失败（${ev.error}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}…`,
+              `⚠ 模型调用失败（${sanitizeTerminalText(ev.error, {
+                preserveNewlines: false,
+                preserveTabs: false,
+              })}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}…`,
               "yellow",
             );
             break;
@@ -983,7 +988,9 @@ export function App(props: AppProps) {
                 <Box flexGrow={1} flexShrink={1}>
                   <Text wrap="truncate-end">
                     <Text bold>{activeTool.name}</Text>
-                    {activeTool.argSummary ? <Text>({activeTool.argSummary})</Text> : null}
+                    {activeTool.argSummary ? (
+                      <Text>({sanitizeTerminalText(activeTool.argSummary)})</Text>
+                    ) : null}
                   </Text>
                 </Box>
               </Box>

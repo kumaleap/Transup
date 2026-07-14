@@ -201,6 +201,59 @@ describe("renderMarkdown", () => {
     expect(out).not.toContain("\x1b[3m");
   });
 
+  it("普通 Markdown prose 剥离 C0/C1、OSC、CSI、BEL、ST 和 DEL", () => {
+    const attacks = [
+      "\x1b]52;c;YXR0YWNr\x07",
+      "\x1b]8;;https://evil.example\x1b\\label\x1b]8;;\x1b\\",
+      "\x1b[31m",
+      "\x07",
+      "\x9b31m",
+      "\x9d52;c;YXR0YWNr\x9c",
+      "\x1b\\",
+      "\x7f",
+    ];
+
+    for (const attack of attacks) {
+      const out = renderMarkdown(`before${attack}after`);
+      expect(out, JSON.stringify(attack)).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+      expect(out, JSON.stringify(attack)).toContain("before");
+      expect(out, JSON.stringify(attack)).toContain("after");
+    }
+    expect(renderMarkdown("a\tb\nc")).toBe("a\tb\nc");
+  });
+
+  it("链接标签与 OSC URI 独立净化，控制字符目的地保持 inert", () => {
+    const labelAttack = "bad\x1b]52;c;YXR0YWNr\x07label";
+    const safeLabelLink = renderMarkdown(`[${labelAttack}](https://safe.example/path)`);
+    expect(safeLabelLink).toContain(link("https://safe.example/path", "bad]52;c;YXR0YWNrlabel"));
+    expect(safeLabelLink).not.toContain("\x1b]52;");
+
+    for (const destination of [
+      "javascript:alert",
+      "file:///etc/passwd",
+      "./relative",
+      "https://",
+      "https://safe.example/\x1b]8;;https://evil.example\x07",
+      "https://safe.example/\x9d52;c;evil\x9c",
+    ]) {
+      const out = renderMarkdown(`[click](${destination})`);
+      expect(out, destination).not.toContain("\x1b]8;;");
+      expect(out, destination).toContain("click");
+    }
+  });
+
+  it("带控制字节的裸 URL 不生成 OSC，安全链接仍保留 Transup 的 OSC/ANSI", () => {
+    const poisoned = renderMarkdown("visit https://safe.example/\x1b]52;c;evil\x07 now");
+    expect(poisoned).not.toContain("\x1b]8;;");
+    expect(poisoned).not.toContain("\x1b]52;");
+
+    const safe = renderMarkdown("**bold** [safe](https://safe.example/a b)");
+    expect(safe).toContain("\x1b[1mbold\x1b[0m");
+    expect(safe).not.toContain("\x1b]8;;"); // 空格使 Markdown 目的地 malformed/inert
+    const linked = renderMarkdown("[safe](https://safe.example/path)");
+    expect(linked).toContain(link("https://safe.example/path", "safe"));
+  });
+
   // ── hr / 删除线 ──────────────────────────────────────────
   it("--- / *** / ___ 单独成行 → dim 的字面 ---", () => {
     for (const hr of ["---", "*****", "___"]) {

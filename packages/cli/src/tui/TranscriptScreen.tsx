@@ -15,7 +15,7 @@
 import React from "react";
 import { Box, Text } from "./runtime/index.js";
 import { T } from "../theme.js";
-import { renderMarkdown } from "../highlight.js";
+import { renderMarkdown, sanitizeTerminalText } from "../highlight.js";
 import { DOT, type TranscriptItem } from "./Transcript.js";
 
 export const MAX_ITEMS = 30;
@@ -33,7 +33,7 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
       return (
         <Box marginTop={1}>
           <Text dimColor>❯ </Text>
-          <Text>{item.text}</Text>
+          <Text>{sanitizeTerminalText(item.text)}</Text>
         </Box>
       );
     case "assistant":
@@ -49,7 +49,7 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
       );
     case "tool": {
       // full 是未截断的原始工具输出；老条目没有就退回预览
-      const raw = item.full ?? item.preview;
+      const raw = sanitizeTerminalText(item.full ?? item.preview);
       const { text, hidden } = expanded ? { text: raw, hidden: 0 } : clampLines(raw, MAX_TOOL_LINES);
       return (
         <Box flexDirection="column" marginTop={1}>
@@ -59,8 +59,17 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
             </Box>
             <Box flexGrow={1} flexShrink={1}>
               <Text>
-                <Text bold>{item.name}</Text>
-                {item.argSummary ? <Text>({item.argSummary})</Text> : null}
+                <Text bold>
+                  {sanitizeTerminalText(item.name, {
+                    preserveNewlines: false,
+                    preserveTabs: false,
+                  })}
+                </Text>
+                {item.argSummary ? (
+                  <Text>
+                    ({sanitizeTerminalText(item.argSummary)})
+                  </Text>
+                ) : null}
               </Text>
             </Box>
           </Box>
@@ -81,7 +90,7 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
         <Box flexDirection="column" marginTop={1}>
           <Text color={T.primary}>✻ 对话已在此处压缩，摘要如下：</Text>
           <Box marginLeft={2}>
-            <Text dimColor>{item.summary}</Text>
+            <Text dimColor>{sanitizeTerminalText(item.summary)}</Text>
           </Box>
         </Box>
       );

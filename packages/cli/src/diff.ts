@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { color } from "./ui.js";
 import { paint } from "./theme.js";
+import { sanitizeTerminalText } from "./highlight.js";
 
 const MAX_PREVIEW_LINES = 40;
 /** LCS 的 DP 规模上限，超过退化为整段删除+整段新增（预览语义不变） */
@@ -339,11 +340,13 @@ function startLineOf(path: string, oldStr: string): number {
 
 /** edit_file 的预览：行号 + 红删绿增（整行背景），头部统计增删行数 */
 export function renderEditPreview(args: Record<string, unknown>, width?: number): string {
-  const path = String(args.path ?? "");
-  const oldStr = String(args.old_string ?? "");
-  const newStr = String(args.new_string ?? "");
+  const rawPath = String(args.path ?? "");
+  const rawOldStr = String(args.old_string ?? "");
+  const path = sanitizeTerminalText(rawPath, { preserveNewlines: false, preserveTabs: false });
+  const oldStr = sanitizeTerminalText(rawOldStr);
+  const newStr = sanitizeTerminalText(String(args.new_string ?? ""));
 
-  const rows = diffRows(oldStr, newStr, startLineOf(path, oldStr));
+  const rows = diffRows(oldStr, newStr, startLineOf(rawPath, rawOldStr));
   const added = rows.filter((r) => r.kind === "add").length;
   const removed = rows.filter((r) => r.kind === "del").length;
 
@@ -361,16 +364,17 @@ export function renderEditPreview(args: Record<string, unknown>, width?: number)
 
 /** write_file 的预览：新建显示内容头部，覆盖则明确警告 */
 export function renderWritePreview(args: Record<string, unknown>, width?: number): string {
-  const path = String(args.path ?? "");
-  const content = String(args.content ?? "");
+  const rawPath = String(args.path ?? "");
+  const path = sanitizeTerminalText(rawPath, { preserveNewlines: false, preserveTabs: false });
+  const content = sanitizeTerminalText(String(args.content ?? ""));
   const lineCount = content.split("\n").length;
 
-  const overwriting = existsSync(path);
+  const overwriting = existsSync(rawPath);
   // 与 renderEditPreview 同款：统计数字 bold，dim 文案分段拼接
   const header = overwriting
     ? color.red(color.bold(`  ⚠ 覆盖已有文件 ${path}`)) +
       color.dim("（原文件 ") +
-      color.bold(String(readFileSync(path, "utf-8").split("\n").length)) +
+      color.bold(String(readFileSync(rawPath, "utf-8").split("\n").length)) +
       color.dim(" 行 → 新 ") +
       color.bold(String(lineCount)) +
       color.dim(" 行）")

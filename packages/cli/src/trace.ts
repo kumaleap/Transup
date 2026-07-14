@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentEvent } from "@transup/core";
+import { sanitizeTerminalText } from "./highlight.js";
 
 const DEFAULT_DIR = ".transup/traces";
 
@@ -91,7 +92,7 @@ export function renderTrace(entries: TraceEntry[]): string {
   for (const entry of entries) {
     lines.push(`[${entry.turn}] ${formatEvent(entry.event)}`);
   }
-  return lines.join("\n") + "\n";
+  return sanitizeTerminalText(lines.join("\n") + "\n");
 }
 
 export async function renderTraceFile(path: string): Promise<string> {

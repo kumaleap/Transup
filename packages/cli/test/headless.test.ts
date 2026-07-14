@@ -70,6 +70,15 @@ describe("headless 模式", () => {
     expect(err).toContain("⏺ list_dir");
   });
 
+  it("provider headless 输出剥离终端控制字节并保留换行与 tab", async () => {
+    const poison = "before\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7fafter\n\tline";
+    const { out } = await run(new MockProvider([{ content: poison }]));
+
+    expect(out).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    expect(out).toContain("before");
+    expect(out).toContain("after\n\tline");
+  });
+
   it("写操作默认拒绝（fail-closed），拒绝原因喂回模型", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-headless-deny-"));
     const target = join(dir, "no.txt");

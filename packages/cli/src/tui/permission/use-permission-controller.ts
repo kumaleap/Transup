@@ -145,7 +145,9 @@ export function usePermissionController(
       return true;
     }
     if (stroke.name === "tab") {
-      if (focused.input) setEditing({ type: "input", value: focused.input.value });
+      if (focused.input) {
+        setEditing({ type: "input", value: focused.input.displayValue ?? focused.input.value });
+      }
       else if (focused.feedbackPlaceholder) setEditing({ type: "feedback", value: "" });
       return true;
     }

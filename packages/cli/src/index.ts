@@ -40,6 +40,7 @@ import { TraceRecorder, renderTraceFile } from "./trace.js";
 import { runDogfood } from "./dogfood.js";
 import { ensureProviderConfigured } from "./setup.js";
 import { prepareWorkspaceStartup } from "./workspace-startup.js";
+import { sanitizeTerminalText } from "./highlight.js";
 
 // 从 cwd 向上逐级找最近的 .env 再加载。
 // 关键：`npm start -w transup` 会把 cwd 切到 packages/cli，直接读 "./.env"
@@ -107,10 +108,20 @@ if (flag("--version") || flag("-v")) {
 if (argv[0] === "trust") {
   try {
     const workspace = await trustWorkspace(process.cwd());
-    console.log(`已信任工作区：${workspace}`);
+    console.log(
+      `已信任工作区：${sanitizeTerminalText(workspace, {
+        preserveNewlines: false,
+        preserveTabs: false,
+      })}`,
+    );
     process.exit(0);
   } catch (error) {
-    console.error(`无法信任当前工作区：${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `无法信任当前工作区：${sanitizeTerminalText(
+        error instanceof Error ? error.message : String(error),
+        { preserveNewlines: false, preserveTabs: false },
+      )}`,
+    );
     process.exit(1);
   }
 }
@@ -223,7 +234,15 @@ const provider = createProvider();
 const projectContext = await buildProjectContext(process.cwd());
 const { settings, mcp } = await prepareWorkspaceStartup({
   onMcpError: (name, err) => {
-    console.error(color.red(`MCP server "${name}" 连接失败：${err.message}（已跳过）`));
+    const safeName = sanitizeTerminalText(name, {
+      preserveNewlines: false,
+      preserveTabs: false,
+    });
+    const safeMessage = sanitizeTerminalText(err.message, {
+      preserveNewlines: false,
+      preserveTabs: false,
+    });
+    console.error(color.red(`MCP server "${safeName}" 连接失败：${safeMessage}（已跳过）`));
   },
 });
 const tools: Tool[] = [...builtinTools, createTaskTool(provider), ...mcp.tools];

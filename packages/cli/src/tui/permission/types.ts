@@ -35,7 +35,10 @@ export interface PermissionOption {
   feedbackPlaceholder?: string;
   /** 可编辑预填值（bash "不再询问"前缀）；Enter 以当前值提交 */
   input?: {
+    /** 语义原值；直选时用于生成权限规则，不因显示净化而改变。 */
     value: string;
+    /** 安全显示副本；进入编辑后从这个值开始。 */
+    displayValue?: string;
     buildUpdates: (value: string) => PermissionUpdate[];
   };
   /** Shift+Tab 直选此项（会话级选项约定） */

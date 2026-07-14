@@ -28,6 +28,7 @@ import {
   type Tool,
 } from "@transup/core";
 import { formatArgs } from "./tui/Transcript.js";
+import { sanitizeTerminalText } from "./highlight.js";
 
 export interface HeadlessOptions {
   provider: Provider;
@@ -65,10 +66,18 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       );
       if (verdict.behavior === "allow") return { behavior: "allow" };
       if (verdict.behavior === "deny") {
-        err(`⊘ 已拒绝 ${name}（权限规则禁止）\n`);
+        const safeName = sanitizeTerminalText(name, {
+          preserveNewlines: false,
+          preserveTabs: false,
+        });
+        err(`⊘ 已拒绝 ${safeName}（权限规则禁止）\n`);
         return { behavior: "deny", message: verdict.message };
       }
-      err(`⊘ 已拒绝写操作 ${name}（headless 模式需要 settings 允许清单或 --allow-all）\n`);
+      const safeName = sanitizeTerminalText(name, {
+        preserveNewlines: false,
+        preserveTabs: false,
+      });
+      err(`⊘ 已拒绝写操作 ${safeName}（headless 模式需要 settings 允许清单或 --allow-all）\n`);
       return { behavior: "deny" };
     },
     session: new SessionStore(opts.sessionId, opts.sessionDir),
@@ -83,16 +92,23 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       await opts.trace?.record(ev);
       switch (ev.type) {
         case "text_delta":
-          out(ev.text);
+          out(sanitizeTerminalText(ev.text));
           break;
         case "tool_start":
-          err(`⏺ ${ev.call.name}(${formatArgs(ev.parsedArgs)})\n`);
+          err(
+            `⏺ ${sanitizeTerminalText(ev.call.name, { preserveNewlines: false, preserveTabs: false })}(${formatArgs(ev.parsedArgs)})\n`,
+          );
           break;
         case "tool_end":
           if (ev.isError) err(`  ✗ ${firstLine(ev.content)}\n`);
           break;
         case "stream_retry":
-          err(`⚠ 模型调用失败（${ev.error}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}\n`);
+          err(
+            `⚠ 模型调用失败（${sanitizeTerminalText(ev.error, {
+              preserveNewlines: false,
+              preserveTabs: false,
+            })}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}\n`,
+          );
           break;
         case "auto_continue":
           err(ev.reason === "truncated" ? "⟳ 输出被截断，自动续跑\n" : "⟳ 空回复，自动催跑\n");
@@ -109,7 +125,12 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       }
     }
   } catch (e) {
-    err(`✗ API 错误: ${e instanceof Error ? e.message : String(e)}\n`);
+    err(
+      `✗ API 错误: ${sanitizeTerminalText(e instanceof Error ? e.message : String(e), {
+        preserveNewlines: false,
+        preserveTabs: false,
+      })}\n`,
+    );
     exitCode = 1;
   }
   out("\n");
@@ -117,6 +138,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 }
 
 function firstLine(s: string): string {
-  const line = s.split("\n")[0];
+  const line = sanitizeTerminalText(s).split("\n")[0];
   return line.length > 120 ? line.slice(0, 120) + "…" : line;
 }

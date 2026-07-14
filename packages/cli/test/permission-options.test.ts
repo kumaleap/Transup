@@ -235,4 +235,32 @@ describe("buildPermissionView", () => {
       },
     ]);
   });
+
+  it("权限对话框在添加 ANSI 前净化模型控制的命令、diff、路径、工具名和参数", () => {
+    const poison = "before\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7fafter";
+    const views = [
+      buildPermissionView(confirmOf("bash", { command: `echo ${poison}` })),
+      buildPermissionView(
+        confirmOf("write_file", { path: `${poison}.txt`, content: `content ${poison}` }),
+      ),
+      buildPermissionView(confirmOf(`mcp__external__${poison}`, { value: poison })),
+    ];
+
+    for (const view of views) {
+      const rendered = [
+        view.title,
+        view.subtitle ?? "",
+        view.preview,
+        view.question,
+        ...view.options.map(
+          (option) => `${option.label}${option.input?.displayValue ?? option.input?.value ?? ""}`,
+        ),
+      ].join("\n");
+      expect(rendered).not.toContain("\x1b]52;");
+      expect(rendered).not.toContain("\x1b[31m");
+      expect(rendered).not.toMatch(/[\x7f-\x9f]/);
+      expect(rendered).toContain("before");
+      expect(rendered).toContain("after");
+    }
+  });
 });

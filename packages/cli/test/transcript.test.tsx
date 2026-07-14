@@ -20,6 +20,12 @@ import {
   DOT,
   POINTER,
 } from "../src/tui/Transcript.js";
+import { TranscriptScreen } from "../src/tui/TranscriptScreen.js";
+
+const OSC52 = "\x1b]52;c;YXR0YWNr\x07";
+const OSC8_ATTACK = "\x1b]8;;https://evil.example\x1b\\click\x1b]8;;\x1b\\";
+const CSI = "\x1b[31m";
+const C1 = "\x9b31m\x9d52;c;evil\x9c";
 
 const view = (item: Parameters<typeof TranscriptItemView>[0]["item"]) => {
   const r = render(<TranscriptItemView item={item} />);
@@ -196,6 +202,75 @@ describe("formatToolError / formatApiError（规格 §1.5）", () => {
     expect(out).toBe("x".repeat(1000) + "…");
     expect(formatApiError("short")).toBe("short");
   });
+
+  it("工具结果与错误在添加 Transup 样式前剥离终端控制字节", () => {
+    const poison = `before${OSC52}${OSC8_ATTACK}${CSI}${C1}\x7fafter`;
+    for (const out of [
+      summarizeToolResult("bash", poison, false),
+      formatToolError(poison),
+      formatApiError(poison),
+    ]) {
+      expect(out).not.toContain("\x1b]52;");
+      expect(out).not.toContain("\x1b]8;;https://evil.example");
+      expect(out).not.toContain("\x1b[31m");
+      expect(out).not.toMatch(/[\x7f-\x9f]/);
+      expect(out).toContain("before");
+      expect(out).toContain("after");
+    }
+  });
+});
+
+describe("terminal-safe transcript data", () => {
+  it("工具调用参数摘要剥离非 Markdown 控制序列", () => {
+    const poison = `echo before${OSC52}${CSI}${C1}\x7fafter`;
+    const summary = summarizeToolCall("bash", { command: poison });
+    expect(summary.argSummary).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+    expect(summary.argSummary).toContain("before");
+    expect(summary.argSummary).toContain("after");
+  });
+
+  it("grep 与未知工具的 live 参数摘要在 producer 处净化 C1", () => {
+    const poison = `before${C1}\x7fafter`;
+    for (const summary of [
+      summarizeToolCall("grep", { pattern: poison, path: poison }),
+      summarizeToolCall("mcp__external__tool", { value: poison }),
+    ]) {
+      expect(summary.displayName).not.toMatch(/[\x7f-\x9f]/);
+      expect(summary.argSummary).not.toMatch(/[\x7f-\x9f]/);
+      expect(summary.argSummary).toContain("before");
+      expect(summary.argSummary).toContain("after");
+    }
+  });
+
+  it("Ctrl+O transcript replay 净化完整工具输出与 compact 摘要", () => {
+    const poison = `before${OSC52}${OSC8_ATTACK}${CSI}${C1}\x7fafter`;
+    const rendered = render(
+      <TranscriptScreen
+        expanded
+        items={[
+          {
+            id: 1,
+            kind: "tool",
+            name: "external",
+            argSummary: poison,
+            preview: poison,
+            full: poison,
+            isError: false,
+          },
+          { id: 2, kind: "compact", beforeChars: 100, afterChars: 50, summary: poison },
+        ]}
+      />,
+    );
+    const frame = rendered.lastFrame() ?? "";
+    rendered.unmount();
+
+    expect(frame).not.toContain("\x1b]52;");
+    expect(frame).not.toContain("\x1b]8;;https://evil.example");
+    expect(frame).not.toContain("\x1b[31m");
+    expect(frame).not.toMatch(/[\x7f-\x9f]/);
+    expect(frame).toContain("before");
+    expect(frame).toContain("after");
+  });
 });
 
 describe("TranscriptItemView", () => {
@@ -220,6 +295,18 @@ describe("TranscriptItemView", () => {
   it("assistant 消息：⏺ 占 2 列 gutter", () => {
     const frame = view({ id: 1, kind: "assistant", text: "world" });
     expect(frame).toContain(`${DOT} world`);
+  });
+
+  it("assistant Markdown 的非链接终端控制序列不会进入 transcript", () => {
+    const frame = view({
+      id: 1,
+      kind: "assistant",
+      text: `before${OSC52}${OSC8_ATTACK}${CSI}${C1}\x7fafter`,
+    });
+    expect(frame).not.toContain("\x1b]52;");
+    expect(frame).not.toContain("\x1b]8;;https://evil.example");
+    expect(frame).not.toContain("\x1b[31m");
+    expect(frame).not.toMatch(/[\x7f-\x9f]/);
   });
 
   it("工具行：⏺ + 工具名(参数摘要)", () => {
