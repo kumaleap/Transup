@@ -12,10 +12,10 @@ import React from "react";
 import { z } from "zod";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
+import type { Message, Provider, ProviderEvent, Settings, ToolCall } from "@transup/core";
 import { builtinTools } from "@transup/core";
 import * as transupCore from "@transup/core";
 import { App } from "../src/tui/App.js";
@@ -229,6 +229,53 @@ function makeApp(provider: Provider, historyPath = newHistoryPath()) {
       historyPath={historyPath}
     />
   );
+}
+
+async function runPlanAuthorizationScenario(
+  toolCall: ToolCall,
+  settings: Settings,
+  dialogTitle: string,
+): Promise<{ confirmationShown: boolean; toolResult: string }> {
+  const provider = new MockProvider([
+    { content: "", toolCalls: [toolCall] },
+    { content: "plan authorization stayed closed" },
+  ]);
+  const instance = render(
+    <App
+      provider={provider}
+      projectContext=""
+      tools={builtinTools}
+      settings={settings}
+      initialSessionId={`tui-plan-${Math.random().toString(36).slice(2)}`}
+      initialHistory={[]}
+      mcpToolCount={0}
+      sessionDir={sessionDir}
+      historyPath={newHistoryPath()}
+    />,
+  );
+
+  try {
+    await flush();
+    instance.stdin.write("test plan authorization");
+    instance.stdin.write("\r");
+    await vi.waitFor(() => {
+      const frame = instance.lastFrame() ?? "";
+      expect(frame.includes(dialogTitle) || frame.includes("plan authorization stayed closed")).toBe(
+        true,
+      );
+    }, { timeout: 3000 });
+
+    const confirmationShown = (instance.lastFrame() ?? "").includes(dialogTitle);
+    if (confirmationShown) instance.stdin.write("1");
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).toContain("plan authorization stayed closed"),
+      { timeout: 3000 },
+    );
+    const toolResult = provider.requests[1]?.find((message) => message.role === "tool")?.content ?? "";
+    return { confirmationShown, toolResult };
+  } finally {
+    instance.unmount();
+  }
 }
 
 const flush = (ms = 150) => new Promise((r) => setTimeout(r, ms));
@@ -1628,6 +1675,125 @@ describe("TUI", {timeout: 30_000}, () => {
     frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(frame).toContain("plan 模式");
     unmount();
+  });
+
+  it("plan 模式下显式 ask 的写操作不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-ask-"));
+    const target = join(dir, "asked.txt").replace(/\\/g, "/");
+    const result = await runPlanAuthorizationScenario(
+      {
+        id: "plan-ask",
+        name: "write_file",
+        args: JSON.stringify({ path: target, content: "forbidden" }),
+      },
+      { permissions: { ask: ["write_file"], defaultMode: "plan" } },
+      "创建文件",
+    );
+
+    expect(existsSync(target)).toBe(false);
+    expect(result.confirmationShown).toBe(false);
+    expect(result.toolResult).toContain("plan 模式");
+  });
+
+  it("过期确认不能覆盖确认期间出现的 plan deny", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-stale-confirm-"));
+    const target = join(dir, "stale.txt").replace(/\\/g, "/");
+    const evaluateSpy = vi
+      .spyOn(transupCore, "evaluatePermission")
+      .mockReturnValueOnce({ behavior: "ask", reason: { type: "default" } })
+      .mockReturnValue({
+        behavior: "deny",
+        reason: { type: "mode", mode: "plan" },
+        message: "当前处于 plan 模式，不能执行写操作。",
+      });
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "plan-stale",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "forbidden" }),
+          },
+        ],
+      },
+      { content: "stale confirmation stayed closed" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("test stale confirmation");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      instance.stdin.write("1");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("stale confirmation stayed closed"),
+        { timeout: 3000 },
+      );
+
+      expect(existsSync(target)).toBe(false);
+      expect(evaluateSpy).toHaveBeenCalledTimes(2);
+      const toolResult = provider.requests[1]?.find((message) => message.role === "tool");
+      expect(toolResult?.content).toContain("plan 模式");
+    } finally {
+      instance.unmount();
+      evaluateSpy.mockRestore();
+    }
+  });
+
+  it("plan 模式下敏感路径写入不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-sensitive-"));
+    const gitDir = join(dir, ".git");
+    const target = join(gitDir, "config").replace(/\\/g, "/");
+    mkdirSync(gitDir);
+    const result = await runPlanAuthorizationScenario(
+      {
+        id: "plan-sensitive",
+        name: "write_file",
+        args: JSON.stringify({ path: target, content: "forbidden" }),
+      },
+      { permissions: { defaultMode: "plan" } },
+      "创建文件",
+    );
+
+    expect(existsSync(target)).toBe(false);
+    expect(result.confirmationShown).toBe(false);
+    expect(result.toolResult).toContain("plan 模式");
+  });
+
+  it("plan 模式下解释器和 shell expansion Bash 不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-bash-"));
+    const cases = [
+      {
+        id: "plan-interpreter",
+        marker: join(dir, "interpreter-ran"),
+        command(marker: string) {
+          const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x")`;
+          return `node -e ${JSON.stringify(script)}`;
+        },
+      },
+      {
+        id: "plan-expansion",
+        marker: join(dir, "expansion-ran"),
+        command: (marker: string) => `echo $(touch ${JSON.stringify(marker)})`,
+      },
+    ];
+
+    for (const entry of cases) {
+      const result = await runPlanAuthorizationScenario(
+        {
+          id: entry.id,
+          name: "bash",
+          args: JSON.stringify({ command: entry.command(entry.marker) }),
+        },
+        { permissions: { defaultMode: "plan" } },
+        "Bash 命令",
+      );
+      expect(existsSync(entry.marker), entry.id).toBe(false);
+      expect(result.confirmationShown, entry.id).toBe(false);
+      expect(result.toolResult, entry.id).toContain("plan 模式");
+    }
   });
 
   it("并发只读询问进队列：逐个确认，显示排队数", async () => {

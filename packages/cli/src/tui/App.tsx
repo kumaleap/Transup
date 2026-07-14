@@ -299,11 +299,12 @@ export function App(props: AppProps) {
       args: Record<string, unknown>,
       meta: { readOnly: boolean },
     ): Promise<PermissionDecision> => {
-      const verdict = evaluatePermission(permissionContext(), {
+      const query = {
         toolName: name,
         args,
         readOnly: meta.readOnly,
-      });
+      };
+      const verdict = evaluatePermission(permissionContext(), query);
       if (verdict.behavior === "allow") return { behavior: "allow" };
       if (verdict.behavior === "deny") return { behavior: "deny", message: verdict.message };
 
@@ -333,6 +334,10 @@ export function App(props: AppProps) {
             ? `用户拒绝了本次操作，并要求：${outcome.feedback}`
             : undefined,
         };
+      }
+      const currentVerdict = evaluatePermission(permissionContext(), query);
+      if (currentVerdict.behavior === "deny") {
+        return { behavior: "deny", message: currentVerdict.message };
       }
       try {
         await applyPermissionUpdates(outcome.updates);

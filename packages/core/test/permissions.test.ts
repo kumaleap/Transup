@@ -645,6 +645,49 @@ describe("evaluatePermission 优先级", () => {
     expect(evaluatePermission(ctx({ mode: "plan" }), read("src/a.ts")).behavior).toBe("allow");
   });
 
+  it("plan 模式在 ask、敏感写入和不安全 Bash 之前拒绝全部非只读调用", () => {
+    const cases = [
+      {
+        label: "explicit ask",
+        context: ctx({ mode: "plan", rules: rules({ ask: ["edit_file"] }) }),
+        query: edit("src/a.ts"),
+      },
+      {
+        label: "sensitive write",
+        context: ctx({ mode: "plan" }),
+        query: edit(".git/config"),
+      },
+      {
+        label: "interpreter",
+        context: ctx({ mode: "plan" }),
+        query: bash("node -e 'console.log(1)'"),
+      },
+      {
+        label: "shell expansion",
+        context: ctx({ mode: "plan" }),
+        query: bash('echo "$TARGET"'),
+      },
+    ];
+
+    for (const { label, context, query } of cases) {
+      const verdict = evaluatePermission(context, query);
+      expect(verdict.behavior, label).toBe("deny");
+      expect(verdict.reason, label).toEqual({ type: "mode", mode: "plan" });
+    }
+
+    const denyFirst = evaluatePermission(
+      ctx({ mode: "plan", rules: rules({ deny: ["edit_file"], ask: ["edit_file"] }) }),
+      edit("src/a.ts"),
+    );
+    expect(denyFirst.reason).toEqual({ type: "rule", rule: "edit_file", list: "deny" });
+    expect(
+      evaluatePermission(
+        ctx({ mode: "plan", rules: rules({ ask: ["read_file"] }) }),
+        read("src/a.ts"),
+      ).behavior,
+    ).toBe("ask");
+  });
+
   it("acceptEdits：文件编辑放行，bash 仍询问", () => {
     expect(evaluatePermission(ctx({ mode: "acceptEdits" }), edit("src/a.ts")).behavior).toBe("allow");
     expect(evaluatePermission(ctx({ mode: "acceptEdits" }), bash("make build")).behavior).toBe("ask");

@@ -6,9 +6,9 @@ import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } fr
  *
  * 判定优先级（先命中先返回，对齐交互规格 04 §1.1）：
  *   1. deny 规则        —— 禁止就是禁止，任何模式都翻不了案
- *   2. ask 规则         —— 显式要求确认的调用，bypass 模式也不能跳过
- *   3. safetyCheck      —— 敏感路径（.git/ .transup/ shell 配置）写操作必须弹窗，bypass 免疫
- *   4. plan 模式        —— 只读放行、写操作拒绝（先给计划，批准后再动手）
+ *   2. plan 模式        —— 只读继续判定、写操作拒绝（先给计划，批准后再动手）
+ *   3. ask 规则         —— 显式要求确认的调用，bypass 模式也不能跳过
+ *   4. safetyCheck      —— 敏感路径（.git/ .transup/ shell 配置）写操作必须弹窗，bypass 免疫
  *   5. 模式放行         —— bypassPermissions 全放；acceptEdits 放文件编辑
  *   6. allow 规则       —— 用户攒下的"不再询问"
  *   7. readOnly 放行    —— 只读工具免确认（fail-closed：readOnly 必须显式声明）
@@ -750,6 +750,15 @@ export function evaluatePermission(
     };
   }
 
+  if (ctx.mode === "plan" && !readOnly) {
+    return {
+      behavior: "deny",
+      reason: { type: "mode", mode: "plan" },
+      message:
+        "当前处于 plan 模式：先只读地调研并给出完整计划，待用户批准后才能执行写操作。",
+    };
+  }
+
   const askRule = findMatch(ctx.rules.ask, toolName, args, "ask");
   if (askRule) {
     return { behavior: "ask", reason: { type: "rule", rule: askRule, list: "ask" } };
@@ -760,15 +769,6 @@ export function evaluatePermission(
     if (sensitive) {
       return { behavior: "ask", reason: { type: "safety", path: sensitive } };
     }
-  }
-
-  if (ctx.mode === "plan" && !readOnly) {
-    return {
-      behavior: "deny",
-      reason: { type: "mode", mode: "plan" },
-      message:
-        "当前处于 plan 模式：先只读地调研并给出完整计划，待用户批准后才能执行写操作。",
-    };
   }
 
   if (
