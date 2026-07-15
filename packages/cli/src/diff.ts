@@ -6,7 +6,7 @@
  * 1 空格 + 符号(+/-/空格) + 代码，增删行整行铺深绿/深红背景，
  * 未变化行作为上下文原样穿插。diff 本身用 LCS 按行对齐，不引入库。
  */
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { color } from "./ui.js";
 import { paint } from "./theme.js";
 import { escapeTerminalControls } from "./highlight.js";
@@ -335,16 +335,31 @@ type PreviewSource =
   | { kind: "file"; text: string };
 
 function readPreviewSource(path: string): PreviewSource {
+  let fd: number | undefined;
   try {
-    const stat = statSync(path);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
     if (!stat.isFile()) return { kind: "non-file" };
     if (stat.size > MAX_PREVIEW_SOURCE_BYTES) return { kind: "too-large" };
-    return { kind: "file", text: readFileSync(path, "utf-8") };
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = readSync(fd, buffer, offset, buffer.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return { kind: "file", text: buffer.subarray(0, offset).toString("utf-8") };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ENOENT" || code === "ENOTDIR"
       ? { kind: "missing" }
       : { kind: "unreadable" };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
   }
 }
 

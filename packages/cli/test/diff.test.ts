@@ -152,6 +152,19 @@ describe("renderEditPreview", () => {
     expect(plain).toContain("same\\x01");
     expect(plain).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/);
   });
+
+  it("keeps raw controls distinct from literal backslash escape text", () => {
+    const out = stripAnsi(
+      renderEditPreview(
+        { path: "/n.ts", old_string: "same\x07", new_string: "same\\x07" },
+        60,
+      ),
+    );
+
+    expect(out).toContain("（+1 行，-1 行）");
+    expect(out).toContain("same\\x07");
+    expect(out).toContain("same\\\\x07");
+  });
 });
 
 describe("renderWritePreview", () => {

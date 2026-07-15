@@ -48,6 +48,8 @@ export function escapeTerminalControls(
       out += char;
     } else if (code === 0x09 && preserveTabs) {
       out += char;
+    } else if (char === "\\") {
+      out += "\\\\";
     } else if (code <= 0x1f || code === 0x7f || (code >= 0x80 && code <= 0x9f)) {
       out += `\\x${code.toString(16).padStart(2, "0")}`;
     } else {
