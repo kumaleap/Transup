@@ -146,6 +146,10 @@ function newSessionId(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+function emptyPermissionRules(): PermissionRules {
+  return { allow: [], deny: [], ask: [] };
+}
+
 interface ActiveTool {
   name: string;
   argSummary: string;
@@ -180,9 +184,8 @@ export function App(props: AppProps) {
   const [sessionSwitching, setSessionSwitching] = useState<string | null>(null);
   const sessionSwitchPendingRef = useRef(false);
   const mountedRef = useRef(true);
-  const [permissionMode, setPermissionModeState] = useState<PermissionMode>(
-    props.settings.permissions?.defaultMode ?? "default",
-  );
+  const configuredPermissionMode = props.settings.permissions?.defaultMode ?? "default";
+  const [permissionMode, setPermissionModeState] = useState<PermissionMode>(configuredPermissionMode);
   const [running, setRunning] = useState(false);
   const [compacting, setCompacting] = useState(false);
   // 每轮开始时随机取一次的 spinner 动词（turn 内不轮换）
@@ -206,7 +209,8 @@ export function App(props: AppProps) {
   const confirmQueueRef = useRef<ToolUseConfirm[]>([]);
   const confirmIdRef = useRef(0);
   const permissionModeRef = useRef(permissionMode);
-  const sessionRulesRef = useRef<PermissionRules>({ allow: [], deny: [], ask: [] });
+  const sessionRulesRef = useRef<PermissionRules>(emptyPermissionRules());
+  const persistedRulesRef = useRef<PermissionRules>(emptyPermissionRules());
   const baseRulesRef = useRef(settingsRules(props.settings));
   // bypass 不进循环，除非 settings 显式声明（对齐"启动时声明才可用"约定）
   const bypassAvailable = props.settings.permissions?.defaultMode === "bypassPermissions";
@@ -257,9 +261,21 @@ export function App(props: AppProps) {
   const permissionContext = () => ({
     mode: permissionModeRef.current,
     rules: {
-      allow: [...baseRulesRef.current.allow, ...sessionRulesRef.current.allow],
-      deny: [...baseRulesRef.current.deny, ...sessionRulesRef.current.deny],
-      ask: [...baseRulesRef.current.ask, ...sessionRulesRef.current.ask],
+      allow: [
+        ...baseRulesRef.current.allow,
+        ...persistedRulesRef.current.allow,
+        ...sessionRulesRef.current.allow,
+      ],
+      deny: [
+        ...baseRulesRef.current.deny,
+        ...persistedRulesRef.current.deny,
+        ...sessionRulesRef.current.deny,
+      ],
+      ask: [
+        ...baseRulesRef.current.ask,
+        ...persistedRulesRef.current.ask,
+        ...sessionRulesRef.current.ask,
+      ],
     },
   });
 
@@ -281,6 +297,11 @@ export function App(props: AppProps) {
     recheckConfirmQueue();
   };
 
+  const resetSessionPermissionState = () => {
+    sessionRulesRef.current = emptyPermissionRules();
+    setPermissionMode(configuredPermissionMode);
+  };
+
   // 对话框决策产生的持久化动作：session 进内存，其余落对应 settings 文件；
   // 落盘的规则同时写进内存镜像，本会话立即生效
   const applyPermissionUpdates = async (updates: PermissionUpdate[]) => {
@@ -300,7 +321,9 @@ export function App(props: AppProps) {
           await persistPermissionRule(u.rule, u.list, u.destination);
         }
       }
-      sessionRulesRef.current[u.list].push(u.rule);
+      const runtimeRules =
+        u.destination === "session" ? sessionRulesRef.current : persistedRulesRef.current;
+      runtimeRules[u.list].push(u.rule);
     }
     if (updates.some((u) => u.type === "addRule")) recheckConfirmQueue();
   };
@@ -680,8 +703,10 @@ export function App(props: AppProps) {
         return true;
       case "/clear": {
         const id = newSessionId();
+        const nextEngine = createEngine(id, []);
+        resetSessionPermissionState();
         sessionIdRef.current = id;
-        engineRef.current = createEngine(id, []);
+        engineRef.current = nextEngine;
         setStatus((s) => ({ ...s, sessionId: id, contextPercent: 0 }));
         info(`已开始新会话 ${id}`, "green");
         return true;
@@ -755,6 +780,7 @@ export function App(props: AppProps) {
                 const nextEngine = createEngine(sessionId, history, state.recentFiles);
                 const { percent } = nextEngine.contextUsage();
                 if (!mountedRef.current) return;
+                resetSessionPermissionState();
                 engineRef.current = nextEngine;
                 sessionIdRef.current = sessionId;
                 setStatus((s) => ({ ...s, sessionId, contextPercent: percent }));

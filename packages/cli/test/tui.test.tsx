@@ -1764,6 +1764,107 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("/clear resets session-scoped edit permission before the new session runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-clear-permission-"));
+    const first = join(dir, "first.txt").replace(/\\/g, "/");
+    const second = join(dir, "second.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: first, content: "1" }) },
+        ],
+      },
+      { content: "first session finished" },
+      {
+        content: "",
+        toolCalls: [
+          { id: "t2", name: "write_file", args: JSON.stringify({ path: second, content: "2" }) },
+        ],
+      },
+      { content: "new session stayed denied" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("write in the first session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("first session finished"), {
+        timeout: 3000,
+      });
+      expect(existsSync(first)).toBe(true);
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 3000,
+      });
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toContain("accept edits on");
+
+      instance.stdin.write("write in the new session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      expect(existsSync(second)).toBe(false);
+      instance.stdin.write("\x1b");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("new session stayed denied"), {
+        timeout: 3000,
+      });
+      expect(existsSync(second)).toBe(false);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("/clear preserves permission rules already written to persistent settings", async () => {
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const command = "printf persisted-rule";
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "persistent rule saved" },
+      {
+        content: "",
+        toolCalls: [{ id: "t2", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "persistent rule survived clear" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("run once");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("persistent rule saved"), {
+        timeout: 3000,
+      });
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 3000,
+      });
+      instance.stdin.write("run again");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("persistent rule survived clear"),
+        { timeout: 3000 },
+      );
+
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+      expect(provider.streamCalls).toBe(4);
+    } finally {
+      instance.unmount();
+      persistSpy.mockRestore();
+    }
+  });
+
   it("拒绝时 Tab 附言：反馈文本随工具结果回流", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const target = join(dir, "veto.txt").replace(/\\/g, "/");
@@ -2404,6 +2505,65 @@ describe("TUI", {timeout: 30_000}, () => {
     });
     expect(lastFrame()).toContain("1 条消息");
     unmount();
+  });
+
+  it("/sessions resets session-scoped permission mode before installing the target engine", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-permission-"));
+    writeFileSync(
+      join(dir, "target-session.jsonl"),
+      JSON.stringify({ role: "assistant", content: "target history" }) + "\n",
+    );
+    const target = join(dir, "must-confirm.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "target session stayed denied" },
+    ]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("\x1b[Z");
+      await flush();
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toContain("accept edits on");
+
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), { timeout: 3000 });
+      instance.stdin.write("1");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已切换到会话 target-session"), {
+        timeout: 3000,
+      });
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toContain("accept edits on");
+
+      instance.stdin.write("write in target session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      expect(existsSync(target)).toBe(false);
+      instance.stdin.write("\x1b");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("target session stayed denied"), {
+        timeout: 3000,
+      });
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("/sessions 加载期间阻止旧引擎提交与竞争切换", async () => {
