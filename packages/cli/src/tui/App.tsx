@@ -304,8 +304,12 @@ export function App(props: AppProps) {
 
   // 对话框决策产生的持久化动作：session 进内存，其余落对应 settings 文件；
   // 落盘的规则同时写进内存镜像，本会话立即生效
-  const applyPermissionUpdates = async (updates: PermissionUpdate[]) => {
+  const applyPermissionUpdates = async (
+    updates: PermissionUpdate[],
+    isActive: () => boolean,
+  ): Promise<boolean> => {
     for (const u of updates) {
+      if (!isActive()) return false;
       if (u.type === "setMode") {
         setPermissionMode(u.mode);
         continue;
@@ -320,12 +324,17 @@ export function App(props: AppProps) {
         } else {
           await persistPermissionRule(u.rule, u.list, u.destination);
         }
+        if (!isActive()) return false;
       }
       const runtimeRules =
         u.destination === "session" ? sessionRulesRef.current : persistedRulesRef.current;
       runtimeRules[u.list].push(u.rule);
     }
-    if (updates.some((u) => u.type === "addRule")) recheckConfirmQueue();
+    if (updates.some((u) => u.type === "addRule")) {
+      if (!isActive()) return false;
+      recheckConfirmQueue();
+    }
+    return isActive();
   };
 
   // ── 引擎组装 ──────────────────────────────────────────────
@@ -335,6 +344,14 @@ export function App(props: AppProps) {
       args: Record<string, unknown>,
       meta: { readOnly: boolean },
     ): Promise<PermissionDecision> => {
+      const controller = controllerRef.current;
+      const isActive = () =>
+        mountedRef.current &&
+        controller !== null &&
+        !controller.signal.aborted &&
+        controllerRef.current === controller;
+      if (!isActive()) return { behavior: "deny" };
+
       const query = {
         toolName: name,
         args,
@@ -355,7 +372,7 @@ export function App(props: AppProps) {
           resolve: (o) => {
             if (!confirmQueueRef.current.includes(confirm)) return; // 防双 resolve（用户按键与 recheck 竞争）
             confirmQueueRef.current = confirmQueueRef.current.filter((x) => x !== confirm);
-            setConfirmQueue(confirmQueueRef.current);
+            if (mountedRef.current) setConfirmQueue(confirmQueueRef.current);
             resolve(o);
           },
         };
@@ -371,13 +388,16 @@ export function App(props: AppProps) {
             : undefined,
         };
       }
+      if (!isActive()) return { behavior: "deny" };
       const currentVerdict = evaluatePermission(permissionContext(), query);
       if (currentVerdict.behavior === "deny") {
         return { behavior: "deny", message: currentVerdict.message };
       }
       try {
-        await applyPermissionUpdates(outcome.updates);
+        const applied = await applyPermissionUpdates(outcome.updates, isActive);
+        if (!applied) return { behavior: "deny" };
       } catch (error) {
+        if (!isActive()) return { behavior: "deny" };
         const detail = error instanceof Error ? error.message : String(error);
         return {
           behavior: "deny",
@@ -483,6 +503,9 @@ export function App(props: AppProps) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      for (const confirm of [...confirmQueueRef.current]) {
+        confirm.resolve({ kind: "deny" });
+      }
       controllerRef.current?.abort();
     };
   }, []);

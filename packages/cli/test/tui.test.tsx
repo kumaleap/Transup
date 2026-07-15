@@ -345,6 +345,38 @@ function pendingPromise(): {
   return {promise, resolve};
 }
 
+function trackTurnSettlement(): {
+  finished: Promise<void>;
+  signal: () => AbortSignal | undefined;
+  restore: () => void;
+} {
+  const finished = pendingPromise();
+  let activeSignal: AbortSignal | undefined;
+  const originalRunTurn = transupCore.AgentEngine.prototype.runTurn;
+  const spy = vi
+    .spyOn(transupCore.AgentEngine.prototype, "runTurn")
+    .mockImplementation(function (
+      this: InstanceType<typeof transupCore.AgentEngine>,
+      input: string,
+      signal?: AbortSignal,
+    ) {
+      activeSignal = signal;
+      const source = originalRunTurn.call(this, input, signal);
+      return (async function* () {
+        try {
+          yield* source;
+        } finally {
+          finished.resolve();
+        }
+      })();
+    });
+  return {
+    finished: finished.promise,
+    signal: () => activeSignal,
+    restore: () => spy.mockRestore(),
+  };
+}
+
 class ControlledHistoryStore extends HistoryStore {
   constructor(private readonly flushResult: Promise<void>) {
     super({filePath: newHistoryPath()});
@@ -3032,24 +3064,7 @@ describe("TUI", {timeout: 30_000}, () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-turn-unmount-"));
     const sessionId = "turn-unmount";
     const provider = new RejectAfterUnmountProvider();
-    const turnFinished = pendingPromise();
-    const originalRunTurn = transupCore.AgentEngine.prototype.runTurn;
-    const runTurnSpy = vi
-      .spyOn(transupCore.AgentEngine.prototype, "runTurn")
-      .mockImplementation(function (
-        this: InstanceType<typeof transupCore.AgentEngine>,
-        input: string,
-        signal?: AbortSignal,
-      ) {
-        const source = originalRunTurn.call(this, input, signal);
-        return (async function* () {
-          try {
-            yield* source;
-          } finally {
-            turnFinished.resolve();
-          }
-        })();
-      });
+    const turn = trackTurnSettlement();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const instance = render(
       <App
@@ -3076,7 +3091,7 @@ describe("TUI", {timeout: 30_000}, () => {
       expect(provider.signals[0]?.aborted).toBe(true);
       provider.rejectAfterUnmount();
       await provider.streamFinished;
-      await turnFinished.promise;
+      await turn.finished;
       await flush();
 
       expect(await new SessionStore(sessionId, dir).load()).toEqual([
@@ -3089,7 +3104,249 @@ describe("TUI", {timeout: 30_000}, () => {
       provider.rejectAfterUnmount();
       instance.unmount();
       errorSpy.mockRestore();
-      runTurnSpy.mockRestore();
+      turn.restore();
+    }
+  });
+
+  it("unmount settles a turn waiting on a permission decision", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-unmount-"));
+    const target = join(dir, "must-not-write.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "pending-permission",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "must not be written" }),
+          },
+        ],
+      },
+      { content: "must not run" },
+    ]);
+    const turn = trackTurnSettlement();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="permission-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), {
+        timeout: 3000,
+      });
+
+      instance.unmount();
+      const settled = await Promise.race([
+        turn.finished.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+      ]);
+      await flush();
+
+      expect(settled).toBe(true);
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      instance.unmount();
+      errorSpy.mockRestore();
+      turn.restore();
+    }
+  });
+
+  it("unmount after a persistent allow resolves denies before permission updates commit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-allow-unmount-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${JSON.stringify(target)}`;
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "persistent-allow-unmount",
+            name: "bash",
+            args: JSON.stringify({command}),
+          },
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const turn = trackTurnSettlement();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="persistent-allow-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request persistent permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+
+      // Resolving the dialog queues canUseTool's continuation. Unmount in this
+      // same call stack, before that continuation can commit the allow update.
+      instance.stdin.write("2");
+      instance.unmount();
+      await turn.finished;
+
+      expect(persistSpy).not.toHaveBeenCalled();
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      instance.unmount();
+      errorSpy.mockRestore();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("aborting the active turn after a persistent allow resolves prevents permission updates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-allow-abort-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${JSON.stringify(target)}`;
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "persistent-allow-abort",
+            name: "bash",
+            args: JSON.stringify({command}),
+          },
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="persistent-allow-abort"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request persistent permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+
+      // Both writes are synchronous: Ctrl+C aborts the owning controller before
+      // canUseTool resumes from the already-resolved permission Promise.
+      instance.stdin.write("2");
+      instance.stdin.write("\x03");
+      await turn.finished;
+
+      expect(turn.signal()?.aborted).toBe(true);
+      expect(persistSpy).not.toHaveBeenCalled();
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("unmount cleanup denies every pending parallel read-only confirmation", async () => {
+    const executeFirst = vi.fn(async () => "must not execute first");
+    const executeSecond = vi.fn(async () => "must not execute second");
+    const firstTool = {
+      name: "pending_read_probe_one",
+      description: "First pending read probe",
+      schema: z.object({}),
+      readOnly: true,
+      execute: executeFirst,
+    };
+    const secondTool = {
+      name: "pending_read_probe_two",
+      description: "Second pending read probe",
+      schema: z.object({}),
+      readOnly: true,
+      execute: executeSecond,
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {id: "pending-read-one", name: firstTool.name, args: "{}"},
+          {id: "pending-read-two", name: secondTool.name, args: "{}"},
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[firstTool, secondTool]}
+        settings={{permissions: {ask: [firstTool.name, secondTool.name]}}}
+        initialSessionId="parallel-permission-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request parallel permissions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("还有 1 个待确认"), {
+        timeout: 3000,
+      });
+
+      instance.unmount();
+      await turn.finished;
+
+      expect(executeFirst).not.toHaveBeenCalled();
+      expect(executeSecond).not.toHaveBeenCalled();
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+      turn.restore();
     }
   });
 
