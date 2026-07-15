@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, Settings, ToolCall } from "@transup/core";
-import { builtinTools } from "@transup/core";
+import { builtinTools, SessionStore } from "@transup/core";
 import * as transupCore from "@transup/core";
 import { App } from "../src/tui/App.js";
 import {RowText, TextInput} from "../src/tui/TextInput.js";
@@ -130,6 +130,160 @@ class AbortableProvider implements Provider {
       if (signal?.aborted) return fail();
       signal?.addEventListener("abort", fail, { once: true });
     });
+  }
+}
+
+/** Manual compaction provider that rejects on demand after the test sends Ctrl+C. */
+class RejectingManualCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectCompact!: (error: Error) => void;
+  private compactGate = new Promise<never>((_, reject) => {
+    this.rejectCompact = reject;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectCompact(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markCompactStarted();
+    await this.compactGate;
+  }
+}
+
+/** Returns a late summary even after abort so unmount guards cannot rely on provider cooperation. */
+class LateManualCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private releaseCompact!: () => void;
+  private compactGate = new Promise<void>((resolve) => {
+    this.releaseCompact = resolve;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  releaseLateSummary(): void {
+    this.releaseCompact();
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markCompactStarted();
+    try {
+      await this.compactGate;
+      yield {
+        type: "message_done",
+        content: "late summary must not commit",
+        toolCalls: [],
+        usage: {inputTokens: 10, outputTokens: 5},
+      };
+    } finally {
+      this.markStreamFinished();
+    }
+  }
+}
+
+/** First rejects an automatic summary, then holds an ordinary turn for spinner assertions. */
+class AutomaticCompactAbortProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectSummary!: (error: Error) => void;
+  private summaryGate = new Promise<never>((_, reject) => {
+    this.rejectSummary = reject;
+  });
+  private markSummaryStarted!: () => void;
+  readonly summaryStarted = new Promise<void>((resolve) => {
+    this.markSummaryStarted = resolve;
+  });
+  private releaseNormalTurn!: () => void;
+  private normalTurnGate = new Promise<void>((resolve) => {
+    this.releaseNormalTurn = resolve;
+  });
+  private markNormalTurnStarted!: () => void;
+  readonly normalTurnStarted = new Promise<void>((resolve) => {
+    this.markNormalTurnStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectSummary(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  releaseNormal(): void {
+    this.releaseNormalTurn();
+  }
+
+  async *stream(
+    _messages: Message[],
+    tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    if (tools.length === 0) {
+      this.markSummaryStarted();
+      await this.summaryGate;
+      return;
+    }
+
+    this.markNormalTurnStarted();
+    await this.normalTurnGate;
+    yield {
+      type: "message_done",
+      content: "ordinary completion",
+      toolCalls: [],
+      usage: {inputTokens: 10, outputTokens: 5},
+    };
+  }
+}
+
+/** Yields usage before the engine can persist its assistant message. */
+class UsageCompletionProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    try {
+      yield {
+        type: "message_done",
+        content: "must not persist after unmount",
+        toolCalls: [],
+        usage: {inputTokens: 10, outputTokens: 5},
+      };
+    } finally {
+      this.markStreamFinished();
+    }
   }
 }
 
@@ -2430,6 +2584,332 @@ describe("TUI", {timeout: 30_000}, () => {
     stdin.write("\x1b");
     await flush();
     unmount();
+  });
+
+  it("automatic compact abort clears compacting state before the next turn", async () => {
+    const provider = new AutomaticCompactAbortProvider();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="tui-automatic-compact-abort"
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(2000)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1500}
+      />,
+    );
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      await flush();
+      instance.stdin.write("trigger automatic compact");
+      instance.stdin.write("\r");
+      await provider.summaryStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      provider.rejectAfterAbort();
+      await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("working"), {
+        timeout: 2000,
+      });
+      expect(provider.signals[0]?.aborted).toBe(true);
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 2000,
+      });
+      instance.stdin.write("ordinary turn");
+      instance.stdin.write("\r");
+      await provider.normalTurnStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Thinking"), {
+        timeout: 2000,
+      });
+      expect(instance.lastFrame()).not.toContain("Compacting");
+    } finally {
+      provider.rejectAfterAbort();
+      provider.releaseNormal();
+      instance.unmount();
+      randomSpy.mockRestore();
+    }
+  });
+
+  it("manual /compact uses first Ctrl+C to cancel and second Ctrl+C to exit", async () => {
+    const provider = new RejectingManualCompactProvider();
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-compact-abort-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      provider.rejectAfterAbort();
+      await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(instance.lastFrame()).not.toContain("压缩失败，已退回截断策略");
+      expect(onExitStats).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+    } finally {
+      provider.rejectAfterAbort();
+      instance.unmount();
+    }
+  });
+
+  it("unmount cleanup aborts a pending manual /compact controller", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-compact-unmount-"));
+    const sessionId = "manual-compact-unmount";
+    const provider = new LateManualCompactProvider();
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+      expect(provider.signals[0]?.aborted).toBe(false);
+
+      instance.unmount();
+      expect(onExitStats).toHaveBeenCalledOnce();
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([]);
+      expect(instance.lastFrame()).not.toContain("对话已压缩");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("double Ctrl+C exit discards a manual compact summary that resolves after unmount", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-compact-late-exit-"));
+    const sessionId = "manual-compact-late-exit";
+    const provider = new LateManualCompactProvider();
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      expect(provider.signals[0]?.aborted).toBe(true);
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+      const frameAfterExit = instance.lastFrame();
+
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(onExitStats).toHaveBeenCalledOnce();
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([]);
+      expect(instance.lastFrame()).toBe(frameAfterExit);
+      expect(instance.lastFrame()).not.toContain("对话已压缩");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("automatic compact unmount discards a provider's late summary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-auto-compact-unmount-"));
+    const sessionId = "automatic-compact-unmount";
+    const provider = new LateManualCompactProvider();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(2000)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1500}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("trigger automatic compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+      instance.unmount();
+      const frameAfterUnmount = instance.lastFrame();
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "trigger automatic compact"},
+      ]);
+      expect(instance.lastFrame()).toBe(frameAfterUnmount);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("unmount during traced usage stops engine consumption before late session writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-trace-unmount-"));
+    const sessionId = "trace-unmount";
+    const provider = new UsageCompletionProvider();
+    const traceStarted = pendingPromise();
+    const releaseTrace = pendingPromise();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        trace={{
+          record: async (event) => {
+            if (event.type !== "usage") return;
+            traceStarted.resolve();
+            await releaseTrace.promise;
+          },
+        }}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("trace pending event");
+      instance.stdin.write("\r");
+      await traceStarted.promise;
+
+      instance.unmount();
+      releaseTrace.resolve();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "trace pending event"},
+      ]);
+    } finally {
+      releaseTrace.resolve();
+      instance.unmount();
+    }
   });
 
   it("恢复中断会话：启动即提示可带进度续跑", async () => {

@@ -157,11 +157,15 @@ export class AgentEngine {
 
   // ── 上下文压缩（计算在 compact.ts，历史替换在这里） ─────────
 
-  private async *compact(): AsyncGenerator<AgentEvent> {
+  private async *compact(signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     yield { type: "compact_start", beforeChars: this.contextSize() };
 
     try {
-      const summary = await summarize(this.provider, this.messages);
+      const summary = await summarize(this.provider, this.messages, signal);
+      if (signal?.aborted) return;
+
+      const reinjected = await reinjectFiles(this.recentFiles);
+      if (signal?.aborted) return;
 
       const newMessages: Message[] = [
         this.messages[0], // system prompt 保留
@@ -169,7 +173,7 @@ export class AgentEngine {
           role: "user",
           content:
             `[系统提示] 对话历史已被压缩。以下是此前对话的摘要，请基于它继续工作：\n\n${summary}` +
-            (await reinjectFiles(this.recentFiles)),
+            reinjected,
         },
         { role: "assistant", content: "已了解此前的工作进展，继续。" },
       ];
@@ -180,6 +184,7 @@ export class AgentEngine {
 
       yield { type: "compact_end", afterChars: this.contextSize(), ok: true, summary };
     } catch {
+      if (signal?.aborted) return;
       // 熔断：压缩失败退回最简截断
       trimHistory(this.messages, this.maxContextChars);
       yield { type: "compact_end", afterChars: this.contextSize(), ok: false };
@@ -187,9 +192,9 @@ export class AgentEngine {
   }
 
   /** 手动触发压缩（/compact 命令用）。历史太短时不动。 */
-  async *compactNow(): AsyncGenerator<AgentEvent> {
+  async *compactNow(signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     if (this.messages.length < 4) return;
-    yield* this.compact();
+    yield* this.compact(signal);
   }
 
   /** 当前上下文占预算的百分比（状态展示用） */
@@ -213,7 +218,11 @@ export class AgentEngine {
         return;
       }
       if (this.contextSize() > this.maxContextChars) {
-        yield* this.compact();
+        yield* this.compact(signal);
+        if (signal?.aborted) {
+          yield { type: "turn_end", reason: "aborted" };
+          return;
+        }
       }
 
       // 1. 调用模型，转发文本增量，收集完整消息

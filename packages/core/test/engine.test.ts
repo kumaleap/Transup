@@ -38,6 +38,82 @@ class MockProvider implements Provider {
   }
 }
 
+/** The first compact request waits even after abort, reproducing a provider that ignores cancellation. */
+class LateCompactProvider implements Provider {
+  readonly id = "late-compact";
+  readonly model = "late-compact-1";
+  readonly calls: Message[][] = [];
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private compactCalls = 0;
+  private resolveFirstCompact!: () => void;
+  private firstCompactGate = new Promise<void>((resolve) => {
+    this.resolveFirstCompact = resolve;
+  });
+  private markFirstCompactStarted!: () => void;
+  readonly firstCompactStarted = new Promise<void>((resolve) => {
+    this.markFirstCompactStarted = resolve;
+  });
+
+  releaseFirstCompact(): void {
+    this.resolveFirstCompact();
+  }
+
+  async *stream(
+    messages: Message[],
+    tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.calls.push(structuredClone(messages));
+    this.signals.push(signal);
+    const isCompact = tools.length === 0;
+    if (isCompact) {
+      this.compactCalls++;
+      if (this.compactCalls === 1) {
+        this.markFirstCompactStarted();
+        await this.firstCompactGate;
+      }
+    }
+
+    const content = isCompact ? `summary-${this.compactCalls}` : "normal completion";
+    yield { type: "text_delta", text: content };
+    yield {
+      type: "message_done",
+      content,
+      toolCalls: [],
+      usage: { inputTokens: 10, outputTokens: 5 },
+    };
+  }
+}
+
+/** Rejects on demand so the broken no-signal path still settles and exercises fallback trimming. */
+class RejectingCompactProvider implements Provider {
+  readonly id = "rejecting-compact";
+  readonly model = "rejecting-compact-1";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectCompact!: (error: Error) => void;
+  private compactGate = new Promise<never>((_, reject) => {
+    this.rejectCompact = reject;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectCompact(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markCompactStarted();
+    await this.compactGate;
+  }
+}
+
 async function makeEngine(provider: Provider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "transup-engine-"));
   return new AgentEngine({
@@ -152,6 +228,78 @@ describe("AgentEngine 主循环", () => {
     const text = JSON.stringify(lastCall);
     expect(text).toContain("摘要");
     expect(text).not.toContain("x".repeat(100));
+  });
+
+  it("automatic compact aborts atomically when a provider returns a late summary", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-compact-abort-"));
+    const session = new SessionStore("automatic", dir);
+    const provider = new LateCompactProvider();
+    const originalMarker = `original-history-${"x".repeat(800)}`;
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+      history: [
+        { role: "user", content: originalMarker },
+        { role: "assistant", content: "original response" },
+        { role: "user", content: "original follow-up" },
+      ],
+      maxContextChars: 400,
+    });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("trigger automatic compact", controller.signal));
+    await provider.firstCompactStarted;
+    controller.abort();
+    provider.releaseFirstCompact();
+    const events = await turn;
+
+    expect(provider.signals[0]).toBe(controller.signal);
+    expect(events.some((event) => event.type === "compact_end")).toBe(false);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(await session.load()).toEqual([
+      { role: "user", content: "trigger automatic compact" },
+    ]);
+
+    await collect(engine.compactNow());
+    const compactRequests = provider.calls.filter((request) =>
+      request.at(-1)?.content.includes("把上面的对话压缩成一份工作交接摘要"),
+    );
+    expect(compactRequests).toHaveLength(2);
+    expect(JSON.stringify(compactRequests[1])).toContain(originalMarker);
+    expect(JSON.stringify(compactRequests[1])).not.toContain("summary-1");
+  });
+
+  it("manual compact abort does not fall back to trimming or append compact records", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-manual-compact-abort-"));
+    const session = new SessionStore("manual", dir);
+    const history: Message[] = [
+      { role: "user", content: `must-survive-${"x".repeat(800)}` },
+      { role: "assistant", content: "original response" },
+      { role: "user", content: "original follow-up" },
+    ];
+    for (const message of history) await session.append(message);
+    const provider = new RejectingCompactProvider();
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+      history,
+      maxContextChars: 400,
+    });
+    const before = engine.contextUsage();
+    const controller = new AbortController();
+
+    const compact = collect(engine.compactNow(controller.signal));
+    await provider.compactStarted;
+    controller.abort();
+    provider.rejectAfterAbort();
+    const events = await compact;
+
+    expect(engine.contextUsage()).toEqual(before);
+    expect(provider.signals).toEqual([controller.signal]);
+    expect(events.some((event) => event.type === "compact_end")).toBe(false);
+    expect(await session.load()).toEqual(history);
   });
 
   it("只读工具的进度也走 tool_progress（并行启动，轮到时转发）", async () => {

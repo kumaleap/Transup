@@ -398,6 +398,7 @@ export function App(props: AppProps) {
   // ── 压缩三段式（事中状态 + 事后摘要卡），runTurn 与 /compact 共用 ──
   const compactBeforeRef = useRef(0);
   const handleCompactEvent = (ev: AgentEvent): boolean => {
+    if (!mountedRef.current) return false;
     if (ev.type === "compact_start") {
       compactBeforeRef.current = ev.beforeChars;
       setCompacting(true);
@@ -440,6 +441,7 @@ export function App(props: AppProps) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      controllerRef.current?.abort();
     };
   }, []);
 
@@ -666,19 +668,31 @@ export function App(props: AppProps) {
         return true;
       }
       case "/compact": {
+        const controller = new AbortController();
+        controllerRef.current = controller;
+        abortExitArmedRef.current = false;
         runningRef.current = true;
         setRunning(true);
         let acted = false;
         try {
-          for await (const ev of engineRef.current!.compactNow()) {
+          for await (const ev of engineRef.current!.compactNow(controller.signal)) {
+            if (!mountedRef.current) break;
             acted = handleCompactEvent(ev) || acted;
           }
+          if (!mountedRef.current) return true;
           if (!acted) info("会话还很短，无需压缩");
           const { percent } = engineRef.current!.contextUsage();
           setStatus((s) => ({ ...s, contextPercent: percent }));
         } finally {
-          runningRef.current = false;
-          setRunning(false);
+          const ownsController = controllerRef.current === controller;
+          if (ownsController) {
+            controllerRef.current = null;
+            runningRef.current = false;
+          }
+          if (mountedRef.current && ownsController) {
+            setCompacting(false);
+            setRunning(false);
+          }
         }
         return true;
       }
@@ -780,7 +794,9 @@ export function App(props: AppProps) {
 
     try {
       for await (const ev of engineRef.current!.runTurn(input, controller.signal)) {
+        if (!mountedRef.current) break;
         await props.trace?.record(ev);
+        if (!mountedRef.current) break;
         switch (ev.type) {
           case "text_delta":
             stallTrackerRef.current?.observeProgress(Date.now());
@@ -877,10 +893,18 @@ export function App(props: AppProps) {
         }
       }
     } catch (err: any) {
-      pushError(`API 错误: ${err.message}`);
+      if (mountedRef.current) pushError(`API 错误: ${err.message}`);
     } finally {
-      flushStream();
+      const ownsController = controllerRef.current === controller;
+      if (ownsController) {
+        controllerRef.current = null;
+        runningRef.current = false;
+        submitPendingRef.current = false;
+      }
       activeToolRef.current = null;
+      if (!mountedRef.current || !ownsController) return;
+
+      flushStream();
       setActiveTool(null);
 
       const t = totals.current;
@@ -897,9 +921,7 @@ export function App(props: AppProps) {
         contextPercent: percent,
       }));
 
-      controllerRef.current = null;
-      runningRef.current = false;
-      submitPendingRef.current = false;
+      setCompacting(false);
       setRunning(false);
     }
   }
@@ -923,7 +945,7 @@ export function App(props: AppProps) {
       void runTurn(expanded).catch((error) => {
         submitPendingRef.current = false;
         const detail = error instanceof Error ? error.message : String(error);
-        pushError(`API 错误: ${detail}`);
+        if (mountedRef.current) pushError(`API 错误: ${detail}`);
       });
     };
     if (!display.startsWith("/")) {
@@ -940,7 +962,7 @@ export function App(props: AppProps) {
     } catch (error) {
       submitPendingRef.current = false;
       const detail = error instanceof Error ? error.message : String(error);
-      pushError(`命令错误: ${detail}`);
+      if (mountedRef.current) pushError(`命令错误: ${detail}`);
     }
   }
 
