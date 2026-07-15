@@ -286,7 +286,19 @@ export interface LoadSettingsOptions extends SettingsPersistenceOptions {
 }
 
 async function readRegularFile(path: string): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    try {
+      await lstat(path);
+    } catch (lstatError) {
+      if ((lstatError as NodeJS.ErrnoException).code === "ENOENT") throw error;
+      throw lstatError;
+    }
+    throw new Error(`Refusing to read a path that is not a regular file: ${path}`);
+  }
   try {
     const [openedFile, pathEntry] = await Promise.all([
       handle.stat({ bigint: true }),

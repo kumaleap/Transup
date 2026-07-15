@@ -6,6 +6,7 @@ import { existsSync } from "node:fs";
 import {
   access,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -290,6 +291,15 @@ describe("settings", () => {
     await symlink(outsidePath, join(ctx.settingsDir, "settings.json"));
 
     await expect(loadContext(ctx)).rejects.toThrow(/regular file/i);
+  });
+
+  it("rejects a dangling project settings symlink", async () => {
+    const ctx = await makeSettingsContext();
+    const settingsPath = join(ctx.settingsDir, "settings.json");
+    await symlink(join(dirname(ctx.workspace), "missing-settings.json"), settingsPath);
+
+    await expect(loadContext(ctx)).rejects.toThrow(/regular file/i);
+    expect((await lstat(settingsPath)).isSymbolicLink()).toBe(true);
   });
 
   it("isAllowed：精确匹配与通配后缀", () => {
@@ -656,6 +666,17 @@ describe("settings", () => {
     await symlink(outsidePath, ctx.trustStorePath);
 
     expect(await isWorkspaceTrusted(ctx.workspace, ctx.trustStorePath)).toBe(false);
+  });
+
+  it("rejects a dangling trust-store symlink without replacing it", async () => {
+    const ctx = await makeSettingsContext();
+    const missingTarget = join(dirname(ctx.workspace), "missing-trust-store.json");
+    await mkdir(dirname(ctx.trustStorePath), { recursive: true });
+    await symlink(missingTarget, ctx.trustStorePath);
+
+    await expect(trustWorkspace(ctx.workspace, ctx.trustStorePath)).rejects.toThrow(/regular file/i);
+    expect((await lstat(ctx.trustStorePath)).isSymbolicLink()).toBe(true);
+    await expect(access(missingTarget)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("信任持久化使用 canonical path，symlink 别名不能改变信任结果", async () => {
