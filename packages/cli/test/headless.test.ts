@@ -210,6 +210,7 @@ describe("headless 模式", () => {
       workspace,
       settingsDir,
       trustStorePath,
+      userConfigDir: join(root, "config"),
     });
     const { settings, mcp } = startup;
     const provider = new MockProvider([
@@ -232,6 +233,34 @@ describe("headless 模式", () => {
     expect(existsSync(writeTarget)).toBe(false);
     expect(settings.statusLine).toBeUndefined();
     expect(settings.permissions?.defaultMode).toBeUndefined();
+  });
+
+  it("workspace startup 拒绝独立 settings source mismatch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-startup-mismatch-"));
+    const trustedWorkspace = join(root, "trusted");
+    const otherSettingsDir = join(root, "other", ".transup");
+    const trustStorePath = join(root, "config", "trusted-workspaces.json");
+    mkdirSync(trustedWorkspace, { recursive: true });
+    mkdirSync(otherSettingsDir, { recursive: true });
+    mkdirSync(join(root, "config"), { recursive: true });
+    writeFileSync(
+      trustStorePath,
+      JSON.stringify({ version: 1, trustedWorkspaces: [trustedWorkspace] }),
+    );
+    writeFileSync(
+      join(otherSettingsDir, "settings.json"),
+      JSON.stringify({ mcpServers: { borrowed: { command: "borrowed-mcp" } } }),
+    );
+
+    await expect(
+      prepareWorkspaceStartup({
+        workspace: trustedWorkspace,
+        settingsDir: otherSettingsDir,
+        trustStorePath,
+        userConfigDir: join(root, "config"),
+        connectMcp: false,
+      }),
+    ).rejects.toThrow(/settings source.*workspace/i);
   });
 
   it("API 持续失败 → 错误进 stderr，退出码 1", async () => {

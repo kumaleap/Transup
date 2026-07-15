@@ -40,6 +40,7 @@ import {
   type PermissionUpdate,
   type Provider,
   type Settings,
+  type SettingsPersistenceContext,
   type Tool,
 } from "@transup/core";
 import { T } from "../theme.js";
@@ -91,6 +92,8 @@ export interface AppProps {
   projectContext: string;
   tools: Tool[];
   settings: Settings;
+  /** 与本次 settings load 相同的固定 workspace/config identity。 */
+  settingsContext?: SettingsPersistenceContext;
   initialSessionId: string;
   initialHistory: Message[];
   mcpToolCount: number;
@@ -285,7 +288,15 @@ export function App(props: AppProps) {
         continue;
       }
       if (u.destination !== "session") {
-        await persistPermissionRule(u.rule, u.list, u.destination);
+        if (props.settingsContext) {
+          const { settingsDir, workspace, userConfigDir } = props.settingsContext;
+          await persistPermissionRule(u.rule, u.list, u.destination, settingsDir, {
+            workspace,
+            ...(userConfigDir ? { userConfigDir } : {}),
+          });
+        } else {
+          await persistPermissionRule(u.rule, u.list, u.destination);
+        }
       }
       sessionRulesRef.current[u.list].push(u.rule);
     }

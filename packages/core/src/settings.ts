@@ -1,17 +1,18 @@
 /**
- * 项目设置 —— .transup/settings.json（+ settings.local.json）
+ * 设置来源与 provenance：
  *
- * 两层工作区文件，读取时先按 workspace trust 过滤再合并：
- *   settings.json        项目级，进版本库，团队共享
- *   settings.local.json  个人级，应加入 gitignore；"不再询问"默认写这里
- * 未信任时只保留 deny/ask；信任后 mcpServers 按名覆盖（local 优先），权限列表拼接；
- * defaultMode 取 local，缺省回退项目级。
+ *   .transup/settings.json        project，进版本库
+ *   .transup/settings.local.json  legacy workspace-local，仅作仓库来源兼容读取
+ *   OS config/workspaces/<hash>/settings.local.json  external user-local，个人审批写这里
+ * 未信任时 project/legacy 只保留 deny/ask，再完整合并 external；信任后按
+ * project < legacy < external 合并。权限列表按 provenance 顺序拼接。
  *
  * 权限规则语法见 permissions.ts（工具级 / 前缀通配 / 内容级）。
  */
-import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { McpServerConfig } from "./tools/mcp.js";
 import {
   ruleMatches,
@@ -42,7 +43,8 @@ export interface Settings {
 
 const SETTINGS_DIR = ".transup";
 const SETTINGS_FILE = "settings.json";
-const LOCAL_SETTINGS_FILE = "settings.local.json";
+const LEGACY_LOCAL_SETTINGS_FILE = "settings.local.json";
+const WORKSPACE_SETTINGS_DIR = "workspaces";
 const TRUST_STORE_VERSION = 1;
 const TRUST_STORE_FILE = "trusted-workspaces.json";
 
@@ -51,29 +53,93 @@ interface WorkspaceTrustStore {
   trustedWorkspaces: string[];
 }
 
-export interface LoadSettingsOptions {
-  /** 被设置文件控制的工作区；信任比较前会 canonicalize。 */
+export interface SettingsPersistenceOptions {
+  /** 可选的 workspace 断言；必须与 canonical 设置源的父目录一致。 */
   workspace?: string;
+  /** 仅供宿主/测试显式注入；生产 CLI 不从 env 或项目设置读取。 */
+  userConfigDir?: string;
+}
+
+export interface SettingsPersistenceContext extends SettingsPersistenceOptions {
+  workspace: string;
+  settingsDir: string;
+}
+
+export interface LoadSettingsOptions extends SettingsPersistenceOptions {
   /** 仅供宿主/测试注入；CLI 默认使用 OS 账户配置目录。 */
   trustStorePath?: string;
 }
 
-const FILE_FOR_DESTINATION: Record<Exclude<PermissionDestination, "session">, string> = {
-  projectSettings: SETTINGS_FILE,
-  localSettings: LOCAL_SETTINGS_FILE,
-};
-
-async function loadFile(dir: string, file: string): Promise<Settings> {
+async function loadPath(path: string): Promise<Settings> {
   try {
-    return JSON.parse(await readFile(join(dir, file), "utf-8"));
+    return JSON.parse(await readFile(path, "utf-8"));
   } catch {
     return {};
   }
 }
 
+async function loadFile(dir: string, file: string): Promise<Settings> {
+  return loadPath(join(dir, file));
+}
+
+async function canonicalSettingsSource(dir: string): Promise<{
+  settingsDir: string;
+  workspace: string;
+}> {
+  const absoluteDir = resolve(dir);
+  let settingsDir: string;
+  try {
+    settingsDir = await realpath(absoluteDir);
+  } catch (error) {
+    try {
+      await lstat(absoluteDir);
+    } catch (lstatError) {
+      if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw lstatError;
+      settingsDir = join(await realpath(dirname(absoluteDir)), basename(absoluteDir));
+      return { settingsDir, workspace: dirname(settingsDir) };
+    }
+    throw error;
+  }
+  return { settingsDir, workspace: dirname(settingsDir) };
+}
+
+async function resolveSettingsSource(
+  dir: string,
+  assertedWorkspace?: string,
+): Promise<{ settingsDir: string; workspace: string }> {
+  const source = await canonicalSettingsSource(dir);
+  if (assertedWorkspace !== undefined) {
+    const canonicalAssertion = await realpath(assertedWorkspace);
+    if (canonicalAssertion !== source.workspace) {
+      throw new Error(
+        `Settings source ${source.settingsDir} does not belong to workspace ${canonicalAssertion}`,
+      );
+    }
+  }
+  return source;
+}
+
+/** OS-account config root; intentionally ignores HOME/XDG/project environment overrides. */
+export function defaultUserConfigDir(homeDir: string = userInfo().homedir): string {
+  return join(homeDir, ".config", "transup");
+}
+
+function externalSettingsPath(canonicalWorkspace: string, userConfigDir: string): string {
+  const workspaceKey = createHash("sha256").update(canonicalWorkspace).digest("hex");
+  return join(userConfigDir, WORKSPACE_SETTINGS_DIR, workspaceKey, LEGACY_LOCAL_SETTINGS_FILE);
+}
+
+/** 返回 canonical workspace 对应的 external user-local 设置路径。 */
+export async function userLocalSettingsPath(
+  workspace: string = process.cwd(),
+  userConfigDir: string = defaultUserConfigDir(),
+): Promise<string> {
+  return externalSettingsPath(await realpath(workspace), userConfigDir);
+}
+
 /** 信任状态只保存在 OS 账户配置目录，绝不放进工作区的 .transup。 */
 export function defaultTrustStorePath(homeDir: string = userInfo().homedir): string {
-  return join(homeDir, ".config", "transup", TRUST_STORE_FILE);
+  return join(defaultUserConfigDir(homeDir), TRUST_STORE_FILE);
 }
 
 function parseTrustStore(raw: string): WorkspaceTrustStore | null {
@@ -170,18 +236,26 @@ function restrictUntrustedLayers(project: Settings, local: Settings): Settings {
   };
 }
 
-/** 先保留两层来源完成信任过滤，再按 local 优先规则合并。 */
+/** 设置源的 canonical 父目录决定信任身份；显式 workspace 只能作一致性断言。 */
 export async function loadSettings(
   dir: string = SETTINGS_DIR,
   options: LoadSettingsOptions = {},
 ): Promise<Settings> {
-  const project = await loadFile(dir, SETTINGS_FILE);
-  const local = await loadFile(dir, LOCAL_SETTINGS_FILE);
-  const trusted = await isWorkspaceTrusted(
-    options.workspace ?? process.cwd(),
-    options.trustStorePath ?? defaultTrustStorePath(),
+  const source = await resolveSettingsSource(dir, options.workspace);
+  const externalPath = externalSettingsPath(
+    source.workspace,
+    options.userConfigDir ?? defaultUserConfigDir(),
   );
-  return trusted ? mergeSettingsLayers(project, local) : restrictUntrustedLayers(project, local);
+  const [project, legacy, external, trusted] = await Promise.all([
+    loadFile(source.settingsDir, SETTINGS_FILE),
+    loadFile(source.settingsDir, LEGACY_LOCAL_SETTINGS_FILE),
+    loadPath(externalPath),
+    isWorkspaceTrusted(source.workspace, options.trustStorePath ?? defaultTrustStorePath()),
+  ]);
+  const workspaceLayers = trusted
+    ? mergeSettingsLayers(project, legacy)
+    : restrictUntrustedLayers(project, legacy);
+  return mergeSettingsLayers(workspaceLayers, external);
 }
 
 /** 覆写项目级设置文件（不触碰 local 层） */
@@ -213,15 +287,25 @@ export async function persistPermissionRule(
   list: keyof PermissionRules,
   destination: Exclude<PermissionDestination, "session">,
   dir: string = SETTINGS_DIR,
+  options: SettingsPersistenceOptions = {},
 ): Promise<void> {
-  const file = FILE_FOR_DESTINATION[destination];
-  const layer = await loadFile(dir, file);
+  const source = await resolveSettingsSource(dir, options.workspace);
+  const path = destination === "projectSettings"
+    ? join(source.settingsDir, SETTINGS_FILE)
+    : externalSettingsPath(
+        source.workspace,
+        options.userConfigDir ?? defaultUserConfigDir(),
+      );
+  const layer = await loadPath(path);
   layer.permissions ??= {};
   const rules = (layer.permissions[list] ??= []);
   if (!rules.includes(rule)) {
     rules.push(rule);
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, file), JSON.stringify(layer, null, 2) + "\n", "utf-8");
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify(layer, null, 2) + "\n", {
+      encoding: "utf-8",
+      ...(destination === "localSettings" ? { mode: 0o600 } : {}),
+    });
   }
 }
 
@@ -230,6 +314,7 @@ export async function persistAllow(
   _settings: Settings,
   toolName: string,
   dir: string = SETTINGS_DIR,
+  options: SettingsPersistenceOptions = {},
 ): Promise<void> {
-  await persistPermissionRule(toolName, "allow", "localSettings", dir);
+  await persistPermissionRule(toolName, "allow", "localSettings", dir, options);
 }

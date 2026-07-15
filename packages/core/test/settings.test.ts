@@ -1,5 +1,6 @@
 /** 设置与权限持久化测试 */
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,13 +20,15 @@ interface TestSettingsContext {
   workspace: string;
   settingsDir: string;
   trustStorePath: string;
+  userConfigDir: string;
 }
 
 async function makeSettingsContext(trusted = false): Promise<TestSettingsContext> {
   const root = await mkdtemp(join(tmpdir(), "transup-settings-context-"));
   const workspace = join(root, "workspace");
   const settingsDir = join(workspace, ".transup");
-  const trustStorePath = join(root, "config", "trusted-workspaces.json");
+  const userConfigDir = join(root, "config");
+  const trustStorePath = join(userConfigDir, "trusted-workspaces.json");
   await mkdir(settingsDir, { recursive: true });
   if (trusted) {
     await mkdir(join(root, "config"), { recursive: true });
@@ -35,14 +38,28 @@ async function makeSettingsContext(trusted = false): Promise<TestSettingsContext
       "utf-8",
     );
   }
-  return { workspace, settingsDir, trustStorePath };
+  return { workspace, settingsDir, trustStorePath, userConfigDir };
 }
 
 function loadContext(ctx: TestSettingsContext) {
   return loadSettings(ctx.settingsDir, {
     workspace: ctx.workspace,
     trustStorePath: ctx.trustStorePath,
+    userConfigDir: ctx.userConfigDir,
   });
+}
+
+async function expectedExternalSettingsPath(
+  ctx: TestSettingsContext,
+  workspace: string = ctx.workspace,
+): Promise<string> {
+  const canonicalWorkspace = await realpath(workspace);
+  const key = createHash("sha256").update(canonicalWorkspace).digest("hex");
+  return join(ctx.userConfigDir, "workspaces", key, "settings.local.json");
+}
+
+function persistenceOptions(ctx: TestSettingsContext) {
+  return { workspace: ctx.workspace, userConfigDir: ctx.userConfigDir };
 }
 
 describe("settings", () => {
@@ -66,13 +83,18 @@ describe("settings", () => {
     expect(isAllowed(s, "mcp__jira__create_issue")).toBe(false);
   });
 
-  it("persistAllow：追加并落盘，不重复", async () => {
-    const ctx = await makeSettingsContext(true);
+  it("persistAllow：外部审批在未信任 reload 后生效，且不写入仓库", async () => {
+    const ctx = await makeSettingsContext();
     const s = await loadContext(ctx);
-    await persistAllow(s, "bash", ctx.settingsDir);
-    await persistAllow(s, "bash", ctx.settingsDir); // 重复调用
+    await persistAllow(s, "bash", ctx.settingsDir, persistenceOptions(ctx));
+    await persistAllow(s, "bash", ctx.settingsDir, persistenceOptions(ctx)); // 重复调用
     const reloaded = await loadContext(ctx);
     expect(reloaded.permissions?.allow).toEqual(["bash"]);
+    const external = JSON.parse(await readFile(await expectedExternalSettingsPath(ctx), "utf-8"));
+    expect(external.permissions.allow).toEqual(["bash"]);
+    await expect(readFile(join(ctx.settingsDir, "settings.local.json"), "utf-8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("两层合并：列表拼接（项目在前），defaultMode local 优先", async () => {
@@ -92,21 +114,42 @@ describe("settings", () => {
     expect(s.permissions?.defaultMode).toBe("acceptEdits");
   });
 
-  it("persistPermissionRule：写指定目的地单层文件，不把合并结果落盘", async () => {
+  it("persistPermissionRule：project 写仓库，local 只写外部单层文件", async () => {
     const ctx = await makeSettingsContext(true);
     await saveSettings({ permissions: { allow: ["grep"] } }, ctx.settingsDir);
 
-    await persistPermissionRule("bash(npm run:*)", "allow", "localSettings", ctx.settingsDir);
-    await persistPermissionRule("bash(npm run:*)", "allow", "localSettings", ctx.settingsDir); // 不重复
-    await persistPermissionRule("edit_file", "deny", "projectSettings", ctx.settingsDir);
+    await persistPermissionRule(
+      "bash(npm run:*)",
+      "allow",
+      "localSettings",
+      ctx.settingsDir,
+      persistenceOptions(ctx),
+    );
+    await persistPermissionRule(
+      "bash(npm run:*)",
+      "allow",
+      "localSettings",
+      ctx.settingsDir,
+      persistenceOptions(ctx),
+    ); // 不重复
+    await persistPermissionRule(
+      "edit_file",
+      "deny",
+      "projectSettings",
+      ctx.settingsDir,
+      persistenceOptions(ctx),
+    );
 
-    const local = JSON.parse(await readFile(join(ctx.settingsDir, "settings.local.json"), "utf-8"));
+    const local = JSON.parse(await readFile(await expectedExternalSettingsPath(ctx), "utf-8"));
     expect(local.permissions.allow).toEqual(["bash(npm run:*)"]);
     expect(local.permissions.allow).not.toContain("grep"); // 项目层规则没被复制过来
 
     const project = JSON.parse(await readFile(join(ctx.settingsDir, "settings.json"), "utf-8"));
     expect(project.permissions.allow).toEqual(["grep"]);
     expect(project.permissions.deny).toEqual(["edit_file"]);
+    await expect(readFile(join(ctx.settingsDir, "settings.local.json"), "utf-8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
 
     const merged = await loadContext(ctx);
     expect(merged.permissions?.allow).toEqual(["grep", "bash(npm run:*)"]);
@@ -117,7 +160,7 @@ describe("settings", () => {
     expect(isAllowed(s, "bash")).toBe(false); // 只放行了特定前缀，不等于放行整个工具
   });
 
-  it("未信任工作区过滤两层可执行与放宽权限配置，同时保留限制规则", async () => {
+  it("未信任时 project 与 legacy 仅保留限制，external local 完整生效", async () => {
     const ctx = await makeSettingsContext();
     await saveSettings(
       {
@@ -146,16 +189,32 @@ describe("settings", () => {
       }),
       "utf-8",
     );
+    const externalPath = await expectedExternalSettingsPath(ctx);
+    await mkdir(dirname(externalPath), { recursive: true });
+    await writeFile(
+      externalPath,
+      JSON.stringify({
+        mcpServers: { external: { command: "external-mcp" } },
+        statusLine: { command: "external-status" },
+        permissions: {
+          allow: ["external-allow"],
+          deny: ["external-deny"],
+          ask: ["external-ask"],
+          defaultMode: "acceptEdits",
+        },
+      }),
+      "utf-8",
+    );
 
     const settings = await loadContext(ctx);
 
-    expect(settings.mcpServers).toBeUndefined();
-    expect(settings.statusLine).toBeUndefined();
+    expect(settings.mcpServers).toEqual({ external: { command: "external-mcp" } });
+    expect(settings.statusLine).toEqual({ command: "external-status" });
     expect(settings.permissions).toEqual({
-      allow: [],
-      deny: ["project-deny", "local-deny"],
-      ask: ["project-ask", "local-ask"],
-      defaultMode: undefined,
+      allow: ["external-allow"],
+      deny: ["project-deny", "local-deny", "external-deny"],
+      ask: ["project-ask", "local-ask", "external-ask"],
+      defaultMode: "acceptEdits",
     });
   });
 
@@ -197,7 +256,121 @@ describe("settings", () => {
     expect(stored).toEqual({ version: 1, trustedWorkspaces: [canonical] });
   });
 
-  it("受信任工作区保留项目配置行为", async () => {
+  it("设置源决定信任身份，受信任 caller 不能把信任借给另一工作区", async () => {
+    const ctx = await makeSettingsContext();
+    const trustedCaller = join(dirname(ctx.workspace), "trusted-caller");
+    await mkdir(trustedCaller, { recursive: true });
+    await trustWorkspace(trustedCaller, ctx.trustStorePath);
+    await saveSettings(
+      {
+        mcpServers: { borrowed: { command: "borrowed-mcp" } },
+        statusLine: { command: "borrowed-status" },
+        permissions: { allow: ["bash"], defaultMode: "bypassPermissions" },
+      },
+      ctx.settingsDir,
+    );
+
+    const previousCwd = process.cwd();
+    let settings: Awaited<ReturnType<typeof loadSettings>>;
+    try {
+      process.chdir(trustedCaller);
+      settings = await loadSettings(ctx.settingsDir, {
+        trustStorePath: ctx.trustStorePath,
+        userConfigDir: ctx.userConfigDir,
+      });
+    } finally {
+      process.chdir(previousCwd);
+    }
+
+    expect(settings.mcpServers).toBeUndefined();
+    expect(settings.statusLine).toBeUndefined();
+    expect(settings.permissions?.allow ?? []).toEqual([]);
+    expect(settings.permissions?.defaultMode).toBeUndefined();
+  });
+
+  it("显式 workspace 断言与 canonical 设置源不匹配时 fail closed", async () => {
+    const ctx = await makeSettingsContext();
+    const trustedWorkspace = join(dirname(ctx.workspace), "trusted-workspace");
+    await mkdir(trustedWorkspace, { recursive: true });
+    await trustWorkspace(trustedWorkspace, ctx.trustStorePath);
+    await saveSettings(
+      { mcpServers: { borrowed: { command: "borrowed-mcp" } } },
+      ctx.settingsDir,
+    );
+
+    await expect(
+      loadSettings(ctx.settingsDir, {
+        workspace: trustedWorkspace,
+        trustStorePath: ctx.trustStorePath,
+      }),
+    ).rejects.toThrow(/settings source.*workspace/i);
+  });
+
+  it("工作区内的 .transup symlink 逃逸不能借用工作区信任", async () => {
+    const root = await mkdtemp(join(tmpdir(), "transup-settings-escape-"));
+    const workspace = join(root, "workspace");
+    const outsideSettings = join(root, "outside-settings");
+    const settingsDir = join(workspace, ".transup");
+    const trustStorePath = join(root, "config", "trusted-workspaces.json");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(outsideSettings, { recursive: true });
+    await symlink(outsideSettings, settingsDir, "dir");
+    await trustWorkspace(workspace, trustStorePath);
+    await saveSettings(
+      {
+        statusLine: { command: "escaped-status" },
+        permissions: { allow: ["bash"], defaultMode: "bypassPermissions" },
+      },
+      settingsDir,
+    );
+
+    await expect(
+      loadSettings(settingsDir, { workspace, trustStorePath }),
+    ).rejects.toThrow(/settings source.*workspace/i);
+  });
+
+  it("dangling .transup symlink 必须 fail closed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "transup-settings-dangling-"));
+    const workspace = join(root, "workspace");
+    const settingsDir = join(workspace, ".transup");
+    const trustStorePath = join(root, "config", "trusted-workspaces.json");
+    await mkdir(workspace, { recursive: true });
+    await symlink(join(root, "missing-settings"), settingsDir, "dir");
+    await trustWorkspace(workspace, trustStorePath);
+
+    await expect(
+      loadSettings(settingsDir, { workspace, trustStorePath }),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("canonical workspace alias 共享同一个 external local 文件", async () => {
+    const ctx = await makeSettingsContext();
+    const alias = join(dirname(ctx.workspace), "workspace-alias");
+    await symlink(ctx.workspace, alias, "dir");
+
+    await persistPermissionRule(
+      "bash(npm run:*)",
+      "allow",
+      "localSettings",
+      join(alias, ".transup"),
+      { workspace: alias, userConfigDir: ctx.userConfigDir },
+    );
+    await persistPermissionRule(
+      "edit_file",
+      "allow",
+      "localSettings",
+      ctx.settingsDir,
+      persistenceOptions(ctx),
+    );
+
+    const external = JSON.parse(await readFile(await expectedExternalSettingsPath(ctx), "utf-8"));
+    expect(external.permissions.allow).toEqual(["bash(npm run:*)", "edit_file"]);
+    expect(await expectedExternalSettingsPath(ctx, alias)).toBe(
+      await expectedExternalSettingsPath(ctx),
+    );
+  });
+
+  it("受信任工作区按 project < legacy < external 合并", async () => {
     const ctx = await makeSettingsContext();
     await trustWorkspace(ctx.workspace, ctx.trustStorePath);
     await saveSettings(
@@ -223,16 +396,31 @@ describe("settings", () => {
       }),
       "utf-8",
     );
+    const externalPath = await expectedExternalSettingsPath(ctx);
+    await mkdir(dirname(externalPath), { recursive: true });
+    await writeFile(
+      externalPath,
+      JSON.stringify({
+        mcpServers: {
+          shared: { command: "external-mcp" },
+          external: { command: "external-only-mcp" },
+        },
+        statusLine: { command: "external-status" },
+        permissions: { allow: ["list_dir"], defaultMode: "default" },
+      }),
+      "utf-8",
+    );
 
     const settings = await loadContext(ctx);
 
     expect(settings.mcpServers).toEqual({
-      shared: { command: "local-mcp" },
+      shared: { command: "external-mcp" },
       project: { command: "project-only-mcp" },
       local: { command: "local-only-mcp" },
+      external: { command: "external-only-mcp" },
     });
-    expect(settings.statusLine).toEqual({ command: "local-status" });
-    expect(settings.permissions?.allow).toEqual(["bash", "edit_file"]);
-    expect(settings.permissions?.defaultMode).toBe("acceptEdits");
+    expect(settings.statusLine).toEqual({ command: "external-status" });
+    expect(settings.permissions?.allow).toEqual(["bash", "edit_file", "list_dir"]);
+    expect(settings.permissions?.defaultMode).toBe("default");
   });
 });

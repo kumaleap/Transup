@@ -232,7 +232,7 @@ async function resolveSession(): Promise<{ id: string; history: Message[] }> {
 
 const provider = createProvider();
 const projectContext = await buildProjectContext(process.cwd());
-const { settings, mcp } = await prepareWorkspaceStartup({
+const { settings, settingsContext, mcp } = await prepareWorkspaceStartup({
   onMcpError: (name, err) => {
     const safeName = sanitizeTerminalText(name, {
       preserveNewlines: false,
@@ -282,6 +282,7 @@ const instance = render(
     projectContext,
     tools,
     settings,
+    settingsContext,
     initialSessionId: id,
     initialHistory: history,
     mcpToolCount: mcp.tools.length,

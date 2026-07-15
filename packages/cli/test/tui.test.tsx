@@ -1802,6 +1802,60 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   });
 
+  it("持久权限把 workspace 与 user config identity 传给 external local 写入", async () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-tui-persist-context-"));
+    const workspace = join(root, "workspace");
+    const settingsDir = join(workspace, ".transup");
+    const userConfigDir = join(root, "account-config");
+    mkdirSync(settingsDir, { recursive: true });
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command: "echo ok" }) }],
+      },
+      { content: "external local 已保存" },
+    ]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        settingsContext={{ workspace, settingsDir, userConfigDir }}
+        initialSessionId={`tui-persist-context-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("运行命令");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("external local 已保存"), {
+        timeout: 3000,
+      });
+
+      expect(persistSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^bash\(/),
+        "allow",
+        "localSettings",
+        settingsDir,
+        { workspace, userConfigDir },
+      );
+    } finally {
+      instance.unmount();
+      persistSpy.mockRestore();
+    }
+  });
+
   it("Shift+Tab 循环到 plan 模式：写操作直接拒绝并回流引导文案", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const target = join(dir, "plan.txt").replace(/\\/g, "/");
