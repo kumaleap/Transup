@@ -139,6 +139,19 @@ describe("renderEditPreview", () => {
     );
     expect(out).toMatch(/… \+\d+ 行/);
   });
+
+  it("renders distinct control bytes as visible escapes instead of a false +0/-0 diff", () => {
+    const out = renderEditPreview(
+      { path: "/n.ts", old_string: "same\x00", new_string: "same\x01" },
+      60,
+    );
+    const plain = stripAnsi(out);
+
+    expect(plain).toContain("（+1 行，-1 行）");
+    expect(plain).toContain("same\\x00");
+    expect(plain).toContain("same\\x01");
+    expect(plain).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/);
+  });
 });
 
 describe("renderWritePreview", () => {
@@ -161,5 +174,25 @@ describe("renderWritePreview", () => {
     writeFileSync(file, "old\n");
     const out = stripAnsi(renderWritePreview({ path: file, content: "new" }, 40));
     expect(out).toContain("⚠ 覆盖已有文件");
+  });
+
+  it("existing non-file targets return a safe warning instead of throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-diff-directory-"));
+    const out = stripAnsi(renderWritePreview({ path: dir, content: "new" }, 40));
+
+    expect(out).toContain("⚠ 目标不是普通文件");
+    expect(out).toContain("新 1 行");
+  });
+
+  it("write content renders terminal controls as visible escapes", () => {
+    const out = renderWritePreview(
+      { path: "/definitely/not/exist-control.ts", content: "before\x1b]52;c;attack\x07after" },
+      80,
+    );
+    const plain = stripAnsi(out);
+
+    expect(plain).toContain("before\\x1b]52;c;attack\\x07after");
+    expect(out).not.toContain("\x1b]52;");
+    expect(out).not.toContain("\x07");
   });
 });

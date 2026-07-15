@@ -6,10 +6,10 @@
  * 1 空格 + 符号(+/-/空格) + 代码，增删行整行铺深绿/深红背景，
  * 未变化行作为上下文原样穿插。diff 本身用 LCS 按行对齐，不引入库。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { color } from "./ui.js";
 import { paint } from "./theme.js";
-import { sanitizeTerminalText } from "./highlight.js";
+import { escapeTerminalControls } from "./highlight.js";
 
 const MAX_PREVIEW_LINES = 40;
 /** LCS 的 DP 规模上限，超过退化为整段删除+整段新增（预览语义不变） */
@@ -20,6 +20,7 @@ const CONTEXT_LINES = 3;
 const CHANGE_THRESHOLD = 0.4;
 /** 单行词级 diff 的 token 上限，超长行不做词级（DP 代价与视觉收益都不划算） */
 const MAX_WORD_DIFF_TOKENS = 120;
+const MAX_PREVIEW_SOURCE_BYTES = 1024 * 1024;
 
 type RowKind = "add" | "del" | "ctx";
 interface Row {
@@ -326,14 +327,34 @@ function renderRows(rows: Row[], width = defaultWidth()): string[] {
   return out;
 }
 
-/** old_string 在文件里的起始行号（找不到或读不了则从 1 起） */
-function startLineOf(path: string, oldStr: string): number {
+type PreviewSource =
+  | { kind: "missing" }
+  | { kind: "non-file" }
+  | { kind: "too-large" }
+  | { kind: "unreadable" }
+  | { kind: "file"; text: string };
+
+function readPreviewSource(path: string): PreviewSource {
   try {
-    const src = readFileSync(path, "utf-8");
+    const stat = statSync(path);
+    if (!stat.isFile()) return { kind: "non-file" };
+    if (stat.size > MAX_PREVIEW_SOURCE_BYTES) return { kind: "too-large" };
+    return { kind: "file", text: readFileSync(path, "utf-8") };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR"
+      ? { kind: "missing" }
+      : { kind: "unreadable" };
+  }
+}
+
+/** old_string 在文件里的起始行号（找不到或无法安全读取则从 1 起） */
+function startLineOf(path: string, oldStr: string): number {
+  const source = readPreviewSource(path);
+  if (source.kind === "file") {
+    const src = source.text;
     const idx = src.indexOf(oldStr);
     if (idx >= 0) return src.slice(0, idx).split("\n").length;
-  } catch {
-    // 预览是尽力而为，行号回退到 1 即可
   }
   return 1;
 }
@@ -342,9 +363,9 @@ function startLineOf(path: string, oldStr: string): number {
 export function renderEditPreview(args: Record<string, unknown>, width?: number): string {
   const rawPath = String(args.path ?? "");
   const rawOldStr = String(args.old_string ?? "");
-  const path = sanitizeTerminalText(rawPath, { preserveNewlines: false, preserveTabs: false });
-  const oldStr = sanitizeTerminalText(rawOldStr);
-  const newStr = sanitizeTerminalText(String(args.new_string ?? ""));
+  const path = escapeTerminalControls(rawPath, { preserveNewlines: false, preserveTabs: false });
+  const oldStr = escapeTerminalControls(rawOldStr);
+  const newStr = escapeTerminalControls(String(args.new_string ?? ""));
 
   const rows = diffRows(oldStr, newStr, startLineOf(rawPath, rawOldStr));
   const added = rows.filter((r) => r.kind === "add").length;
@@ -365,23 +386,40 @@ export function renderEditPreview(args: Record<string, unknown>, width?: number)
 /** write_file 的预览：新建显示内容头部，覆盖则明确警告 */
 export function renderWritePreview(args: Record<string, unknown>, width?: number): string {
   const rawPath = String(args.path ?? "");
-  const path = sanitizeTerminalText(rawPath, { preserveNewlines: false, preserveTabs: false });
-  const content = sanitizeTerminalText(String(args.content ?? ""));
+  const path = escapeTerminalControls(rawPath, { preserveNewlines: false, preserveTabs: false });
+  const content = escapeTerminalControls(String(args.content ?? ""));
   const lineCount = content.split("\n").length;
 
-  const overwriting = existsSync(rawPath);
+  const source = readPreviewSource(rawPath);
   // 与 renderEditPreview 同款：统计数字 bold，dim 文案分段拼接
-  const header = overwriting
-    ? color.red(color.bold(`  ⚠ 覆盖已有文件 ${path}`)) +
-      color.dim("（原文件 ") +
-      color.bold(String(readFileSync(rawPath, "utf-8").split("\n").length)) +
-      color.dim(" 行 → 新 ") +
-      color.bold(String(lineCount)) +
-      color.dim(" 行）")
-    : color.bold(`  新建 ${path}`) +
+  let header: string;
+  if (source.kind === "missing") {
+    header =
+      color.bold(`  新建 ${path}`) +
       color.dim("（") +
       color.bold(String(lineCount)) +
       color.dim(" 行）");
+  } else if (source.kind === "file") {
+    header =
+      color.red(color.bold(`  ⚠ 覆盖已有文件 ${path}`)) +
+      color.dim("（原文件 ") +
+      color.bold(String(source.text.split("\n").length)) +
+      color.dim(" 行 → 新 ") +
+      color.bold(String(lineCount)) +
+      color.dim(" 行）");
+  } else {
+    const warning =
+      source.kind === "non-file"
+        ? "目标不是普通文件"
+        : source.kind === "too-large"
+          ? "原文件超过 1 MiB 预览上限"
+          : "无法读取已有文件";
+    header =
+      color.red(color.bold(`  ⚠ ${warning} ${path}`)) +
+      color.dim("（新 ") +
+      color.bold(String(lineCount)) +
+      color.dim(" 行）");
+  }
 
   const rows = content
     .split("\n")
