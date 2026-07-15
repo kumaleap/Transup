@@ -84,7 +84,14 @@ export async function readTrace(path: string): Promise<TraceEntry[]> {
 }
 
 function traceField(value: unknown): string {
-  return sanitizeTerminalField(String(value));
+  if (typeof value === "string") return sanitizeTerminalField(value);
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized !== undefined) return sanitizeTerminalField(serialized);
+  } catch {
+    // Replay must remain readable even for values supplied by direct API callers.
+  }
+  return `[${typeof value}]`;
 }
 
 export function renderTrace(entries: TraceEntry[]): string {
@@ -112,7 +119,7 @@ function formatEvent(event: AgentEvent): string {
     case "tool_start":
       return (
         `tool_start: ${traceField(event.call.name)}(` +
-        `${traceField(JSON.stringify(event.parsedArgs))})`
+        `${traceField(event.parsedArgs)})`
       );
     case "tool_progress":
       return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;

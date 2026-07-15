@@ -178,18 +178,18 @@ describe("trace replay renderer", () => {
       sessionId: null,
       providerId: 42,
       model: false,
-      cwd: { path: "/repo" },
+      cwd: { toString: null, path: "/repo" },
       turn: null,
       event: {
         type: "tool_start",
-        call: { id: "t1", name: null, args: "{}" },
+        call: { id: "t1", name: { toString: null }, args: "{}" },
         parsedArgs: null,
       },
     }));
 
     const text = renderTrace(await readTrace(recorder.path));
 
-    expect(text).toContain("Trace null · 42/false · [object Object]");
-    expect(text).toContain("[null] tool_start: null(null)");
+    expect(text).toContain('Trace null · 42/false · {"toString":null,"path":"/repo"}');
+    expect(text).toContain('[null] tool_start: {"toString":null}(null)');
   });
 });
