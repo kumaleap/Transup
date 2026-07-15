@@ -56,6 +56,56 @@ describe("工具执行管线", () => {
     expect(r.content).toContain("拒绝");
   });
 
+  it("legacy boolean false denies execution instead of failing open", async () => {
+    const execute = vi.fn(async () => "must not run");
+    const local = captureRegistry(execute);
+
+    const result = await local.execute(
+      "legacy-false",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      (async () => false) as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("拒绝");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("malformed permission decisions fail closed without rejecting the tool pipeline", async () => {
+    const execute = vi.fn(async () => "must not run");
+    const local = captureRegistry(execute);
+
+    const result = await local.execute(
+      "malformed-decision",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      (async () => null) as any,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("权限检查");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("permission callback failures return an error result without executing the tool", async () => {
+    const execute = vi.fn(async () => "must not run");
+    const local = captureRegistry(execute);
+
+    const result = await local.execute(
+      "permission-error",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      async () => {
+        throw new Error("permission host unavailable");
+      },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("权限检查失败");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("只读工具也过权限回调（deny 规则才能管到它们），并带 readOnly 标记", async () => {
     let seenReadOnly: boolean | undefined;
     const spy = async (_n: string, _a: Record<string, unknown>, meta: { readOnly: boolean }) => {

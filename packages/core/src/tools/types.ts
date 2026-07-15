@@ -56,8 +56,11 @@ export type PermissionDecision =
       message?: string;
     };
 
+/** Boolean results remain supported for hosts compiled against the pre-dialog API. */
+export type PermissionResult = PermissionDecision | boolean;
+
 export type PermissionFn = (
   toolName: string,
   args: Record<string, unknown>,
   meta: { readOnly: boolean },
-) => Promise<PermissionDecision>;
+) => Promise<PermissionResult>;

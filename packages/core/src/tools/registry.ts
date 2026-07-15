@@ -8,7 +8,7 @@
  * 同一套管线可以跑在终端（弹确认）、CI（自动策略）、IDE（弹窗）。
  */
 import { z } from "zod";
-import type { Tool, ToolResult, PermissionFn } from "./types.js";
+import type { PermissionDecision, PermissionFn, Tool, ToolResult } from "./types.js";
 import type { ToolSpec } from "../provider/types.js";
 import { readFileTool } from "./read-file.js";
 import { listDirTool } from "./list-dir.js";
@@ -25,6 +25,31 @@ export const builtinTools: Tool[] = [
   editFileTool,
   bashTool,
 ];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizePermissionDecision(value: unknown): PermissionDecision | null {
+  if (value === true) return { behavior: "allow" };
+  if (value === false) return { behavior: "deny" };
+  if (!isRecord(value)) return null;
+  if (value.behavior === "deny") {
+    if (value.message !== undefined && typeof value.message !== "string") return null;
+    return {
+      behavior: "deny",
+      ...(typeof value.message === "string" ? { message: value.message } : {}),
+    };
+  }
+  if (value.behavior !== "allow") return null;
+  if (value.updatedInput !== undefined && !isRecord(value.updatedInput)) return null;
+  if (value.feedback !== undefined && typeof value.feedback !== "string") return null;
+  return {
+    behavior: "allow",
+    ...(isRecord(value.updatedInput) ? { updatedInput: value.updatedInput } : {}),
+    ...(typeof value.feedback === "string" ? { feedback: value.feedback } : {}),
+  };
+}
 
 export class ToolRegistry {
   private map: Map<string, Tool>;
@@ -73,9 +98,17 @@ export class ToolRegistry {
       );
     }
 
-    const decision = await canUse(name, check.data as Record<string, unknown>, {
-      readOnly: tool.readOnly,
-    });
+    let rawDecision: unknown;
+    try {
+      rawDecision = await canUse(name, check.data as Record<string, unknown>, {
+        readOnly: tool.readOnly,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? `: ${error.message}` : "";
+      return fail(`权限检查失败${detail}`);
+    }
+    const decision = normalizePermissionDecision(rawDecision);
+    if (!decision) return fail("权限检查返回无效结果，已拒绝执行。");
     if (decision.behavior === "deny") {
       return fail(decision.message ?? "用户拒绝了本次操作。请询问用户希望如何处理，不要重复尝试。");
     }
