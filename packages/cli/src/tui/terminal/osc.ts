@@ -43,7 +43,10 @@ export function wrapForMultiplexer(sequence: string, mux: Multiplexer): string {
 /** 标题/通知文本里的控制字符会截断序列本身 —— 一律剥掉 */
 export function sanitize(text: string): string {
   // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1f\x7f]/g, " ").trim();
+  return text
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+    .trim();
 }
 
 /** OSC 0：同时设置窗口标题与图标名 */

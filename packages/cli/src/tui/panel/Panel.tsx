@@ -7,6 +7,7 @@
 import React from "react";
 import { Box, Text } from "../runtime/index.js";
 import { T } from "../../theme.js";
+import { sanitizeTerminalField } from "../../highlight.js";
 import type { PanelView } from "./use-panel-controller.js";
 
 const VISIBLE = 10;
@@ -20,7 +21,7 @@ export function Panel({ view }: { view: PanelView }) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={T.primary} paddingX={1}>
       <Text color={T.primary} bold>
-        {title}
+        {sanitizeTerminalField(title)}
       </Text>
       {options.length === 0 && <Text dimColor>（空）</Text>}
       {start > 0 && <Text dimColor>  ↑ 还有 {start} 条</Text>}
@@ -29,8 +30,10 @@ export function Panel({ view }: { view: PanelView }) {
         const focused = index === focusIndex;
         return (
           <Text key={option.value} color={focused ? T.primary : undefined}>
-            {focused ? "❯" : " "} {index + 1}. {option.label}
-            {option.description && <Text dimColor>  {option.description}</Text>}
+            {focused ? "❯" : " "} {index + 1}. {sanitizeTerminalField(option.label)}
+            {option.description && (
+              <Text dimColor>  {sanitizeTerminalField(option.description)}</Text>
+            )}
           </Text>
         );
       })}

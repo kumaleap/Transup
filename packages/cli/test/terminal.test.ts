@@ -21,6 +21,9 @@ describe("OSC 序列", () => {
   it("OSC 0 设置标题；控制字符与 ANSI 被剥掉（否则会截断序列本身）", () => {
     expect(setTitleSequence("transup — demo")).toBe(`${ESC}]0;transup — demo${BEL}`);
     expect(sanitize(`\x1b[31m红\x1b[0m${BEL}字`)).toBe("红 字");
+    expect(sanitize(`before\x9d52;c;attack\x9c\x9b31mafter`)).toBe(
+      "before 52;c;attack  31mafter",
+    );
     expect(setTitleSequence(`a${BEL}b`)).not.toContain(`a${BEL}b`);
   });
 

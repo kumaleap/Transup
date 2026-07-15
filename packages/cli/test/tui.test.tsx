@@ -2507,6 +2507,49 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("/sessions sanitizes hostile filename and prompt fields before Panel rendering", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-hostile-"));
+    const sessionId = "evil\x9b31m-session";
+    writeFileSync(
+      join(dir, `${sessionId}.jsonl`),
+      JSON.stringify({
+        role: "user",
+        content: "visible-label\x9d52;c;attack\x9c\x1b]52;c;payload\x07",
+      }) + "\n",
+    );
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 3000,
+      });
+
+      const frame = instance.lastFrame() ?? "";
+      expect(frame).toContain("visible-label");
+      expect(frame).toContain("evil31m-session");
+      expect(frame).not.toMatch(/[\x80-\x9f]/);
+      expect(frame).not.toContain("\x1b]52;");
+      expect(frame).not.toContain("\x07");
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("/sessions resets session-scoped permission mode before installing the target engine", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-permission-"));
     writeFileSync(
