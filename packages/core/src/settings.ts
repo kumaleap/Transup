@@ -9,10 +9,12 @@
  *
  * 权限规则语法见 permissions.ts（工具级 / 前缀通配 / 内容级）。
  */
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { lstat, mkdir, open, realpath, rename, rm, rmdir, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import { userInfo } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type { McpServerConfig } from "./tools/mcp.js";
 import {
   ruleMatches,
@@ -47,10 +49,223 @@ const LEGACY_LOCAL_SETTINGS_FILE = "settings.local.json";
 const WORKSPACE_SETTINGS_DIR = "workspaces";
 const TRUST_STORE_VERSION = 1;
 const TRUST_STORE_FILE = "trusted-workspaces.json";
+const SETTINGS_LOCKS_DIR = "locks";
+const SETTINGS_LOCK_WAIT_MS = 10_000;
+const SETTINGS_LOCK_RETRY_MS = 20;
+
+const settingsWriteQueues = new Map<string, Promise<void>>();
 
 interface WorkspaceTrustStore {
   version: typeof TRUST_STORE_VERSION;
   trustedWorkspaces: string[];
+}
+
+async function settingsLockPath(path: string, userConfigDir: string): Promise<string> {
+  const absolutePath = resolve(path);
+  await mkdir(dirname(absolutePath), { recursive: true, mode: 0o700 });
+  const canonicalTarget = join(await realpath(dirname(absolutePath)), basename(absolutePath));
+  const lockDir = resolve(userConfigDir, SETTINGS_LOCKS_DIR);
+  await mkdir(lockDir, { recursive: true, mode: 0o700 });
+  const targetKey = createHash("sha256").update(canonicalTarget).digest("hex");
+  return join(await realpath(lockDir), `${targetKey}.lock`);
+}
+
+function settingsBackendMarkerPath(lockPath: string): string {
+  return `${lockPath}.fallback`;
+}
+
+function fallbackLockConflict(path: string, cause: unknown): Error {
+  return new Error(
+    `Fallback settings lock already exists: ${path}. `
+    + "Confirm no Transup process is running before manually removing this artifact.",
+    { cause },
+  );
+}
+
+async function acquireFallbackSettingsLock(lockPath: string): Promise<() => Promise<void>> {
+  const fallbackPath = settingsBackendMarkerPath(lockPath);
+  try {
+    await mkdir(fallbackPath, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw fallbackLockConflict(fallbackPath, error);
+    }
+    throw error;
+  }
+  const ownerPath = join(fallbackPath, randomUUID());
+  try {
+    const owner = await open(ownerPath, "wx", 0o600);
+    await owner.close();
+  } catch (error) {
+    await rmdir(fallbackPath).catch(() => {});
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await unlink(ownerPath);
+    await rmdir(fallbackPath);
+  };
+}
+
+async function acquireNativeBackendMarker(lockPath: string): Promise<() => Promise<void>> {
+  const markerPath = settingsBackendMarkerPath(lockPath);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(markerPath, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    let markerEntry: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      markerEntry = await lstat(markerPath);
+    } catch (lstatError) {
+      if ((lstatError as NodeJS.ErrnoException).code !== "ENOENT") throw lstatError;
+    }
+    if (markerEntry !== undefined) {
+      if (!markerEntry.isFile()) throw fallbackLockConflict(markerPath, error);
+      await unlink(markerPath);
+    }
+    try {
+      handle = await open(markerPath, "wx", 0o600);
+    } catch (retryError) {
+      if ((retryError as NodeJS.ErrnoException).code === "EEXIST") {
+        throw fallbackLockConflict(markerPath, retryError);
+      }
+      throw retryError;
+    }
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await handle.close();
+    await unlink(markerPath);
+  };
+}
+
+async function acquireSettingsLock(lockPath: string): Promise<() => Promise<void>> {
+  let fsNativeExtensions: (typeof import("fs-native-extensions"))["default"];
+  try {
+    ({ default: fsNativeExtensions } = await import("fs-native-extensions"));
+  } catch {
+    return acquireFallbackSettingsLock(lockPath);
+  }
+  const deadline = Date.now() + SETTINGS_LOCK_WAIT_MS;
+  // The stable inode is the synchronization primitive; never rename or unlink this file.
+  const handle = await open(lockPath, "a+", 0o600);
+  let locked = false;
+  let releaseMarker: (() => Promise<void>) | undefined;
+
+  try {
+    while (!fsNativeExtensions.tryLock(handle.fd)) {
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for settings lock: ${lockPath}`);
+      }
+      await delay(SETTINGS_LOCK_RETRY_MS);
+    }
+    locked = true;
+    releaseMarker = await acquireNativeBackendMarker(lockPath);
+  } catch (error) {
+    if (locked) {
+      try {
+        fsNativeExtensions.unlock(handle.fd);
+      } catch {
+        // Preserve the acquisition failure.
+      }
+    }
+    await handle.close().catch(() => {});
+    throw error;
+  }
+
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    let releaseError: unknown;
+    try {
+      await releaseMarker?.();
+    } catch (error) {
+      releaseError = error;
+    }
+    try {
+      fsNativeExtensions.unlock(handle.fd);
+    } catch (error) {
+      if (releaseError === undefined) releaseError = error;
+    }
+    try {
+      await handle.close();
+    } catch (error) {
+      if (releaseError === undefined) releaseError = error;
+    }
+    if (releaseError !== undefined) throw releaseError;
+  };
+}
+
+async function serializeSettingsWrite<T>(path: string, action: () => Promise<T>): Promise<T> {
+  const previous = settingsWriteQueues.get(path) ?? Promise.resolve();
+  const run = previous.catch(() => {}).then(action);
+  const tail = run.then(() => undefined, () => undefined);
+  settingsWriteQueues.set(path, tail);
+  try {
+    return await run;
+  } finally {
+    if (settingsWriteQueues.get(path) === tail) settingsWriteQueues.delete(path);
+  }
+}
+
+async function withSettingsWriteLock<T>(
+  path: string,
+  action: () => Promise<T>,
+  userConfigDir: string = defaultUserConfigDir(),
+): Promise<T> {
+  const lockPath = await settingsLockPath(path, userConfigDir);
+  return serializeSettingsWrite(lockPath, async () => {
+    const release = await acquireSettingsLock(lockPath);
+    let primaryError: unknown;
+    try {
+      return await action();
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      try {
+        await release();
+      } catch (releaseError) {
+        if (primaryError === undefined) throw releaseError;
+      }
+    }
+  });
+}
+
+async function atomicWriteJson(path: string, value: unknown, mode: number = 0o666): Promise<void> {
+  const payload = JSON.stringify(value, null, 2) + "\n";
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  let existingMode: number | undefined;
+  try {
+    const existing = await lstat(path);
+    if (existing.isFile()) existingMode = existing.mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const temporaryPath = join(
+    dirname(path),
+    `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(temporaryPath, "wx", existingMode ?? mode);
+    if (existingMode !== undefined) await handle.chmod(existingMode);
+    await handle.writeFile(payload, "utf-8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporaryPath, path);
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 export interface SettingsPersistenceOptions {
@@ -70,9 +285,37 @@ export interface LoadSettingsOptions extends SettingsPersistenceOptions {
   trustStorePath?: string;
 }
 
-async function loadPath(path: string): Promise<Settings> {
+async function readRegularFile(path: string): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
-    return JSON.parse(await readFile(path, "utf-8"));
+    const [openedFile, pathEntry] = await Promise.all([
+      handle.stat({ bigint: true }),
+      lstat(path, { bigint: true }),
+    ]);
+    if (
+      !openedFile.isFile()
+      || !pathEntry.isFile()
+      || openedFile.dev !== pathEntry.dev
+      || openedFile.ino !== pathEntry.ino
+    ) {
+      throw new Error(`Refusing to read a path that is not the same regular file: ${path}`);
+    }
+    return await handle.readFile("utf-8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function loadPath(path: string): Promise<Settings> {
+  let raw: string;
+  try {
+    raw = await readRegularFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return {};
+  }
+  try {
+    return JSON.parse(raw);
   } catch {
     return {};
   }
@@ -160,11 +403,14 @@ function parseTrustStore(raw: string): WorkspaceTrustStore | null {
 }
 
 async function readTrustStore(path: string): Promise<WorkspaceTrustStore | null> {
+  let raw: string;
   try {
-    return parseTrustStore(await readFile(path, "utf-8"));
-  } catch {
+    raw = await readRegularFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return null;
   }
+  return parseTrustStore(raw);
 }
 
 export async function isWorkspaceTrusted(
@@ -188,23 +434,16 @@ export async function trustWorkspace(
   trustStorePath: string = defaultTrustStorePath(),
 ): Promise<string> {
   const canonical = await realpath(workspace);
-  const existing = await readTrustStore(trustStorePath);
-  const trustedWorkspaces = existing?.trustedWorkspaces ?? [];
-  if (!trustedWorkspaces.includes(canonical)) trustedWorkspaces.push(canonical);
-
-  await mkdir(dirname(trustStorePath), { recursive: true, mode: 0o700 });
-  const temporaryPath = `${trustStorePath}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    await writeFile(
-      temporaryPath,
-      JSON.stringify({ version: TRUST_STORE_VERSION, trustedWorkspaces }, null, 2) + "\n",
-      { encoding: "utf-8", mode: 0o600, flag: "wx" },
+  await withSettingsWriteLock(trustStorePath, async () => {
+    const existing = await readTrustStore(trustStorePath);
+    const trustedWorkspaces = [...(existing?.trustedWorkspaces ?? [])];
+    if (!trustedWorkspaces.includes(canonical)) trustedWorkspaces.push(canonical);
+    await atomicWriteJson(
+      trustStorePath,
+      { version: TRUST_STORE_VERSION, trustedWorkspaces },
+      0o600,
     );
-    await rename(temporaryPath, trustStorePath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true });
-    throw error;
-  }
+  }, dirname(resolve(trustStorePath)));
   return canonical;
 }
 
@@ -259,9 +498,17 @@ export async function loadSettings(
 }
 
 /** 覆写项目级设置文件（不触碰 local 层） */
-export async function saveSettings(settings: Settings, dir: string = SETTINGS_DIR): Promise<void> {
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, SETTINGS_FILE), JSON.stringify(settings, null, 2) + "\n", "utf-8");
+export async function saveSettings(
+  settings: Settings,
+  dir: string = SETTINGS_DIR,
+  options: Pick<SettingsPersistenceOptions, "userConfigDir"> = {},
+): Promise<void> {
+  const path = join(dir, SETTINGS_FILE);
+  await withSettingsWriteLock(
+    path,
+    () => atomicWriteJson(path, settings),
+    options.userConfigDir ?? defaultUserConfigDir(),
+  );
 }
 
 /** 合并后的设置 → 判定用规则集 */
@@ -290,23 +537,25 @@ export async function persistPermissionRule(
   options: SettingsPersistenceOptions = {},
 ): Promise<void> {
   const source = await resolveSettingsSource(dir, options.workspace);
+  const userConfigDir = options.userConfigDir ?? defaultUserConfigDir();
   const path = destination === "projectSettings"
     ? join(source.settingsDir, SETTINGS_FILE)
     : externalSettingsPath(
         source.workspace,
-        options.userConfigDir ?? defaultUserConfigDir(),
+        userConfigDir,
       );
-  const layer = await loadPath(path);
-  layer.permissions ??= {};
-  const rules = (layer.permissions[list] ??= []);
-  if (!rules.includes(rule)) {
+  await withSettingsWriteLock(path, async () => {
+    const layer = await loadPath(path);
+    layer.permissions ??= {};
+    const rules = (layer.permissions[list] ??= []);
+    if (rules.includes(rule)) return;
     rules.push(rule);
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await writeFile(path, JSON.stringify(layer, null, 2) + "\n", {
-      encoding: "utf-8",
-      ...(destination === "localSettings" ? { mode: 0o600 } : {}),
-    });
-  }
+    await atomicWriteJson(
+      path,
+      layer,
+      destination === "localSettings" ? 0o600 : 0o666,
+    );
+  }, userConfigDir);
 }
 
 /** @deprecated 用 persistPermissionRule；保留给旧调用方（写 local 层工具级 allow） */
