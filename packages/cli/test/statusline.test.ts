@@ -50,6 +50,19 @@ describe("runStatusLineCommand", () => {
     expect(out).toBe("a\nb");
   });
 
+  it("同步 spawn 参数错误也静默 resolve null", async () => {
+    await expect(
+      runStatusLineCommand({ command: "invalid\x00command" }, input),
+    ).resolves.toBeNull();
+  });
+
+  it("stdout 超过硬上限时终止并返回 null", async () => {
+    const script = 'process.stdout.write("x".repeat(2_000_000))';
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+
+    await expect(runStatusLineCommand({ command }, input)).resolves.toBeNull();
+  });
+
   it("超时 → kill 并返回 null", async () => {
     const started = Date.now();
     const out = await runStatusLineCommand({ command: "sleep 10", timeoutMs: 120 }, input);

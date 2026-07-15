@@ -26,11 +26,15 @@ export function useStatusLine(
     if (!config?.command) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      void runStatusLineCommand(config, buildInput(), controller.signal).then((result) => {
-        // abort 后 setState 也无妨（结果是 null），但别把旧结果盖掉新的
-        if (!controller.signal.aborted && result !== null) setText(result);
-        if (!controller.signal.aborted && result === null) setText(null);
-      });
+      void runStatusLineCommand(config, buildInput(), controller.signal)
+        .then((result) => {
+          // abort 后 setState 也无妨（结果是 null），但别把旧结果盖掉新的
+          if (!controller.signal.aborted && result !== null) setText(result);
+          if (!controller.signal.aborted && result === null) setText(null);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setText(null);
+        });
     }, DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);

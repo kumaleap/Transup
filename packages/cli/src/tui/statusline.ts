@@ -34,6 +34,7 @@ export interface StatusLineCommand {
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const MAX_STDOUT_BYTES = 64 * 1024;
 
 function killTree(pid: number | undefined): void {
   if (pid == null) return;
@@ -55,6 +56,14 @@ function killTree(pid: number | undefined): void {
   }
 }
 
+function spawnStatusLine(command: string) {
+  return spawn(command, {
+    shell: true,
+    stdio: ["pipe", "pipe", "ignore"] as const,
+    detached: process.platform !== "win32",
+  });
+}
+
 /**
  * 跑一次用户命令。任何失败（超时/非 0/信号/spawn 报错）都返回 null。
  * stdout 按行 trim 后重新拼接（去掉尾部空行，保留中间的多行输出）。
@@ -67,13 +76,16 @@ export function runStatusLineCommand(
   return new Promise((resolve) => {
     if (signal?.aborted) return resolve(null);
 
-    const child = spawn(config.command, {
-      shell: true,
-      stdio: ["pipe", "pipe", "ignore"],
-      detached: process.platform !== "win32",
-    });
+    let child: ReturnType<typeof spawnStatusLine>;
+    try {
+      child = spawnStatusLine(config.command);
+    } catch {
+      resolve(null);
+      return;
+    }
 
     let out = "";
+    let outBytes = 0;
     let settled = false;
     let terminating = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,9 +103,7 @@ export function runStatusLineCommand(
       if (settled || terminating) return;
       terminating = true;
       killTree(child.pid);
-      // A leaked descendant holding either pipe must not keep the close event open.
-      child.stdin.destroy();
-      child.stdout.destroy();
+      settle(null);
     };
     const onAbort = () => {
       terminate();
@@ -106,6 +116,12 @@ export function runStatusLineCommand(
 
     child.stdout.setEncoding("utf-8");
     child.stdout.on("data", (chunk: string) => {
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (outBytes + chunkBytes > MAX_STDOUT_BYTES) {
+        terminate();
+        return;
+      }
+      outBytes += chunkBytes;
       out += chunk;
     });
     child.on("error", () => settle(null));
@@ -122,6 +138,10 @@ export function runStatusLineCommand(
     child.stdin.on("error", () => {
       /* 用户命令不读 stdin 就退出会触发 EPIPE —— 无害 */
     });
-    child.stdin.end(JSON.stringify(input));
+    try {
+      child.stdin.end(JSON.stringify(input));
+    } catch {
+      terminate();
+    }
   });
 }
