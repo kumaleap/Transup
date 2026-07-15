@@ -162,4 +162,34 @@ describe("trace replay renderer", () => {
     expect(lines[2]).toContain("tool_end: tool[99] forgedrow error failed[99] forgedrow");
     expect(lines[3]).toContain("stream_retry: 1/3 retry[99] forgedrow");
   });
+
+  it("replays valid JSONL with non-string display fields without crashing", async () => {
+    const dir = await tempDir();
+    const recorder = new TraceRecorder({
+      dir,
+      sessionId: "seed",
+      providerId: "mock",
+      model: "mock-1",
+      cwd: "/repo",
+    });
+    await recorder.appendRaw(JSON.stringify({
+      version: 1,
+      timestamp: "2026-07-09T00:00:00.000Z",
+      sessionId: null,
+      providerId: 42,
+      model: false,
+      cwd: { path: "/repo" },
+      turn: null,
+      event: {
+        type: "tool_start",
+        call: { id: "t1", name: null, args: "{}" },
+        parsedArgs: null,
+      },
+    }));
+
+    const text = renderTrace(await readTrace(recorder.path));
+
+    expect(text).toContain("Trace null · 42/false · [object Object]");
+    expect(text).toContain("[null] tool_start: null(null)");
+  });
 });

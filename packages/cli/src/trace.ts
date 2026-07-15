@@ -83,16 +83,20 @@ export async function readTrace(path: string): Promise<TraceEntry[]> {
   return entries;
 }
 
+function traceField(value: unknown): string {
+  return sanitizeTerminalField(String(value));
+}
+
 export function renderTrace(entries: TraceEntry[]): string {
   if (entries.length === 0) return "Trace is empty\n";
   const first = entries[0];
   const lines = [
-    `Trace ${sanitizeTerminalField(first.sessionId)} · ` +
-      `${sanitizeTerminalField(first.providerId)}/${sanitizeTerminalField(first.model)} · ` +
-      sanitizeTerminalField(first.cwd),
+    `Trace ${traceField(first.sessionId)} · ` +
+      `${traceField(first.providerId)}/${traceField(first.model)} · ` +
+      traceField(first.cwd),
   ];
   for (const entry of entries) {
-    lines.push(`[${sanitizeTerminalField(String(entry.turn))}] ${formatEvent(entry.event)}`);
+    lines.push(`[${traceField(entry.turn)}] ${formatEvent(entry.event)}`);
   }
   return sanitizeTerminalText(lines.join("\n") + "\n");
 }
@@ -107,35 +111,35 @@ function formatEvent(event: AgentEvent): string {
       return `text: ${oneLine(event.text)}`;
     case "tool_start":
       return (
-        `tool_start: ${sanitizeTerminalField(event.call.name)}(` +
-        `${sanitizeTerminalField(String(JSON.stringify(event.parsedArgs)))})`
+        `tool_start: ${traceField(event.call.name)}(` +
+        `${traceField(JSON.stringify(event.parsedArgs))})`
       );
     case "tool_progress":
-      return `tool_progress: ${sanitizeTerminalField(event.call.name)} ${oneLine(event.chunk)}`;
+      return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;
     case "tool_end":
-      return `tool_end: ${sanitizeTerminalField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
+      return `tool_end: ${traceField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
     case "usage":
       return (
-        `usage: input ${sanitizeTerminalField(String(event.usage.inputTokens))} / ` +
-        `output ${sanitizeTerminalField(String(event.usage.outputTokens))}`
+        `usage: input ${traceField(event.usage.inputTokens)} / ` +
+        `output ${traceField(event.usage.outputTokens)}`
       );
     case "compact_start":
-      return `compact_start: before ${sanitizeTerminalField(String(event.beforeChars))}`;
+      return `compact_start: before ${traceField(event.beforeChars)}`;
     case "compact_end":
-      return `compact_end: ${event.ok ? "ok" : "failed"} after ${sanitizeTerminalField(String(event.afterChars))}`;
+      return `compact_end: ${event.ok ? "ok" : "failed"} after ${traceField(event.afterChars)}`;
     case "stream_retry":
       return (
-        `stream_retry: ${sanitizeTerminalField(String(event.attempt))}/` +
-        `${sanitizeTerminalField(String(event.maxAttempts))} ${oneLine(event.error)}`
+        `stream_retry: ${traceField(event.attempt)}/` +
+        `${traceField(event.maxAttempts)} ${oneLine(event.error)}`
       );
     case "auto_continue":
-      return `auto_continue: ${sanitizeTerminalField(event.reason)}`;
+      return `auto_continue: ${traceField(event.reason)}`;
     case "turn_end":
-      return `turn_end: ${sanitizeTerminalField(event.reason)}`;
+      return `turn_end: ${traceField(event.reason)}`;
   }
 }
 
 function oneLine(text: string): string {
-  const line = sanitizeTerminalField(text).replace(/\s+/g, " ").trim();
+  const line = traceField(text).replace(/\s+/g, " ").trim();
   return line.length > 120 ? line.slice(0, 120) + "..." : line;
 }
