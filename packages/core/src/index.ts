@@ -50,4 +50,4 @@ export {
 export type { Provider, ProviderEvent, Message, StopReason, ToolCall, ToolSpec, Usage } from "./provider/types.js";
 export { ToolRegistry, builtinTools } from "./tools/registry.js";
 export type { Tool, ToolResult, PermissionFn, PermissionDecision } from "./tools/types.js";
-export { SessionStore } from "./session/store.js";
+export { SessionStore, type SessionState } from "./session/store.js";

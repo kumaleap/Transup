@@ -37,6 +37,8 @@ export interface HeadlessOptions {
   projectContext: string;
   sessionId: string;
   history: Message[];
+  /** SessionStore compaction checkpoint metadata used for post-resume reinjection. */
+  recentFiles?: string[];
   prompt: string;
   /** 启用 bypass 模式；显式 ask 与 safety gate 仍会 fail-closed。 */
   allowAll?: boolean;
@@ -76,6 +78,7 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
     },
     session: new SessionStore(opts.sessionId, opts.sessionDir),
     history: opts.history,
+    recentFiles: opts.recentFiles,
     projectContext: opts.projectContext,
     tools: opts.tools,
   });

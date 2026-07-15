@@ -96,6 +96,8 @@ export interface AppProps {
   settingsContext?: SettingsPersistenceContext;
   initialSessionId: string;
   initialHistory: Message[];
+  /** 最近文件检查点；恢复已压缩会话后继续用于下一次重注入。 */
+  initialRecentFiles?: string[];
   mcpToolCount: number;
   /** 显示在首屏横幅上的版本号（入口从 package.json 读出传入） */
   version?: string;
@@ -367,13 +369,14 @@ export function App(props: AppProps) {
   );
 
   const createEngine = useCallback(
-    (sessionId: string, history: Message[]) =>
+    (sessionId: string, history: Message[], recentFiles: string[] = []) =>
       new AgentEngine({
         provider: props.provider,
         canUseTool,
         canPersist: () => mountedRef.current,
         session: new SessionStore(sessionId, props.sessionDir),
         history,
+        recentFiles,
         projectContext: props.projectContext,
         tools: props.tools,
         maxContextChars: props.maxContextChars,
@@ -383,7 +386,11 @@ export function App(props: AppProps) {
   );
 
   if (engineRef.current === null) {
-    engineRef.current = createEngine(props.initialSessionId, props.initialHistory);
+    engineRef.current = createEngine(
+      props.initialSessionId,
+      props.initialHistory,
+      props.initialRecentFiles,
+    );
   }
 
   // ── 首屏横幅（logo + 版本 + 模型/目录/会话/MCP 状态） ─────
@@ -742,9 +749,10 @@ export function App(props: AppProps) {
             setSessionSwitching(sessionId);
             void (async () => {
               try {
-                const history = await new SessionStore(sessionId, props.sessionDir).load();
+                const state = await new SessionStore(sessionId, props.sessionDir).loadState();
+                const history = state.messages;
                 if (!mountedRef.current) return;
-                const nextEngine = createEngine(sessionId, history);
+                const nextEngine = createEngine(sessionId, history, state.recentFiles);
                 const { percent } = nextEngine.contextUsage();
                 if (!mountedRef.current) return;
                 engineRef.current = nextEngine;

@@ -211,7 +211,7 @@ if (!(await ensureProviderConfigured({ interactive: !headlessPrompt && Boolean(p
 }
 
 // 启动时的会话解析：--continue / --resume <id> / 新会话
-async function resolveSession(): Promise<{ id: string; history: Message[] }> {
+async function resolveSession(): Promise<{ id: string; history: Message[]; recentFiles: string[] }> {
   let id: string | null = null;
   if (flag("--continue")) {
     id = await SessionStore.latestId();
@@ -222,8 +222,15 @@ async function resolveSession(): Promise<{ id: string; history: Message[] }> {
   } else {
     id = value("--resume");
   }
-  if (id) return { id, history: await new SessionStore(id).load() };
-  return { id: new Date().toISOString().replace(/[:.]/g, "-"), history: [] };
+  if (id) {
+    const state = await new SessionStore(id).loadState();
+    return { id, history: state.messages, recentFiles: state.recentFiles };
+  }
+  return {
+    id: new Date().toISOString().replace(/[:.]/g, "-"),
+    history: [],
+    recentFiles: [],
+  };
 }
 
 const provider = createProvider();
@@ -236,7 +243,7 @@ const { settings, settingsContext, mcp } = await prepareWorkspaceStartup({
   },
 });
 const tools: Tool[] = [...builtinTools, createTaskTool(provider), ...mcp.tools];
-const { id, history } = await resolveSession();
+const { id, history, recentFiles } = await resolveSession();
 const trace = new TraceRecorder({
   sessionId: id,
   providerId: provider.id,
@@ -255,6 +262,7 @@ if (headlessPrompt) {
     projectContext,
     sessionId: id,
     history,
+    recentFiles,
     prompt: headlessPrompt,
     allowAll: flag("--allow-all"),
     signal: controller.signal,
@@ -275,6 +283,7 @@ const instance = render(
     settingsContext,
     initialSessionId: id,
     initialHistory: history,
+    initialRecentFiles: recentFiles,
     mcpToolCount: mcp.tools.length,
     version: VERSION,
     trace,

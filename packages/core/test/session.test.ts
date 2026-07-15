@@ -45,6 +45,54 @@ describe("SessionStore", () => {
     ]);
   });
 
+  it("commitCompaction restores the latest complete checkpoint without rewriting the audit log", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("checkpoint", dir);
+    const summary = { role: "user" as const, content: "compact summary" };
+    const acknowledgement = { role: "assistant" as const, content: "acknowledged" };
+
+    await s.append({ role: "user", content: "original prompt" });
+    await s.append({ role: "assistant", content: "original response" });
+    await s.commitCompaction([summary, acknowledgement], ["/workspace/a.ts", "/workspace/b.ts"]);
+    await s.append({ role: "user", content: "after checkpoint" });
+
+    const state = await new SessionStore("checkpoint", dir).loadState();
+    expect(state).toEqual({
+      messages: [summary, acknowledgement, { role: "user", content: "after checkpoint" }],
+      recentFiles: ["/workspace/a.ts", "/workspace/b.ts"],
+    });
+
+    const auditLog = await readFile(join(dir, "checkpoint.jsonl"), "utf-8");
+    expect(auditLog).toContain("original prompt");
+    expect(auditLog).toContain("compact summary");
+  });
+
+  it("ignores a torn compaction checkpoint and preserves the prior replay state", async () => {
+    const dir = await tempDir();
+    const source = new SessionStore("checkpoint-source", dir);
+    await source.commitCompaction(
+      [
+        { role: "user", content: "replacement summary" },
+        { role: "assistant", content: "replacement acknowledgement" },
+      ],
+      ["/workspace/recent.ts"],
+    );
+    const checkpointLine = await readFile(join(dir, "checkpoint-source.jsonl"), "utf-8");
+
+    const target = new SessionStore("checkpoint-torn", dir);
+    const original = { role: "user" as const, content: "must survive" };
+    await target.append(original);
+    await appendFile(
+      join(dir, "checkpoint-torn.jsonl"),
+      checkpointLine.slice(0, Math.max(0, checkpointLine.length - 8)),
+    );
+
+    await expect(new SessionStore("checkpoint-torn", dir).loadState()).resolves.toEqual({
+      messages: [original],
+      recentFiles: [],
+    });
+  });
+
   it("损坏的行（崩溃写一半）被跳过而非报错", async () => {
     const dir = await tempDir();
     const s = new SessionStore("s2", dir);

@@ -20,7 +20,7 @@ import type { Message, Provider, StopReason, ToolCall, Usage } from "../provider
 import { ToolRegistry } from "../tools/registry.js";
 import type { PermissionFn, Tool } from "../tools/types.js";
 import { SessionStore } from "../session/store.js";
-import { summarize, reinjectFiles, trimHistory } from "./compact.js";
+import { REINJECT_FILES, summarize, reinjectFiles, trimHistory } from "./compact.js";
 import { executeToolBatch } from "./tool-runner.js";
 import { TurnGuard } from "./guard.js";
 
@@ -50,6 +50,8 @@ export interface EngineOptions {
   tools?: Tool[];
   /** 恢复会话时传入历史消息（不含 system prompt） */
   history?: Message[];
+  /** 最近读过的文件检查点；恢复压缩后的会话时由 SessionStore.loadState() 提供。 */
+  recentFiles?: string[];
   /** 项目上下文（AGENT.md + repo map），用 buildProjectContext() 生成 */
   projectContext?: string;
   maxIterations?: number;
@@ -130,6 +132,7 @@ export class AgentEngine {
       { role: "system", content: systemPrompt(opts.projectContext) },
       ...(opts.history ?? []),
     ];
+    for (const path of opts.recentFiles ?? []) this.trackFile(path);
     // 中断恢复质量：从历史里重建"最近读过的文件"清单，
     // 恢复会话后第一次 compact 依然能重注入工作台
     for (const m of opts.history ?? []) {
@@ -185,7 +188,10 @@ export class AgentEngine {
       if (signal?.aborted || !this.canPersist()) return;
 
       // 从批量落盘到内存替换是不可取消的逻辑提交；开始后采用 commit-wins。
-      await this.session?.appendBatch([newMessages[1], newMessages[2]]);
+      await this.session?.commitCompaction(
+        [newMessages[1], newMessages[2]],
+        this.recentFiles.slice(-REINJECT_FILES),
+      );
       this.messages = newMessages;
 
       yield { type: "compact_end", afterChars: this.contextSize(), ok: true, summary };

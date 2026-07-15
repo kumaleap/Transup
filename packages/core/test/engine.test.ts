@@ -136,14 +136,6 @@ class DeferredAbortProvider implements Provider {
   }
 }
 
-function containsCompactRecord(messages: readonly Message[]): boolean {
-  return messages.some(
-    (message) =>
-      message.content.startsWith("[系统提示] 对话历史已被压缩。") ||
-      message.content === "已了解此前的工作进展，继续。",
-  );
-}
-
 class GatedCompactSessionStore extends SessionStore {
   readonly compactBatches: Message[][] = [];
   private compactObserved = false;
@@ -160,30 +152,29 @@ class GatedCompactSessionStore extends SessionStore {
     this.releaseCommit();
   }
 
-  override async appendBatch(messages: readonly Message[]): Promise<void> {
-    if (!containsCompactRecord(messages)) {
-      await super.appendBatch(messages);
-      return;
-    }
+  override async commitCompaction(
+    messages: readonly Message[],
+    recentFiles: readonly string[],
+  ): Promise<void> {
     this.compactBatches.push(structuredClone([...messages]));
     if (!this.compactObserved) {
       this.compactObserved = true;
       this.markCompactStarted();
       await this.commitGate;
     }
-    await super.appendBatch(messages);
+    await super.commitCompaction(messages, recentFiles);
   }
 }
 
 class RejectingCompactSessionStore extends SessionStore {
   readonly compactBatches: Message[][] = [];
 
-  override async appendBatch(messages: readonly Message[]): Promise<void> {
-    if (containsCompactRecord(messages)) {
-      this.compactBatches.push(structuredClone([...messages]));
-      throw new Error("compact persistence failed");
-    }
-    await super.appendBatch(messages);
+  override async commitCompaction(
+    messages: readonly Message[],
+    _recentFiles: readonly string[],
+  ): Promise<void> {
+    this.compactBatches.push(structuredClone([...messages]));
+    throw new Error("compact persistence failed");
   }
 }
 
@@ -398,6 +389,48 @@ describe("AgentEngine 主循环", () => {
     expect(text).not.toContain("x".repeat(100));
   });
 
+  it("successful compact restores only the committed checkpoint after restart", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-compact-resume-"));
+    const sessionId = "compact-resume";
+    const session = new SessionStore(sessionId, dir);
+    const originalMarker = `pre-compact-history-${"x".repeat(500)}`;
+    const history: Message[] = [
+      { role: "user", content: originalMarker },
+      { role: "assistant", content: "old response" },
+      { role: "user", content: "old follow-up" },
+    ];
+    for (const message of history) await session.append(message);
+
+    const compactProvider = new MockProvider([{ content: "durable compact summary" }]);
+    const engine = new AgentEngine({
+      provider: compactProvider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+      history,
+    });
+    await collect(engine.compactNow());
+
+    const resumedHistory = await new SessionStore(sessionId, dir).load();
+    expect(JSON.stringify(resumedHistory)).not.toContain(originalMarker);
+    expect(resumedHistory).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining("durable compact summary"),
+      }),
+      { role: "assistant", content: "已了解此前的工作进展，继续。" },
+    ]);
+
+    const resumedProvider = new MockProvider([{ content: "continued after restart" }]);
+    const resumedEngine = new AgentEngine({
+      provider: resumedProvider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      history: resumedHistory,
+    });
+    await collect(resumedEngine.runTurn("continue"));
+    expect(JSON.stringify(resumedProvider.calls[0])).not.toContain(originalMarker);
+    expect(JSON.stringify(resumedProvider.calls[0])).toContain("durable compact summary");
+  });
+
   it("automatic compact commits one batch when abort arrives during persistence", async () => {
     const dir = await mkdtemp(join(tmpdir(), "transup-engine-compact-commit-"));
     const session = new GatedCompactSessionStore("commit-wins", dir);
@@ -445,7 +478,6 @@ describe("AgentEngine 主循环", () => {
       ],
     ]);
     expect(await session.load()).toEqual([
-      { role: "user", content: "trigger automatic compact" },
       expect.objectContaining({
         role: "user",
         content: expect.stringContaining("committed compact summary"),

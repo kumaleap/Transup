@@ -2409,14 +2409,16 @@ describe("TUI", {timeout: 30_000}, () => {
   it("/sessions 加载期间阻止旧引擎提交与竞争切换", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-pending-"));
     writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
-    let releaseLoad!: (history: Message[]) => void;
-    const pendingLoad = new Promise<Message[]>((resolve) => {
+    let releaseLoad!: (state: { messages: Message[]; recentFiles: string[] }) => void;
+    const pendingLoad = new Promise<{ messages: Message[]; recentFiles: string[] }>((resolve) => {
       releaseLoad = resolve;
     });
     const loadSpy = vi
-      .spyOn(transupCore.SessionStore.prototype, "load")
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
       .mockImplementation(function () {
-        return this.id === "target-session" ? pendingLoad : Promise.resolve([]);
+        return this.id === "target-session"
+          ? pendingLoad
+          : Promise.resolve({ messages: [], recentFiles: [] });
       });
     const provider = new MockProvider([{ content: "好" }]);
     const { stdin, lastFrame, unmount } = render(
@@ -2451,7 +2453,10 @@ describe("TUI", {timeout: 30_000}, () => {
       await flush();
       expect(lastFrame()).not.toContain("切换会话");
 
-      releaseLoad([{ role: "user", content: "目标会话历史" }]);
+      releaseLoad({
+        messages: [{ role: "user", content: "目标会话历史" }],
+        recentFiles: [],
+      });
       await vi.waitFor(() => expect(lastFrame()).toContain("已切换到会话 target-session"), {
         timeout: 2000,
       });
@@ -2463,7 +2468,7 @@ describe("TUI", {timeout: 30_000}, () => {
       );
       expect(provider.lastUserContent).toBe("切换后提问");
     } finally {
-      releaseLoad([]);
+      releaseLoad({ messages: [], recentFiles: [] });
       unmount();
       loadSpy.mockRestore();
     }
@@ -2472,14 +2477,16 @@ describe("TUI", {timeout: 30_000}, () => {
   it("/sessions 加载期间保留 Ctrl+C 退出并丢弃卸载后的完成", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-exit-"));
     writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
-    let releaseLoad!: (history: Message[]) => void;
-    const pendingLoad = new Promise<Message[]>((resolve) => {
+    let releaseLoad!: (state: { messages: Message[]; recentFiles: string[] }) => void;
+    const pendingLoad = new Promise<{ messages: Message[]; recentFiles: string[] }>((resolve) => {
       releaseLoad = resolve;
     });
     const loadSpy = vi
-      .spyOn(transupCore.SessionStore.prototype, "load")
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
       .mockImplementation(function () {
-        return this.id === "target-session" ? pendingLoad : Promise.resolve([]);
+        return this.id === "target-session"
+          ? pendingLoad
+          : Promise.resolve({ messages: [], recentFiles: [] });
       });
     const onExitStats = vi.fn();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -2518,7 +2525,10 @@ describe("TUI", {timeout: 30_000}, () => {
       await flush();
       expect(instance.lastFrame()).not.toContain("退出后输入");
 
-      releaseLoad([{ role: "user", content: "不应安装的历史" }]);
+      releaseLoad({
+        messages: [{ role: "user", content: "不应安装的历史" }],
+        recentFiles: [],
+      });
       await flush();
       expect(onExitStats).toHaveBeenCalledOnce();
       expect(instance.lastFrame()).not.toContain("已切换到会话 target-session");
@@ -2526,7 +2536,7 @@ describe("TUI", {timeout: 30_000}, () => {
         /state update|unmounted component/i,
       );
     } finally {
-      releaseLoad([]);
+      releaseLoad({ messages: [], recentFiles: [] });
       instance.unmount();
       errorSpy.mockRestore();
       loadSpy.mockRestore();
@@ -2537,8 +2547,11 @@ describe("TUI", {timeout: 30_000}, () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-atomic-"));
     writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
     const loadSpy = vi
-      .spyOn(transupCore.SessionStore.prototype, "load")
-      .mockResolvedValue([{ role: "user", content: "目标会话历史" }]);
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
+      .mockResolvedValue({
+        messages: [{ role: "user", content: "目标会话历史" }],
+        recentFiles: [],
+      });
     const contextSpy = vi
       .spyOn(transupCore.AgentEngine.prototype, "contextUsage")
       .mockImplementationOnce(() => {

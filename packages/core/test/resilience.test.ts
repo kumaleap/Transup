@@ -266,4 +266,43 @@ describe("中断恢复质量", () => {
     expect(lastCall).toContain("重新注入");
     expect(lastCall).toContain("秘密工作台内容");
   });
+
+  it("压缩检查点恢复后下一次 compact 仍重注入最近读过的文件", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-checkpoint-resume-"));
+    const file = join(dir, "checkpoint-work.ts");
+    await writeFile(file, "const 检查点工作台内容 = 84;");
+    const session = new SessionStore("checkpoint-resume", dir);
+    const history: Message[] = [
+      { role: "user", content: "旧任务 " + "x".repeat(600) },
+      { role: "assistant", content: "旧回复" },
+      { role: "user", content: "旧追问" },
+    ];
+    for (const message of history) await session.append(message);
+
+    const firstProvider = new FlakyProvider([{ content: "第一次持久化摘要" }]);
+    const firstEngine = makeEngine(firstProvider, {
+      history,
+      recentFiles: [file],
+      session,
+    });
+    await collect(firstEngine.compactNow());
+
+    const state = await new SessionStore("checkpoint-resume", dir).loadState();
+    expect(state.recentFiles).toEqual([file]);
+
+    const resumedProvider = new FlakyProvider([
+      { content: "第二次摘要" },
+      { content: "恢复后继续" },
+    ]);
+    const resumedEngine = makeEngine(resumedProvider, {
+      history: state.messages,
+      recentFiles: state.recentFiles,
+      maxContextChars: 700,
+    });
+    await collect(resumedEngine.runTurn("继续"));
+
+    const postCompactRequest = JSON.stringify(resumedProvider.calls.at(-1));
+    expect(postCompactRequest).toContain("重新注入");
+    expect(postCompactRequest).toContain("检查点工作台内容");
+  });
 });
