@@ -37,11 +37,16 @@ describe("SessionStore", () => {
       summary,
       acknowledgement,
     ]);
-    expect((await readFile(join(dir, "batch.jsonl"), "utf-8")).split("\n")).toEqual([
+    const lines = (await readFile(join(dir, "batch.jsonl"), "utf-8")).split("\n");
+    expect(lines.filter(Boolean)).toEqual([
       JSON.stringify({ role: "user", content: "before" }),
       JSON.stringify(summary),
       JSON.stringify(acknowledgement),
-      "",
+    ]);
+    const summaryLine = lines.indexOf(JSON.stringify(summary));
+    expect(lines.slice(summaryLine, summaryLine + 2)).toEqual([
+      JSON.stringify(summary),
+      JSON.stringify(acknowledgement),
     ]);
   });
 
@@ -91,6 +96,24 @@ describe("SessionStore", () => {
       messages: [original],
       recentFiles: [],
     });
+  });
+
+  it("starts a new record boundary when appending after a torn JSONL tail", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "torn-tail.jsonl");
+    const original = { role: "user" as const, content: "before crash" };
+    const afterRestart = { role: "user" as const, content: "after restart" };
+    await new SessionStore("torn-tail", dir).append(original);
+    await appendFile(path, '{"type":"transup.compaction.v1","messages":[');
+
+    const restarted = new SessionStore("torn-tail", dir);
+    await expect(restarted.load()).resolves.toEqual([original]);
+    await restarted.append(afterRestart);
+
+    await expect(new SessionStore("torn-tail", dir).load()).resolves.toEqual([
+      original,
+      afterRestart,
+    ]);
   });
 
   it("损坏的行（崩溃写一半）被跳过而非报错", async () => {

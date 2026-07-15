@@ -109,7 +109,8 @@ export class SessionStore {
       await mkdir(this.dir, { recursive: true });
       this.dirReady = true;
     }
-    const batch = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+    // The leading delimiter isolates this batch from a crash-torn final record.
+    const batch = "\n" + records.map((record) => JSON.stringify(record)).join("\n") + "\n";
     await appendFile(this.path, batch, "utf-8");
   }
 
