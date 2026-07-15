@@ -20,8 +20,8 @@ export const readFileTool: Tool<typeof schema> = {
     "读取文本文件内容，返回带行号的文本。大文件请用 offset/limit 分页读取。",
   schema,
   readOnly: true,
-  async execute({ path, offset = 1, limit = 500 }) {
-    const text = await readFile(path, "utf-8");
+  async execute({ path, offset = 1, limit = 500 }, _onProgress, signal) {
+    const text = await readFile(path, { encoding: "utf-8", signal });
     const lines = text.split("\n");
     const slice = lines.slice(offset - 1, offset - 1 + limit);
     const numbered = slice

@@ -36,6 +36,30 @@ export interface McpConnection {
   close: () => Promise<void>;
 }
 
+function linkAbortSignal(signal?: AbortSignal): {
+  signal?: AbortSignal;
+  dispose: () => void;
+} {
+  if (!signal) return { signal: undefined, dispose: () => {} };
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort(signal.reason);
+  if (signal.aborted) forwardAbort();
+  else signal.addEventListener("abort", forwardAbort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose: () => signal.removeEventListener("abort", forwardAbort),
+  };
+}
+
+function isMcpAbortFailure(error: unknown, signal: AbortSignal): boolean {
+  if (!signal.aborted || typeof error !== "object" || error === null) return false;
+  const candidate = error as { name?: unknown; code?: unknown; message?: unknown };
+  return candidate.name === "McpError"
+    && candidate.code === -32001
+    && typeof candidate.message === "string"
+    && candidate.message === `MCP error -32001: ${String(signal.reason)}`;
+}
+
 /** 连接一个 MCP server（stdio 传输），把它的工具包装成我们的 Tool 协议 */
 export async function connectMcpServer(
   name: string,
@@ -57,17 +81,32 @@ export async function connectMcpServer(
     schema: passthrough,
     parameters: t.inputSchema as Record<string, unknown>,
     readOnly: false, // 外部工具的只读声明不可信任，一律走权限门
-    async execute(args) {
-      const result = await client.callTool({
-        name: t.name,
-        arguments: args as Record<string, unknown>,
-      });
-      // MCP 结果是内容块数组，拼成文本给模型
-      const text = (result.content as { type: string; text?: string }[])
-        .map((c) => (c.type === "text" ? c.text : `[${c.type} 内容]`))
-        .join("\n");
-      if (result.isError) throw new Error(text || "MCP 工具执行失败");
-      return text || "(无输出)";
+    async execute(args, _onProgress, signal) {
+      const linked = linkAbortSignal(signal);
+      try {
+        const result = await (async () => {
+          try {
+            return await client.callTool({
+              name: t.name,
+              arguments: args as Record<string, unknown>,
+            }, undefined, { signal: linked.signal });
+          } catch (error) {
+            if (linked.signal && isMcpAbortFailure(error, linked.signal)) {
+              linked.signal.throwIfAborted();
+            }
+            throw error;
+          }
+        })();
+        // MCP 结果是内容块数组，拼成文本给模型
+        const text = (result.content as { type: string; text?: string }[])
+          .map((c) => (c.type === "text" ? c.text : `[${c.type} 内容]`))
+          .join("\n");
+        if (result.isError) throw new Error(text || "MCP 工具执行失败");
+        return text || "(无输出)";
+      } finally {
+        // SDK 1.29 retains request listeners after completion; detach from the turn signal here.
+        linked.dispose();
+      }
     },
   }));
 

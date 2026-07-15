@@ -51,6 +51,12 @@ function normalizePermissionDecision(value: unknown): PermissionDecision | null 
   };
 }
 
+function isAbortFailure(error: unknown, signal: AbortSignal): boolean {
+  if (error === signal.reason) return true;
+  if (!isRecord(error)) return false;
+  return error.name === "AbortError" || error.code === "ABORT_ERR";
+}
+
 export class ToolRegistry {
   private map: Map<string, Tool>;
 
@@ -61,6 +67,11 @@ export class ToolRegistry {
   /** 查询工具是否只读（用于并行调度）。未知工具按危险处理（fail-closed）。 */
   isReadOnly(name: string): boolean {
     return this.map.get(name)?.readOnly ?? false;
+  }
+
+  /** 已进入不可取消提交阶段的工具，中断后仍需等待真实结果。 */
+  commitsOnAbort(name: string): boolean {
+    return this.map.get(name)?.commitOnAbort ?? false;
   }
 
   /** 转成 provider 中立的工具声明（zod → JSON Schema；外部工具用自带的） */
@@ -78,11 +89,14 @@ export class ToolRegistry {
     rawArgs: string,
     canUse: PermissionFn,
     onProgress?: (chunk: string) => void,
+    signal?: AbortSignal,
   ): Promise<ToolResult> {
     const fail = (content: string): ToolResult => ({ toolCallId, content, isError: true });
+    const interrupted = (note = ""): ToolResult => fail(`工具执行已被用户中断。${note}`);
 
     const tool = this.map.get(name);
     if (!tool) return fail(`未知工具: ${name}。可用工具: ${[...this.map.keys()].join(", ")}`);
+    if (signal?.aborted) return interrupted();
 
     let parsed: unknown;
     try {
@@ -104,9 +118,11 @@ export class ToolRegistry {
         readOnly: tool.readOnly,
       });
     } catch (error) {
+      if (signal?.aborted && isAbortFailure(error, signal)) return interrupted();
       const detail = error instanceof Error ? `: ${error.message}` : "";
       return fail(`权限检查失败${detail}`);
     }
+    if (signal?.aborted) return interrupted();
     const decision = normalizePermissionDecision(rawDecision);
     if (!decision) return fail("权限检查返回无效结果，已拒绝执行。");
     if (decision.behavior === "deny") {
@@ -126,11 +142,14 @@ export class ToolRegistry {
     }
 
     const note = decision.feedback ? `\n\n[用户附言] ${decision.feedback}` : "";
+    if (signal?.aborted) return interrupted(note);
     try {
-      const result = await tool.execute(finalArgs, onProgress);
+      const result = await tool.execute(finalArgs, onProgress, signal);
       return { toolCallId, content: (result || "(无输出)") + note, isError: false };
-    } catch (err: any) {
-      return fail(`工具执行出错: ${err.message}${note}`);
+    } catch (error) {
+      if (signal?.aborted && isAbortFailure(error, signal)) return interrupted(note);
+      const detail = error instanceof Error ? error.message : String(error);
+      return fail(`工具执行出错: ${detail}${note}`);
     }
   }
 }

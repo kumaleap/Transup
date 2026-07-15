@@ -4,11 +4,12 @@
  * 2. 引擎层：tool_progress 事件在 tool_start 和 tool_end 之间流出
  */
 import { describe, it, expect } from "vitest";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
+import { grepTool } from "../src/tools/grep.js";
 import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
 import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, ToolCall } from "../src/provider/types.js";
@@ -54,6 +55,59 @@ describe("bash 流式输出", () => {
     expect(r.isError).toBe(true);
     expect(r.content).toContain("超时");
   }, 15_000);
+
+  it("AbortController 会终止 shell 的真实后代进程", async () => {
+    if (process.platform === "win32") return;
+    const dir = await mkdtemp(join(tmpdir(), "transup-bash-abort-"));
+    const marker = join(dir, "descendant-alive");
+    const script = join(dir, "descendant.cjs");
+    await writeFile(
+      script,
+      [
+        'const { writeFileSync } = require("node:fs");',
+        'console.log("ready");',
+        `setTimeout(() => writeFileSync(${JSON.stringify(marker)}, "alive"), 750);`,
+        "setTimeout(() => process.exit(0), 950);",
+      ].join("\n"),
+    );
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const command =
+      `trap '' HUP; ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} & wait`;
+    const controller = new AbortController();
+
+    try {
+      const result = new ToolRegistry().execute(
+        "bash-abort",
+        "bash",
+        JSON.stringify({ command }),
+        allow,
+        (chunk) => {
+          if (chunk.includes("ready")) markStarted();
+        },
+        controller.signal,
+      );
+      await started;
+      controller.abort();
+
+      expect((await result).isError).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 1_050));
+      await expect(access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("grep rejects an already-aborted signal", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      grepTool.execute({ pattern: "anything", path: "." }, undefined, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
 
   it("引擎层：tool_progress 事件夹在 tool_start 与 tool_end 之间", async () => {
     // mock provider：先要求跑一条会产生输出的 bash，再收尾
@@ -200,15 +254,20 @@ describe("bash 流式输出", () => {
     class RejectingProvider implements Provider {
       readonly id = "mock";
       readonly model = "m";
+      private step = 0;
       async *stream(): AsyncIterable<ProviderEvent> {
-        yield {
-          type: "message_done",
-          content: "",
-          toolCalls: [
-            {id: "t1", name: first.name, args: "{}"},
-            {id: "t2", name: second.name, args: "{}"},
-          ],
-        };
+        if (this.step++ === 0) {
+          yield {
+            type: "message_done",
+            content: "",
+            toolCalls: [
+              {id: "t1", name: first.name, args: "{}"},
+              {id: "t2", name: second.name, args: "{}"},
+            ],
+          };
+        } else {
+          yield { type: "message_done", content: "done", toolCalls: [] };
+        }
       }
     }
     const dir = await mkdtemp(join(tmpdir(), "transup-rejected-progress-"));
@@ -229,15 +288,20 @@ describe("bash 流式输出", () => {
     process.on("unhandledRejection", onUnhandled);
 
     try {
+      const events: AgentEvent[] = [];
       const run = (async () => {
-        for await (const _event of engine.runTurn("并行运行")) {
-          // Consume events until the original execution promise rejects.
-        }
+        for await (const event of engine.runTurn("并行运行")) events.push(event);
       })();
-      await expect(run).rejects.toBe(permissionError);
+      await expect(run).resolves.toBeUndefined();
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       expect(firstObservedSecond).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool_end",
+        call: expect.objectContaining({ id: "t2" }),
+        content: expect.stringContaining(permissionError.message),
+        isError: true,
+      }));
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);

@@ -39,10 +39,16 @@ interface ProgressChannel {
   queue: string[];
   wake: (() => void) | null;
   settled: boolean;
+  closed: boolean;
+}
+
+interface RunningTool {
+  result: Promise<ToolResult>;
+  channel: ProgressChannel;
 }
 
 function openChannel(result: Promise<ToolResult>): ProgressChannel {
-  const channel: ProgressChannel = { queue: [], wake: null, settled: false };
+  const channel: ProgressChannel = { queue: [], wake: null, settled: false, closed: false };
   const settle = () => {
     channel.settled = true;
     channel.wake?.();
@@ -51,17 +57,85 @@ function openChannel(result: Promise<ToolResult>): ProgressChannel {
   return channel;
 }
 
-async function* drainChannel(call: ToolCall, channel: ProgressChannel): AsyncGenerator<AgentEvent> {
+function enqueueProgress(channel: ProgressChannel | null, chunk: string): void {
+  if (!channel || channel.closed) return;
+  channel.queue.push(chunk);
+  channel.wake?.();
+}
+
+function closeChannel(channel: ProgressChannel): void {
+  channel.closed = true;
+  channel.queue.length = 0;
+  channel.wake?.();
+  channel.wake = null;
+}
+
+function nextEventLoopTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function* drainChannel(
+  call: ToolCall,
+  channel: ProgressChannel,
+  signal?: AbortSignal,
+): AsyncGenerator<AgentEvent, boolean> {
   while (!channel.settled || channel.queue.length > 0) {
     if (channel.queue.length > 0) {
       yield { type: "tool_progress", call, chunk: channel.queue.shift()! };
     } else {
+      if (signal?.aborted) {
+        await nextEventLoopTurn();
+        while (channel.queue.length > 0) {
+          yield { type: "tool_progress", call, chunk: channel.queue.shift()! };
+        }
+        return channel.settled;
+      }
       await new Promise<void>((resolve) => {
-        channel.wake = resolve;
+        let resolved = false;
+        const wake = () => {
+          if (resolved) return;
+          resolved = true;
+          signal?.removeEventListener("abort", wake);
+          resolve();
+        };
+        channel.wake = wake;
+        signal?.addEventListener("abort", wake, { once: true });
+        if (signal?.aborted) wake();
       });
       channel.wake = null;
     }
   }
+  return true;
+}
+
+function interruptedResult(call: ToolCall): ToolResult {
+  return {
+    toolCallId: call.id,
+    content: "工具执行已被用户中断。",
+    isError: true,
+  };
+}
+
+async function pushToolResult(
+  ctx: ToolRunContext,
+  call: ToolCall,
+  result: ToolResult,
+): Promise<void> {
+  const repeats = ctx.guard.noteToolResult(call.name, call.args, result.content);
+  const warning = ctx.guard.warningFor(repeats);
+  await ctx.push({
+    role: "tool",
+    toolCallId: result.toolCallId,
+    content: (result.isError ? `[错误] ${result.content}` : result.content) + warning,
+  });
+}
+
+async function letStartedToolsObserveAbort(started: Map<string, RunningTool>): Promise<void> {
+  if (![...started.values()].some(({ channel }) => !channel.settled)) return;
+
+  // Signal-aware tools settle through several promise/generator layers. Give those
+  // local chains one event-loop turn, but never wait indefinitely for legacy tools.
+  await nextEventLoopTurn();
 }
 
 export async function* executeToolBatch(
@@ -70,23 +144,49 @@ export async function* executeToolBatch(
   signal?: AbortSignal,
 ): AsyncGenerator<AgentEvent> {
   // 先把只读工具全部启动；进度从启动那一刻就进通道缓冲
-  const started = new Map<string, { result: Promise<ToolResult>; channel: ProgressChannel }>();
+  const started = new Map<string, RunningTool>();
+  let observedAbort = false;
   for (const call of toolCalls) {
     if (ctx.registry.isReadOnly(call.name)) {
       let channel: ProgressChannel | null = null;
-      const result = ctx.registry.execute(call.id, call.name, call.args, ctx.canUseTool, (chunk) => {
-        channel?.queue.push(chunk);
-        channel?.wake?.();
-      });
+      const result = ctx.registry.execute(
+        call.id,
+        call.name,
+        call.args,
+        ctx.canUseTool,
+        (chunk) => enqueueProgress(channel, chunk),
+        signal,
+      );
       channel = openChannel(result);
       started.set(call.id, { result, channel });
     }
   }
 
   for (const call of toolCalls) {
-    // 中断时不能直接 return —— 每个 tool_use 都必须有对应的 tool_result，
-    // 否则下一轮请求 API 会报错。剩余的调用补"已中断"结果。
+    // 中断时不能直接 return：已 settle 的并行结果仍保留；其余 tool_use
+    // 补合成中断结果，确保下一轮 API 仍有完整的 tool_result 配对。
     if (signal?.aborted) {
+      if (!observedAbort) {
+        observedAbort = true;
+        await letStartedToolsObserveAbort(started);
+      }
+      const running = started.get(call.id);
+      const mustFinish = ctx.registry.commitsOnAbort(call.name);
+      if (running && (running.channel.settled || mustFinish)) {
+        let parsedArgs: Record<string, unknown> = {};
+        try { parsedArgs = JSON.parse(call.args || "{}"); } catch {}
+        yield { type: "tool_start", call, parsedArgs };
+        yield* drainChannel(call, running.channel, mustFinish ? undefined : signal);
+        closeChannel(running.channel);
+        const result = await running.result;
+        if (call.name === "read_file" && typeof parsedArgs.path === "string" && !result.isError) {
+          ctx.onFileRead(parsedArgs.path);
+        }
+        yield { type: "tool_end", call, content: result.content, isError: result.isError };
+        await pushToolResult(ctx, call, result);
+        continue;
+      }
+      if (running) closeChannel(running.channel);
       await ctx.push({ role: "tool", toolCallId: call.id, content: "[错误] 已被用户中断" });
       continue;
     }
@@ -100,14 +200,30 @@ export async function* executeToolBatch(
     let running = started.get(call.id);
     if (!running) {
       let channel: ProgressChannel | null = null;
-      const result = ctx.registry.execute(call.id, call.name, call.args, ctx.canUseTool, (chunk) => {
-        channel?.queue.push(chunk);
-        channel?.wake?.();
-      });
+      const result = ctx.registry.execute(
+        call.id,
+        call.name,
+        call.args,
+        ctx.canUseTool,
+        (chunk) => enqueueProgress(channel, chunk),
+        signal,
+      );
       channel = openChannel(result);
       running = { result, channel };
     }
-    yield* drainChannel(call, running.channel);
+    const settled = yield* drainChannel(
+      call,
+      running.channel,
+      ctx.registry.commitsOnAbort(call.name) ? undefined : signal,
+    );
+    if (!settled) {
+      closeChannel(running.channel);
+      const result = interruptedResult(call);
+      yield { type: "tool_end", call, content: result.content, isError: true };
+      await pushToolResult(ctx, call, result);
+      continue;
+    }
+    closeChannel(running.channel);
     const result = await running.result;
 
     // 记录最近读过的文件，供 compact 重注入
@@ -117,15 +233,7 @@ export async function* executeToolBatch(
 
     yield { type: "tool_end", call, content: result.content, isError: result.isError };
 
-    // 循环保护：完全相同的【调用+结果】重复出现时，把警告一并喂回模型；
-    // 警告只进模型上下文，不改变 UI 看到的 tool_end 内容
-    const repeats = ctx.guard.noteToolResult(call.name, call.args, result.content);
-    const warning = ctx.guard.warningFor(repeats);
-
-    await ctx.push({
-      role: "tool",
-      toolCallId: result.toolCallId,
-      content: (result.isError ? `[错误] ${result.content}` : result.content) + warning,
-    });
+    // 循环保护警告只进模型上下文，不改变 UI 看到的 tool_end 内容。
+    await pushToolResult(ctx, call, result);
   }
 }

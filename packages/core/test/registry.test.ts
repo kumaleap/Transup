@@ -106,6 +106,111 @@ describe("工具执行管线", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("cancellation while permission is pending prevents the tool from starting", async () => {
+    const execute = vi.fn(async () => "must not run");
+    const local = captureRegistry(execute);
+    let markPermissionStarted!: () => void;
+    const permissionStarted = new Promise<void>((resolve) => {
+      markPermissionStarted = resolve;
+    });
+    let releasePermission!: () => void;
+    const permissionGate = new Promise<void>((resolve) => {
+      releasePermission = resolve;
+    });
+    const controller = new AbortController();
+
+    const pending = local.execute(
+      "permission-abort",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      async () => {
+        markPermissionStarted();
+        await permissionGate;
+        return { behavior: "allow" as const };
+      },
+      undefined,
+      controller.signal,
+    );
+    await permissionStarted;
+    controller.abort();
+    releasePermission();
+
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("中断");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not mask a real permission host failure that races with cancellation", async () => {
+    const execute = vi.fn(async () => "must not run");
+    const local = captureRegistry(execute);
+    let markPermissionStarted!: () => void;
+    const permissionStarted = new Promise<void>((resolve) => {
+      markPermissionStarted = resolve;
+    });
+    let releasePermission!: () => void;
+    const permissionGate = new Promise<void>((resolve) => {
+      releasePermission = resolve;
+    });
+    const controller = new AbortController();
+
+    const pending = local.execute(
+      "permission-error-after-abort",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      async () => {
+        markPermissionStarted();
+        await permissionGate;
+        throw new Error("permission host crashed");
+      },
+      undefined,
+      controller.signal,
+    );
+    await permissionStarted;
+    controller.abort();
+    releasePermission();
+
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("permission host crashed");
+    expect(result.content).not.toContain("用户中断");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not mask a real tool failure that races with cancellation", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const local = captureRegistry(async () => {
+      markStarted();
+      await gate;
+      throw new Error("disk full");
+    });
+    const controller = new AbortController();
+
+    const pending = local.execute(
+      "real-error-after-abort",
+      "capture",
+      JSON.stringify({ value: "x" }),
+      allow,
+      undefined,
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+    release();
+
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("disk full");
+    expect(result.content).not.toContain("用户中断");
+  });
+
   it("只读工具也过权限回调（deny 规则才能管到它们），并带 readOnly 标记", async () => {
     let seenReadOnly: boolean | undefined;
     const spy = async (_n: string, _a: Record<string, unknown>, meta: { readOnly: boolean }) => {

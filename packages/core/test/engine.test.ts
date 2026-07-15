@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { AgentEngine, wasInterrupted, type AgentEvent } from "../src/agent/engine.js";
+import { createTaskTool } from "../src/agent/subagent.js";
 import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, ToolCall } from "../src/provider/types.js";
 
@@ -343,6 +344,209 @@ describe("AgentEngine 主循环", () => {
       { role: "user", content: "run the late tool" },
       expect.objectContaining({ role: "assistant", content: "", toolCalls: [call] }),
     ]);
+  });
+
+  it.each([
+    { label: "read-only prestarted", readOnly: true },
+    { label: "serial", readOnly: false },
+  ])("$label tool receives the exact turn signal and settles on abort", async ({ readOnly }) => {
+    let seenSignal: AbortSignal | undefined;
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    const abortAwareTool = {
+      name: readOnly ? "abort_read_tool" : "abort_write_tool",
+      description: "observes turn cancellation",
+      schema: z.object({}),
+      readOnly,
+      async execute(
+        _args: object,
+        _onProgress?: (chunk: string) => void,
+        signal?: AbortSignal,
+      ) {
+        seenSignal = signal;
+        markToolStarted();
+        if (!signal) return "missing signal";
+        await new Promise<never>((_, reject) => {
+          const rejectAbort = () => reject(
+            Object.assign(new Error("tool aborted"), { name: "AbortError" }),
+          );
+          if (signal.aborted) rejectAbort();
+          else signal.addEventListener("abort", rejectAbort, { once: true });
+        });
+        return "unreachable";
+      },
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "abort-1", name: abortAwareTool.name, args: "{}" }],
+      },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [abortAwareTool] });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("run abort-aware tool", controller.signal));
+    await toolStarted;
+    controller.abort();
+    const events = await turn;
+
+    expect(seenSignal).toBe(controller.signal);
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("abort does not wait forever for a running legacy tool that ignores the signal", async () => {
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    const neverSettles = new Promise<never>(() => {});
+    const legacyTool = {
+      name: "legacy_hanging_tool",
+      description: "ignores cancellation",
+      schema: z.object({}),
+      readOnly: true,
+      async execute() {
+        markToolStarted();
+        return neverSettles;
+      },
+    };
+    const call = { id: "legacy-hang-1", name: legacyTool.name, args: "{}" };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [call] },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [legacyTool] });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("run legacy tool", controller.signal));
+    await toolStarted;
+    controller.abort();
+    const outcome = await Promise.race([
+      turn,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+    ]);
+
+    expect(outcome).not.toBeNull();
+    expect(outcome?.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(outcome).toContainEqual(expect.objectContaining({
+      type: "tool_end",
+      call,
+      isError: true,
+      content: expect.stringContaining("中断"),
+    }));
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("abort waits for a tool that has entered a commit-wins operation", async () => {
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    let releaseCommit!: () => void;
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const commitTool = {
+      name: "commit_wins_tool",
+      description: "must finish an in-flight commit",
+      schema: z.object({}),
+      readOnly: false,
+      commitOnAbort: true,
+      async execute() {
+        markToolStarted();
+        await commitGate;
+        return "commit completed";
+      },
+    };
+    const call = { id: "commit-1", name: commitTool.name, args: "{}" };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [call] },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [commitTool] });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("run commit", controller.signal));
+    let turnSettled = false;
+    void turn.then(() => {
+      turnSettled = true;
+    });
+    await toolStarted;
+    controller.abort();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(turnSettled).toBe(false);
+
+    releaseCommit();
+    const events = await turn;
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool_end",
+      call,
+      content: "commit completed",
+      isError: false,
+    }));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+  });
+
+  it("preserves partial outcomes from every settled parallel task after abort", async () => {
+    let startedCount = 0;
+    let markBothStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => {
+      markBothStarted = resolve;
+    });
+    const subProvider: Provider = {
+      id: "parallel-abort-aware",
+      model: "parallel-abort-aware-1",
+      async *stream(messages, _tools, signal): AsyncIterable<ProviderEvent> {
+        const description = messages.findLast((message) => message.role === "user")?.content ?? "";
+        yield { type: "text_delta", text: `partial:${description}` };
+        startedCount++;
+        if (startedCount === 2) markBothStarted();
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted) resolve();
+          else signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw Object.assign(new Error("provider aborted"), { name: "AbortError" });
+      },
+    };
+    const task = createTaskTool(subProvider);
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "task-1", name: "task", args: '{"description":"one"}' },
+          { id: "task-2", name: "task", args: '{"description":"two"}' },
+        ],
+      },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [task] });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("run both tasks", controller.signal));
+    await bothStarted;
+    controller.abort();
+    const events = await turn;
+
+    expect(
+      events
+        .filter((event): event is Extract<AgentEvent, { type: "tool_end" }> =>
+          event.type === "tool_end",
+        )
+        .map((event) => `${event.call.id}:${event.content}`),
+    ).toEqual([
+      expect.stringContaining("task-1:[子任务未完成: aborted]"),
+      expect.stringContaining("task-2:[子任务未完成: aborted]"),
+    ]);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool_end", content: expect.stringContaining("partial:one") }),
+      expect.objectContaining({ type: "tool_end", content: expect.stringContaining("partial:two") }),
+    ]));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
   });
 
   it("omitting canPersist keeps ordinary engine persistence enabled", async () => {

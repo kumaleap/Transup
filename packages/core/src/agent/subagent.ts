@@ -45,7 +45,7 @@ export function createTaskTool(provider: Provider): Tool<typeof schema> {
       "description 必须自包含：子 agent 看不到当前对话。",
     schema,
     readOnly: true, // 只读工具集 → 整体只读 → 可并行、免确认
-    async execute({ description }, onProgress) {
+    async execute({ description }, onProgress, signal) {
       const sub = new AgentEngine({
         provider,
         // 子 agent 的工具全是只读的，只读直接放行；
@@ -61,7 +61,7 @@ export function createTaskTool(provider: Provider): Tool<typeof schema> {
       // 子 agent 的工具活动以进度行透出（→ read_file src/index.ts），
       // 长探索不再像卡死；正文仍只回流最终结论，不污染主上下文
       let result = "";
-      for await (const ev of sub.runTurn(description)) {
+      for await (const ev of sub.runTurn(description, signal)) {
         if (ev.type === "tool_start") {
           onProgress?.(`→ ${ev.call.name} ${briefArgs(ev.parsedArgs)}\n`);
         }

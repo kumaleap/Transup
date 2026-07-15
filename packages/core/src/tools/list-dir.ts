@@ -18,8 +18,10 @@ export const listDirTool: Tool<typeof schema> = {
   description: "列出目录下的文件和子目录（自动忽略 node_modules、.git 等）。",
   schema,
   readOnly: true,
-  async execute({ path = "." }) {
+  async execute({ path = "." }, _onProgress, signal) {
+    signal?.throwIfAborted();
     const entries = await readdir(path, { withFileTypes: true });
+    signal?.throwIfAborted();
     const visible = entries.filter((e) => !IGNORED.has(e.name) && !e.name.startsWith("."));
     if (visible.length === 0) return "(空目录)";
     return visible
