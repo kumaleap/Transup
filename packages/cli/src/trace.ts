@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentEvent } from "@transup/core";
-import { sanitizeTerminalText } from "./highlight.js";
+import { sanitizeTerminalField, sanitizeTerminalText } from "./highlight.js";
 
 const DEFAULT_DIR = ".transup/traces";
 
@@ -87,10 +87,12 @@ export function renderTrace(entries: TraceEntry[]): string {
   if (entries.length === 0) return "Trace is empty\n";
   const first = entries[0];
   const lines = [
-    `Trace ${first.sessionId} · ${first.providerId}/${first.model} · ${first.cwd}`,
+    `Trace ${sanitizeTerminalField(first.sessionId)} · ` +
+      `${sanitizeTerminalField(first.providerId)}/${sanitizeTerminalField(first.model)} · ` +
+      sanitizeTerminalField(first.cwd),
   ];
   for (const entry of entries) {
-    lines.push(`[${entry.turn}] ${formatEvent(entry.event)}`);
+    lines.push(`[${sanitizeTerminalField(String(entry.turn))}] ${formatEvent(entry.event)}`);
   }
   return sanitizeTerminalText(lines.join("\n") + "\n");
 }
@@ -104,27 +106,36 @@ function formatEvent(event: AgentEvent): string {
     case "text_delta":
       return `text: ${oneLine(event.text)}`;
     case "tool_start":
-      return `tool_start: ${event.call.name}(${JSON.stringify(event.parsedArgs)})`;
+      return (
+        `tool_start: ${sanitizeTerminalField(event.call.name)}(` +
+        `${sanitizeTerminalField(String(JSON.stringify(event.parsedArgs)))})`
+      );
     case "tool_progress":
-      return `tool_progress: ${event.call.name} ${oneLine(event.chunk)}`;
+      return `tool_progress: ${sanitizeTerminalField(event.call.name)} ${oneLine(event.chunk)}`;
     case "tool_end":
-      return `tool_end: ${event.call.name} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
+      return `tool_end: ${sanitizeTerminalField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
     case "usage":
-      return `usage: input ${event.usage.inputTokens} / output ${event.usage.outputTokens}`;
+      return (
+        `usage: input ${sanitizeTerminalField(String(event.usage.inputTokens))} / ` +
+        `output ${sanitizeTerminalField(String(event.usage.outputTokens))}`
+      );
     case "compact_start":
-      return `compact_start: before ${event.beforeChars}`;
+      return `compact_start: before ${sanitizeTerminalField(String(event.beforeChars))}`;
     case "compact_end":
-      return `compact_end: ${event.ok ? "ok" : "failed"} after ${event.afterChars}`;
+      return `compact_end: ${event.ok ? "ok" : "failed"} after ${sanitizeTerminalField(String(event.afterChars))}`;
     case "stream_retry":
-      return `stream_retry: ${event.attempt}/${event.maxAttempts} ${oneLine(event.error)}`;
+      return (
+        `stream_retry: ${sanitizeTerminalField(String(event.attempt))}/` +
+        `${sanitizeTerminalField(String(event.maxAttempts))} ${oneLine(event.error)}`
+      );
     case "auto_continue":
-      return `auto_continue: ${event.reason}`;
+      return `auto_continue: ${sanitizeTerminalField(event.reason)}`;
     case "turn_end":
-      return `turn_end: ${event.reason}`;
+      return `turn_end: ${sanitizeTerminalField(event.reason)}`;
   }
 }
 
 function oneLine(text: string): string {
-  const line = text.replace(/\s+/g, " ").trim();
+  const line = sanitizeTerminalField(text).replace(/\s+/g, " ").trim();
   return line.length > 120 ? line.slice(0, 120) + "..." : line;
 }

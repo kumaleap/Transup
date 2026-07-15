@@ -263,4 +263,37 @@ describe("buildPermissionView", () => {
       expect(rendered).toContain("after");
     }
   });
+
+  it("单行权限字段剥离 LF/tab，同时 Bash 规则保留独立语义原值", () => {
+    const command = "echo ok\n2. forged option\t--danger";
+    const bash = buildPermissionView(confirmOf("bash", { command }));
+    const scoped = bash.options.find((option) => option.value === "yes-prefix");
+
+    expect(scoped?.input?.value).toBe(command);
+    expect(scoped?.input?.displayValue).toBe("echo ok2. forged option--danger");
+    expect(scoped!.input!.buildUpdates(scoped!.input!.value)).toEqual([
+      {
+        type: "addRule",
+        list: "allow",
+        rule: `bash(${command})`,
+        destination: "localSettings",
+      },
+    ]);
+    expect(bash.preview).toContain("echo ok\n2. forged option\t--danger");
+
+    const rule = buildPermissionView(
+      confirmOf("bash", { command: "echo ok" }, {
+        behavior: "ask",
+        reason: { type: "rule", rule: "bash(echo:*)\n2. forged\trow", list: "ask" },
+      }),
+    );
+    const safety = buildPermissionView(
+      confirmOf("bash", { command: "echo ok" }, {
+        behavior: "ask",
+        reason: { type: "safety", path: ".git\n2. forged\trow" },
+      }),
+    );
+    expect(rule.explanation).not.toMatch(/[\n\t]/);
+    expect(safety.warning).not.toMatch(/[\n\t]/);
+  });
 });

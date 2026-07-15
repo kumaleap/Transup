@@ -79,6 +79,22 @@ describe("headless 模式", () => {
     expect(out).toContain("after\n\tline");
   });
 
+  it("headless 工具活动和错误字段不能注入新行或 tab", async () => {
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "missing\ttool\nforged-row", args: "{}" }],
+      },
+      { content: "done" },
+    ]);
+    const { code, err } = await run(provider);
+
+    expect(code).toBe(0);
+    expect(err).not.toContain("\t");
+    expect(err).not.toMatch(/\nforged-row/);
+    expect(err).toContain("missingtoolforged-row");
+  });
+
   it("写操作默认拒绝（fail-closed），拒绝原因喂回模型", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-headless-deny-"));
     const target = join(dir, "no.txt");

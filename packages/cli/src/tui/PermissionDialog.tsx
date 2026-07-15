@@ -13,7 +13,7 @@ import { Box, Text } from "./runtime/index.js";
 import { T } from "../theme.js";
 import type { PermissionDialogView } from "./permission/use-permission-controller.js";
 import type { PermissionOption } from "./permission/types.js";
-import { sanitizeTerminalText } from "../highlight.js";
+import { sanitizeTerminalField } from "../highlight.js";
 
 /** Top-and-bottom dashed frame used for file diff previews. */
 const dashedEdges = {
@@ -48,14 +48,11 @@ function OptionRow({
   return (
     <Box flexDirection="column">
       <Text color={labelColor}>
-        {pointer} {index + 1}. {sanitizeTerminalText(option.label, {
-          preserveNewlines: false,
-          preserveTabs: false,
-        })}
+        {pointer} {index + 1}. {sanitizeTerminalField(option.label)}
         {option.input && (
           <>
             <Text color={inputEditing ? T.warn : T.secondary}>
-              {sanitizeTerminalText(inputValue ?? "")}
+              {sanitizeTerminalField(inputValue ?? "")}
             </Text>
             {inputEditing && <Text color={T.warn}>▏</Text>}
             {!inputEditing && focused && <Text dimColor>（Tab 编辑）</Text>}
@@ -67,7 +64,7 @@ function OptionRow({
         <Text>
           {"    └ 附言: "}
           {editing.value ? (
-            <Text color={T.warn}>{sanitizeTerminalText(editing.value)}</Text>
+            <Text color={T.warn}>{sanitizeTerminalField(editing.value)}</Text>
           ) : (
             <Text dimColor>{option.feedbackPlaceholder}</Text>
           )}
@@ -98,15 +95,12 @@ export function PermissionDialog({ view }: { view: PermissionDialogView }) {
     <Box flexDirection="column" borderStyle="round" borderColor={T.warn} paddingX={1}>
       <Text>
         <Text color={T.warn} bold>
-          ◈ {sanitizeTerminalText(model.title, { preserveNewlines: false, preserveTabs: false })}
+          ◈ {sanitizeTerminalField(model.title)}
         </Text>
         {model.subtitle && (
           <Text dimColor>
             {" · "}
-            {sanitizeTerminalText(model.subtitle, {
-              preserveNewlines: false,
-              preserveTabs: false,
-            })}
+            {sanitizeTerminalField(model.subtitle)}
           </Text>
         )}
         {queueLength > 1 && <Text dimColor>（还有 {queueLength - 1} 个待确认）</Text>}
@@ -126,11 +120,11 @@ export function PermissionDialog({ view }: { view: PermissionDialogView }) {
       ) : (
         model.preview && <Text>{model.preview}</Text>
       )}
-      {model.explanation && <Text dimColor>{sanitizeTerminalText(model.explanation)}</Text>}
-      {model.warning && <Text color={T.warn}>{sanitizeTerminalText(model.warning)}</Text>}
+      {model.explanation && <Text dimColor>{sanitizeTerminalField(model.explanation)}</Text>}
+      {model.warning && <Text color={T.warn}>{sanitizeTerminalField(model.warning)}</Text>}
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={T.warn}>{sanitizeTerminalText(model.question)}</Text>
+        <Text color={T.warn}>{sanitizeTerminalField(model.question)}</Text>
         {model.options.map((option, i) => (
           <OptionRow
             key={option.value}

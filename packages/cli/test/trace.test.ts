@@ -112,4 +112,54 @@ describe("trace replay renderer", () => {
     expect(text).toContain("before");
     expect(text).toContain("after");
   });
+
+  it("keeps metadata, tool names, and errors inside their trace rows", () => {
+    const inject = (value: string) => `${value}\n[99] forged\trow`;
+    const base = {
+      version: 1 as const,
+      timestamp: "2026-07-09T00:00:00.000Z",
+      sessionId: inject("session"),
+      providerId: inject("provider"),
+      model: inject("model"),
+      cwd: inject("/repo"),
+      turn: 1,
+    };
+    const text = renderTrace([
+      {
+        ...base,
+        event: {
+          type: "tool_start",
+          call: { id: "t1", name: inject("tool"), args: "{}" },
+          parsedArgs: { value: inject("argument") },
+        },
+      },
+      {
+        ...base,
+        event: {
+          type: "tool_end",
+          call: { id: "t1", name: inject("tool"), args: "{}" },
+          content: inject("failed"),
+          isError: true,
+        },
+      },
+      {
+        ...base,
+        event: {
+          type: "stream_retry",
+          attempt: 1,
+          maxAttempts: 3,
+          error: inject("retry"),
+          delayMs: 100,
+        },
+      },
+    ]);
+    const lines = text.trimEnd().split("\n");
+
+    expect(lines).toHaveLength(4);
+    expect(lines.every((line) => !line.includes("\t"))).toBe(true);
+    expect(lines[0]).toContain("Trace session[99] forgedrow");
+    expect(lines[1]).toContain("tool_start: tool[99] forgedrow");
+    expect(lines[2]).toContain("tool_end: tool[99] forgedrow error failed[99] forgedrow");
+    expect(lines[3]).toContain("stream_retry: 1/3 retry[99] forgedrow");
+  });
 });

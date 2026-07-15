@@ -16,6 +16,7 @@
  * 连续到达（快速输入 + 回车），闭包里的 state 会过期，ref 不会。
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { sanitizeTerminalField } from "../../highlight.js";
 import type { Keystroke } from "../input/keybinding-router.js";
 import { buildPermissionView } from "./options.js";
 import type { PermissionOption, PermissionViewModel, ToolUseConfirm } from "./types.js";
@@ -120,7 +121,7 @@ export function usePermissionController(
         return true;
       }
       if (stroke.name === "text" && stroke.input && !stroke.ctrl && !stroke.meta) {
-        const clean = stroke.input.replace(/[\r\n\x00-\x1f]/g, "");
+        const clean = sanitizeTerminalField(stroke.input);
         if (clean) setEditing({ ...editingNow, value: editingNow.value + clean });
         return true;
       }

@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { renderMarkdown, highlightDiffLine } from "../src/highlight.js";
+import {
+  renderMarkdown,
+  highlightDiffLine,
+  sanitizeTerminalField,
+} from "../src/highlight.js";
 
 const ANSI = /\x1b\[\d+m/g;
 const OSC8 = /\x1b\]8;;[^\x1b]*\x1b\\/g;
@@ -7,6 +11,14 @@ const strip = (s: string) => s.replace(OSC8, "").replace(ANSI, "");
 
 /** OSC 8 超链接期望值 */
 const link = (url: string, text: string) => `\x1b]8;;${url}\x1b\\${text}\x1b]8;;\x1b\\`;
+
+describe("terminal field sanitization", () => {
+  it("strips every layout and terminal control from a single-line field", () => {
+    expect(
+      sanitizeTerminalField("before\trow\nnext\r\x1b[31m\x85\x9b31m\x7fafter"),
+    ).toBe("beforerownext[31m31mafter");
+  });
+});
 
 describe("renderMarkdown", () => {
   it("普通文本原样保留（无 ANSI 码）", () => {

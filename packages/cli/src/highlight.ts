@@ -34,6 +34,11 @@ export function sanitizeTerminalText(
   return out;
 }
 
+/** Structural terminal field boundary: no control may alter the containing row. */
+export function sanitizeTerminalField(text: string): string {
+  return sanitizeTerminalText(text, { preserveNewlines: false, preserveTabs: false });
+}
+
 function hasTerminalControl(text: string): boolean {
   for (const char of text) {
     const code = char.codePointAt(0)!;

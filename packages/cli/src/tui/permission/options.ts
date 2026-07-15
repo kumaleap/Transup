@@ -14,19 +14,19 @@ import { basename } from "node:path";
 import { bashPrefixRule, commandPrefix } from "@transup/core";
 import { color } from "../../ui.js";
 import { renderEditPreview, renderWritePreview } from "../../diff.js";
-import { sanitizeTerminalText } from "../../highlight.js";
+import { sanitizeTerminalField, sanitizeTerminalText } from "../../highlight.js";
 import type { PermissionOption, PermissionViewModel, ToolUseConfirm } from "./types.js";
 
 function explanationFor(confirm: ToolUseConfirm): Pick<PermissionViewModel, "explanation" | "warning"> {
   const reason = confirm.verdict.reason;
   if (reason.type === "rule") {
     return {
-      explanation: `权限规则 ${sanitizeTerminalText(reason.rule)} 要求确认（.transup/settings.json 可调整）`,
+      explanation: `权限规则 ${sanitizeTerminalField(reason.rule)} 要求确认（.transup/settings.json 可调整）`,
     };
   }
   if (reason.type === "safety") {
     return {
-      warning: `⚠ 目标涉及敏感路径 ${sanitizeTerminalText(reason.path)} —— 任何模式下都会询问`,
+      warning: `⚠ 目标涉及敏感路径 ${sanitizeTerminalField(reason.path)} —— 任何模式下都会询问`,
     };
   }
   return {};
@@ -68,10 +68,7 @@ export function buildPermissionView(
 
   if (toolName === "edit_file" || toolName === "write_file") {
     const rawPath = typeof args.path === "string" ? args.path : "";
-    const path = sanitizeTerminalText(rawPath, {
-      preserveNewlines: false,
-      preserveTabs: false,
-    });
+    const path = sanitizeTerminalField(rawPath);
     const overwrite = toolName === "write_file" && rawPath !== "" && existsSync(rawPath);
     const scoped: PermissionOption = {
       value: "yes-session",
@@ -106,7 +103,7 @@ export function buildPermissionView(
       kind: "allow",
       input: {
         value: prefix,
-        displayValue: sanitizeTerminalText(prefix),
+        displayValue: sanitizeTerminalField(prefix),
         buildUpdates: (value) => {
           const rule = bashPrefixRule(command, value);
           return [{ type: "addRule", list: "allow", rule, destination: "localSettings" }];
@@ -125,19 +122,13 @@ export function buildPermissionView(
   // fallback：MCP 工具、被 ask 规则命中的只读工具、未来的新工具
   const scoped: PermissionOption = {
     value: "yes-tool",
-    label: `是，本项目不再询问 ${sanitizeTerminalText(toolName, {
-      preserveNewlines: false,
-      preserveTabs: false,
-    })}`,
+    label: `是，本项目不再询问 ${sanitizeTerminalField(toolName)}`,
     kind: "allow",
     updates: [{ type: "addRule", list: "allow", rule: toolName, destination: "localSettings" }],
   };
   return {
     title: "工具调用",
-    subtitle: sanitizeTerminalText(toolName, {
-      preserveNewlines: false,
-      preserveTabs: false,
-    }),
+    subtitle: sanitizeTerminalField(toolName),
     preview: color.dim(sanitizeTerminalText(JSON.stringify(args, null, 2))),
     ...explanationFor(confirm),
     question: "允许执行吗？",
