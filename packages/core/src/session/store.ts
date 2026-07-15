@@ -33,11 +33,18 @@ export class SessionStore {
   }
 
   async append(message: Message): Promise<void> {
+    await this.appendBatch([message]);
+  }
+
+  /** 把一组消息序列化后通过一次 append 写入，保证批内顺序与连续性。 */
+  async appendBatch(messages: readonly Message[]): Promise<void> {
+    if (messages.length === 0) return;
     if (!this.dirReady) {
       await mkdir(this.dir, { recursive: true });
       this.dirReady = true;
     }
-    await appendFile(this.path, JSON.stringify(message) + "\n", "utf-8");
+    const batch = messages.map((message) => JSON.stringify(message)).join("\n") + "\n";
+    await appendFile(this.path, batch, "utf-8");
   }
 
   /** 恢复路径：读回所有行，跳过损坏的行（最后一行可能写了一半） */

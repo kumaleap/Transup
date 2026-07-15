@@ -3,7 +3,7 @@
  * 写入极简、恢复路径能容忍损坏的行（崩溃时写一半）。
  */
 import { describe, it, expect } from "vitest";
-import { mkdtemp, appendFile } from "node:fs/promises";
+import { mkdtemp, appendFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/session/store.js";
@@ -21,6 +21,28 @@ describe("SessionStore", () => {
     const loaded = await new SessionStore("s1", dir).load();
     expect(loaded).toHaveLength(2);
     expect(loaded[1]).toMatchObject({ role: "assistant", toolCalls: [{ id: "t1" }] });
+  });
+
+  it("appendBatch 把多条消息按顺序序列化为一个连续批次", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("batch", dir);
+    const summary = { role: "user" as const, content: "compact summary" };
+    const acknowledgement = { role: "assistant" as const, content: "acknowledged" };
+
+    await s.append({ role: "user", content: "before" });
+    await s.appendBatch([summary, acknowledgement]);
+
+    expect(await s.load()).toEqual([
+      { role: "user", content: "before" },
+      summary,
+      acknowledgement,
+    ]);
+    expect((await readFile(join(dir, "batch.jsonl"), "utf-8")).split("\n")).toEqual([
+      JSON.stringify({ role: "user", content: "before" }),
+      JSON.stringify(summary),
+      JSON.stringify(acknowledgement),
+      "",
+    ]);
   });
 
   it("损坏的行（崩溃写一半）被跳过而非报错", async () => {

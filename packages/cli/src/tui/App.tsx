@@ -371,6 +371,7 @@ export function App(props: AppProps) {
       new AgentEngine({
         provider: props.provider,
         canUseTool,
+        canPersist: () => mountedRef.current,
         session: new SessionStore(sessionId, props.sessionDir),
         history,
         projectContext: props.projectContext,

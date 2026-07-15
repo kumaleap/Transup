@@ -114,6 +114,79 @@ class RejectingCompactProvider implements Provider {
   }
 }
 
+class DeferredAbortProvider implements Provider {
+  readonly id = "deferred-abort";
+  readonly model = "deferred-abort-1";
+  private rejectStream!: (error: Error) => void;
+  private readonly streamGate = new Promise<never>((_, reject) => {
+    this.rejectStream = reject;
+  });
+  private markStarted!: () => void;
+  readonly started = new Promise<void>((resolve) => {
+    this.markStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectStream(Object.assign(new Error("aborted"), { name: "AbortError" }));
+  }
+
+  async *stream(): AsyncIterable<ProviderEvent> {
+    this.markStarted();
+    await this.streamGate;
+  }
+}
+
+function containsCompactRecord(messages: readonly Message[]): boolean {
+  return messages.some(
+    (message) =>
+      message.content.startsWith("[系统提示] 对话历史已被压缩。") ||
+      message.content === "已了解此前的工作进展，继续。",
+  );
+}
+
+class GatedCompactSessionStore extends SessionStore {
+  readonly compactBatches: Message[][] = [];
+  private compactObserved = false;
+  private releaseCommit!: () => void;
+  private readonly commitGate = new Promise<void>((resolve) => {
+    this.releaseCommit = resolve;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+
+  releaseCompact(): void {
+    this.releaseCommit();
+  }
+
+  override async appendBatch(messages: readonly Message[]): Promise<void> {
+    if (!containsCompactRecord(messages)) {
+      await super.appendBatch(messages);
+      return;
+    }
+    this.compactBatches.push(structuredClone([...messages]));
+    if (!this.compactObserved) {
+      this.compactObserved = true;
+      this.markCompactStarted();
+      await this.commitGate;
+    }
+    await super.appendBatch(messages);
+  }
+}
+
+class RejectingCompactSessionStore extends SessionStore {
+  readonly compactBatches: Message[][] = [];
+
+  override async appendBatch(messages: readonly Message[]): Promise<void> {
+    if (containsCompactRecord(messages)) {
+      this.compactBatches.push(structuredClone([...messages]));
+      throw new Error("compact persistence failed");
+    }
+    await super.appendBatch(messages);
+  }
+}
+
 async function makeEngine(provider: Provider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "transup-engine-"));
   return new AgentEngine({
@@ -203,6 +276,101 @@ describe("AgentEngine 主循环", () => {
     expect(provider.calls).toHaveLength(1); // 不再发起第二次模型调用
   });
 
+  it("host disposal suppresses the late assistant interruption record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-host-dispose-"));
+    const session = new SessionStore("host-dispose", dir);
+    const provider = new DeferredAbortProvider();
+    let active = true;
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      canPersist: () => active,
+      session,
+    });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("keep the submitted input", controller.signal));
+    await provider.started;
+    active = false;
+    controller.abort();
+    provider.rejectAfterAbort();
+    const events = await turn;
+
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(await session.load()).toEqual([
+      { role: "user", content: "keep the submitted input" },
+    ]);
+  });
+
+  it("host disposal suppresses a tool result that finishes after unmount", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-tool-dispose-"));
+    const session = new SessionStore("tool-dispose", dir);
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const lateTool = {
+      name: "late_tool",
+      description: "test host disposal during tool execution",
+      schema: z.object({}),
+      readOnly: true,
+      async execute() {
+        markToolStarted();
+        await toolGate;
+        return "late tool result";
+      },
+    };
+    const call = { id: "late-1", name: lateTool.name, args: "{}" };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [call] },
+      { content: "must not run" },
+    ]);
+    let active = true;
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      canPersist: () => active,
+      session,
+      tools: [lateTool],
+    });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("run the late tool", controller.signal));
+    await toolStarted;
+    active = false;
+    controller.abort();
+    releaseTool();
+    const events = await turn;
+
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(provider.calls).toHaveLength(1);
+    expect(await session.load()).toEqual([
+      { role: "user", content: "run the late tool" },
+      expect.objectContaining({ role: "assistant", content: "", toolCalls: [call] }),
+    ]);
+  });
+
+  it("omitting canPersist keeps ordinary engine persistence enabled", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-default-persist-"));
+    const session = new SessionStore("default-persist", dir);
+    const engine = new AgentEngine({
+      provider: new MockProvider([{ content: "ordinary completion" }]),
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+    });
+
+    await collect(engine.runTurn("ordinary input"));
+
+    expect(await session.load()).toEqual([
+      { role: "user", content: "ordinary input" },
+      { role: "assistant", content: "ordinary completion" },
+    ]);
+  });
+
   it("compact：超预算触发压缩，摘要替换历史", async () => {
     const provider = new MockProvider([
       // 第 1 次调用：模型正常回复（把历史撑大）
@@ -228,6 +396,101 @@ describe("AgentEngine 主循环", () => {
     const text = JSON.stringify(lastCall);
     expect(text).toContain("摘要");
     expect(text).not.toContain("x".repeat(100));
+  });
+
+  it("automatic compact commits one batch when abort arrives during persistence", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-compact-commit-"));
+    const session = new GatedCompactSessionStore("commit-wins", dir);
+    const provider = new MockProvider([
+      { content: "committed compact summary" },
+      { content: "post-commit probe" },
+    ]);
+    const originalMarker = `original-history-${"x".repeat(2_000)}`;
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+      history: [
+        { role: "user", content: originalMarker },
+        { role: "assistant", content: "original response" },
+        { role: "user", content: "original follow-up" },
+      ],
+      maxContextChars: 1_000,
+    });
+    const controller = new AbortController();
+
+    const turn = collect(engine.runTurn("trigger automatic compact", controller.signal));
+    await session.compactStarted;
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    session.releaseCompact();
+    const events = await turn;
+
+    const compactEnd = events.find((event) => event.type === "compact_end");
+    expect(compactEnd).toMatchObject({ type: "compact_end", ok: true });
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(provider.calls).toHaveLength(1);
+    expect(session.compactBatches).toEqual([
+      [
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("committed compact summary"),
+        }),
+        { role: "assistant", content: "已了解此前的工作进展，继续。" },
+      ],
+    ]);
+    expect(await session.load()).toEqual([
+      { role: "user", content: "trigger automatic compact" },
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining("committed compact summary"),
+      }),
+      { role: "assistant", content: "已了解此前的工作进展，继续。" },
+    ]);
+
+    await collect(engine.runTurn("probe committed history"));
+    expect(JSON.stringify(provider.calls[1])).toContain("committed compact summary");
+    expect(JSON.stringify(provider.calls[1])).not.toContain(originalMarker);
+  });
+
+  it("compact batch failure keeps the old in-memory history before fallback", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-engine-compact-persist-fail-"));
+    const session = new RejectingCompactSessionStore("persist-fail", dir);
+    const history: Message[] = [
+      { role: "user", content: `old-history-${"x".repeat(500)}` },
+      { role: "assistant", content: "old response" },
+      { role: "user", content: "old follow-up" },
+    ];
+    for (const message of history) await session.append(message);
+    const provider = new MockProvider([{ content: "must not replace old history" }]);
+    const engine = new AgentEngine({
+      provider,
+      canUseTool: async () => ({ behavior: "allow" as const }),
+      session,
+      history,
+      maxContextChars: 100_000,
+    });
+    const before = engine.contextUsage();
+
+    const events = await collect(engine.compactNow());
+
+    expect(events.at(-1)).toMatchObject({ type: "compact_end", ok: false });
+    expect(engine.contextUsage()).toEqual(before);
+    expect(session.compactBatches).toEqual([
+      [
+        expect.objectContaining({
+          role: "user",
+          content: expect.stringContaining("must not replace old history"),
+        }),
+        { role: "assistant", content: "已了解此前的工作进展，继续。" },
+      ],
+    ]);
+    expect(await session.load()).toEqual(history);
   });
 
   it("automatic compact aborts atomically when a provider returns a late summary", async () => {

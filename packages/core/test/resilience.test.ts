@@ -15,6 +15,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
+import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, StopReason, ToolCall } from "../src/provider/types.js";
 
 /**
@@ -105,19 +106,30 @@ describe("流式重试", () => {
     expect(provider.calls).toHaveLength(3); // 首发 + 2 次重试
   });
 
-  it("退避等待期间用户中断 → 干净收尾，transcript 一致", async () => {
+  it("host disposal during retry backoff suppresses the interruption record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-retry-host-dispose-"));
+    const session = new SessionStore("retry-host-dispose", dir);
     const provider = new FlakyProvider([{ error: netError() }, { content: "不应到达" }]);
-    const engine = makeEngine(provider, { retryBaseMs: 60_000 }); // 长退避，靠 abort 打断
+    let active = true;
+    const engine = makeEngine(provider, {
+      retryBaseMs: 60_000,
+      canPersist: () => active,
+      session,
+    });
     const controller = new AbortController();
 
     const events: AgentEvent[] = [];
     for await (const ev of engine.runTurn("hi", controller.signal)) {
       events.push(ev);
-      if (ev.type === "stream_retry") controller.abort();
+      if (ev.type === "stream_retry") {
+        active = false;
+        controller.abort();
+      }
     }
 
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
     expect(provider.calls).toHaveLength(1); // 没有发起重试请求
+    expect(await session.load()).toEqual([{ role: "user", content: "hi" }]);
   });
 });
 

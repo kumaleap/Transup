@@ -42,6 +42,8 @@ export type AgentEvent =
 export interface EngineOptions {
   provider: Provider;
   canUseTool: PermissionFn;
+  /** 宿主仍可接收持久化副作用；默认常驻（headless / 子 agent）。 */
+  canPersist?: () => boolean;
   /** 不传则不持久化（子 agent 的探索过程不值得落盘） */
   session?: SessionStore;
   /** 工具集覆盖：默认内建全集；子 agent 传只读子集 */
@@ -105,6 +107,7 @@ export class AgentEngine {
   private provider: Provider;
   private registry: ToolRegistry;
   private canUseTool: PermissionFn;
+  private canPersist: () => boolean;
   private session?: SessionStore;
   private maxIterations: number;
   private maxContextChars: number;
@@ -116,6 +119,7 @@ export class AgentEngine {
   constructor(opts: EngineOptions) {
     this.provider = opts.provider;
     this.canUseTool = opts.canUseTool;
+    this.canPersist = opts.canPersist ?? (() => true);
     this.session = opts.session;
     this.registry = new ToolRegistry(opts.tools);
     this.maxIterations = opts.maxIterations ?? 40;
@@ -142,6 +146,7 @@ export class AgentEngine {
 
   /** 消息进入系统的唯一入口：内存 + 持久化双写 */
   private async push(m: Message): Promise<void> {
+    if (!this.canPersist()) return;
     this.messages.push(m);
     await this.session?.append(m);
   }
@@ -177,14 +182,15 @@ export class AgentEngine {
         },
         { role: "assistant", content: "已了解此前的工作进展，继续。" },
       ];
+      if (signal?.aborted || !this.canPersist()) return;
+
+      // 从批量落盘到内存替换是不可取消的逻辑提交；开始后采用 commit-wins。
+      await this.session?.appendBatch([newMessages[1], newMessages[2]]);
       this.messages = newMessages;
-      // 压缩是历史重写，在 transcript 里记录为一个事件（新会话段）
-      await this.session?.append(newMessages[1]);
-      await this.session?.append(newMessages[2]);
 
       yield { type: "compact_end", afterChars: this.contextSize(), ok: true, summary };
     } catch {
-      if (signal?.aborted) return;
+      if (signal?.aborted || !this.canPersist()) return;
       // 熔断：压缩失败退回最简截断
       trimHistory(this.messages, this.maxContextChars);
       yield { type: "compact_end", afterChars: this.contextSize(), ok: false };

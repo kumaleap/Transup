@@ -133,6 +133,43 @@ class AbortableProvider implements Provider {
   }
 }
 
+/** Waits for explicit rejection so the test can dispose the App before provider settlement. */
+class RejectAfterUnmountProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectStream!: (error: Error) => void;
+  private readonly streamGate = new Promise<never>((_, reject) => {
+    this.rejectStream = reject;
+  });
+  private markStreamStarted!: () => void;
+  readonly streamStarted = new Promise<void>((resolve) => {
+    this.markStreamStarted = resolve;
+  });
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  rejectAfterUnmount(): void {
+    this.rejectStream(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markStreamStarted();
+    try {
+      await this.streamGate;
+    } finally {
+      this.markStreamFinished();
+    }
+  }
+}
+
 /** Manual compaction provider that rejects on demand after the test sends Ctrl+C. */
 class RejectingManualCompactProvider implements Provider {
   readonly id = "mock";
@@ -2151,28 +2188,53 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("中断后渲染 dim 提示行，已流出的部分文本固化进记录", async () => {
-    const { stdin, lastFrame, unmount } = render(makeApp(new AbortableProvider()));
-    await flush();
-    stdin.write("go");
-    stdin.write("\r");
-    await vi.waitFor(
-      () => expect(lastFrame()).toContain("部分输出"),
-      {timeout: 10_000},
+  it("first Ctrl+C keeps the live interruption record while App remains mounted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-live-abort-"));
+    const sessionId = "live-abort";
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={new AbortableProvider()}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
     );
-    expect(lastFrame()).not.toContain("后半"); // 中断前半行仍被隐藏
-    stdin.write("\x03");
-    await vi.waitFor(
-      () => expect(lastFrame()).toContain("已中断 · 接下来要我做什么?"),
-      {timeout: 10_000},
-    );
-    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(frame).toContain("部分输出");
-    expect(frame).toContain("后半"); // flushStream 把半行也固化
-    expect(frame.match(/部分输出/g)).toHaveLength(1);
-    expect(frame.match(/已中断 · 接下来要我做什么\?/g)).toHaveLength(1);
-    expect(frame).not.toContain("任务已中断");
-    unmount();
+
+    try {
+      await flush();
+      instance.stdin.write("go");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("部分输出"),
+        {timeout: 10_000},
+      );
+      expect(instance.lastFrame()).not.toContain("后半"); // 中断前半行仍被隐藏
+      instance.stdin.write("\x03");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("已中断 · 接下来要我做什么?"),
+        {timeout: 10_000},
+      );
+      const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(frame).toContain("部分输出");
+      expect(frame).toContain("后半"); // flushStream 把半行也固化
+      expect(frame.match(/部分输出/g)).toHaveLength(1);
+      expect(frame.match(/已中断 · 接下来要我做什么\?/g)).toHaveLength(1);
+      expect(frame).not.toContain("任务已中断");
+      expect(onExitStats).not.toHaveBeenCalled();
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "go"},
+        {role: "assistant", content: "(已被用户中断)"},
+      ]);
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("Ctrl+O 打开会话全文屏：工具输出不截断；Ctrl+E 展开、Esc 返回", async () => {
@@ -2747,6 +2809,71 @@ describe("TUI", {timeout: 30_000}, () => {
     } finally {
       provider.rejectAfterAbort();
       instance.unmount();
+    }
+  });
+
+  it("unmount aborts a pending turn without persisting its late interruption record", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-turn-unmount-"));
+    const sessionId = "turn-unmount";
+    const provider = new RejectAfterUnmountProvider();
+    const turnFinished = pendingPromise();
+    const originalRunTurn = transupCore.AgentEngine.prototype.runTurn;
+    const runTurnSpy = vi
+      .spyOn(transupCore.AgentEngine.prototype, "runTurn")
+      .mockImplementation(function (
+        this: InstanceType<typeof transupCore.AgentEngine>,
+        input: string,
+        signal?: AbortSignal,
+      ) {
+        const source = originalRunTurn.call(this, input, signal);
+        return (async function* () {
+          try {
+            yield* source;
+          } finally {
+            turnFinished.resolve();
+          }
+        })();
+      });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("pending turn");
+      instance.stdin.write("\r");
+      await provider.streamStarted;
+      expect(provider.signals[0]?.aborted).toBe(false);
+
+      instance.unmount();
+      expect(provider.signals[0]?.aborted).toBe(true);
+      provider.rejectAfterUnmount();
+      await provider.streamFinished;
+      await turnFinished.promise;
+      await flush();
+
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "pending turn"},
+      ]);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.rejectAfterUnmount();
+      instance.unmount();
+      errorSpy.mockRestore();
+      runTurnSpy.mockRestore();
     }
   });
 
