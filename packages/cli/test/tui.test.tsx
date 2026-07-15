@@ -3288,6 +3288,100 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   });
 
+  it("abort during permission persistence does not install the runtime allow rule", async () => {
+    const persistStarted = pendingPromise();
+    const releasePersist = pendingPromise();
+    const execute = vi.fn(async () => "must not execute");
+    const tool = {
+      name: "deferred_permission_probe",
+      description: "Deferred permission persistence probe",
+      schema: z.object({}),
+      readOnly: false,
+      execute,
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{id: "persisting-allow", name: tool.name, args: "{}"}],
+      },
+      {
+        content: "",
+        toolCalls: [{id: "retry-after-abort", name: tool.name, args: "{}"}],
+      },
+      {content: "second request stayed denied"},
+    ]);
+    const persistSpy = vi
+      .spyOn(transupCore, "persistPermissionRule")
+      .mockImplementation(async () => {
+        persistStarted.resolve();
+        await releasePersist.promise;
+      });
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[tool]}
+        settings={{}}
+        initialSessionId="permission-persist-abort"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request deferred permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("工具调用"), {
+        timeout: 3000,
+      });
+
+      instance.stdin.write("2");
+      await persistStarted.promise;
+      expect(persistSpy).toHaveBeenCalledOnce();
+
+      instance.stdin.write("\x03");
+      expect(turn.signal()?.aborted).toBe(true);
+      releasePersist.resolve();
+      await turn.finished;
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(frame).toContain("已中断 · 接下来要我做什么?");
+        expect(frame).not.toContain("working…");
+      }, {timeout: 3000});
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(provider.streamCalls).toBe(1);
+
+      instance.stdin.write("retry after the aborted persistence");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(
+          frame.includes("工具调用") || frame.includes("second request stayed denied"),
+        ).toBe(true);
+      }, {timeout: 3000});
+      expect(instance.lastFrame()).toContain("工具调用");
+      expect(execute).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x1b");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("second request stayed denied"),
+        {timeout: 3000},
+      );
+      expect(persistSpy).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      releasePersist.resolve();
+      instance.unmount();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
   it("unmount cleanup denies every pending parallel read-only confirmation", async () => {
     const executeFirst = vi.fn(async () => "must not execute first");
     const executeSecond = vi.fn(async () => "must not execute second");
