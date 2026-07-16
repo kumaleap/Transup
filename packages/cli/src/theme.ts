@@ -22,6 +22,10 @@ export const T = {
   warn: "#d7af5f", // 琥珀（≈ 179）
   danger: "#ff5f5f", // 红（≈ 203）
   border: "#4e4e4e", // 低调灰 —— 输入框边框，跟记录区分隔又不抢眼（≈ 239）
+  subtle: "#4e4e4e", // 最低调的深灰（≈ 239）—— user 消息 ❯ 前缀等"存在但不打扰"的元素
+  userMessageBg: "#3a3a3a", // user 消息整条浅灰背景（≈ 237），与正文区分层次
+  bashAccent: "#ff5fd7", // 品红（≈ 206）—— bash 输入行 "! " 前缀，独立于品牌绿的模式色
+  bashMessageBg: "#403a40", // 微紫灰 —— bash 输入行背景，与 user 灰底做微差区分
 } as const;
 
 const fg =
@@ -46,4 +50,7 @@ export const paint = {
   /** diff 整行背景 —— 深绿增 / 深红删，前景保持代码原文 */
   diffAddBg: bg(22),
   diffRemoveBg: bg(52),
+  /** diff 词级高亮背景 —— 比整行底色亮一档，只刷真正变化的词（规格 §3.3） */
+  diffAddWordBg: bg(28),
+  diffRemoveWordBg: bg(88),
 };

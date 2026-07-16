@@ -71,12 +71,99 @@ describe("renderEditPreview", () => {
     expect(bgLine).toContain("…");
   });
 
+  it("统计数字加粗", () => {
+    const out = renderEditPreview(
+      { path: "/n.ts", old_string: "a\nb", new_string: "x" },
+      40,
+    );
+    // +1 行 / -2 行 —— 数字各自独立成 bold 段
+    expect(out).toContain("\x1b[1m1\x1b[0m");
+    expect(out).toContain("\x1b[1m2\x1b[0m");
+    expect(stripAnsi(out)).toContain("（+1 行，-2 行）");
+  });
+
+  it("词级 diff：变化词刷亮一档背景，未变部分只有整行底色", () => {
+    const out = renderEditPreview(
+      {
+        path: "/n.ts",
+        old_string: "const alpha = 1;",
+        new_string: "const beta = 1;",
+      },
+      60,
+    );
+    // 变化词：删除行的 alpha 刷 88、新增行的 beta 刷 28
+    expect(out).toContain("\x1b[48;5;88malpha\x1b[0m");
+    expect(out).toContain("\x1b[48;5;28mbeta\x1b[0m");
+    // 未变部分仍是整行底色
+    expect(out).toContain("\x1b[48;5;52m");
+    expect(out).toContain("\x1b[48;5;22m");
+  });
+
+  it("词级 diff：变化比例 > 0.4 时回退整行高亮", () => {
+    const out = renderEditPreview(
+      { path: "/n.ts", old_string: "aaaa bbbb", new_string: "cccc dddd" },
+      60,
+    );
+    expect(out).not.toContain("\x1b[48;5;28m");
+    expect(out).not.toContain("\x1b[48;5;88m");
+    expect(out).toContain("\x1b[48;5;22m");
+    expect(out).toContain("\x1b[48;5;52m");
+  });
+
+  it("多 hunk 时 context 裁剪为上下各 3 行，中间显示省略行", () => {
+    const mid = Array.from({ length: 8 }, (_, i) => `ctx${i + 1}`);
+    const oldStr = ["first", ...mid, "last"].join("\n");
+    const newStr = ["FIRST!", ...mid, "LAST!"].join("\n");
+    const out = stripAnsi(renderEditPreview({ path: "/n.ts", old_string: oldStr, new_string: newStr }, 60));
+    // 两个改动块之间 8 行 context：留 3+3，省略中间 2 行
+    expect(out).toContain("… 2 行未变 …");
+    expect(out).toContain("ctx3");
+    expect(out).toContain("ctx6");
+    expect(out).not.toContain("ctx4");
+    expect(out).not.toContain("ctx5");
+  });
+
+  it("单 hunk 时 context 不裁剪、全显", () => {
+    const lead = Array.from({ length: 8 }, (_, i) => `keep${i + 1}`);
+    const oldStr = [...lead, "old"].join("\n");
+    const newStr = [...lead, "new"].join("\n");
+    const out = stripAnsi(renderEditPreview({ path: "/n.ts", old_string: oldStr, new_string: newStr }, 60));
+    expect(out).not.toContain("行未变");
+    for (const l of lead) expect(out).toContain(l);
+  });
+
   it("超过 40 行的 diff 截断并给出剩余行数", () => {
     const oldStr = Array.from({ length: 60 }, (_, i) => `old${i}`).join("\n");
     const out = stripAnsi(
       renderEditPreview({ path: "/n.ts", old_string: oldStr, new_string: "new" }, 40),
     );
     expect(out).toMatch(/… \+\d+ 行/);
+  });
+
+  it("renders distinct control bytes as visible escapes instead of a false +0/-0 diff", () => {
+    const out = renderEditPreview(
+      { path: "/n.ts", old_string: "same\x00", new_string: "same\x01" },
+      60,
+    );
+    const plain = stripAnsi(out);
+
+    expect(plain).toContain("（+1 行，-1 行）");
+    expect(plain).toContain("same\\x00");
+    expect(plain).toContain("same\\x01");
+    expect(plain).not.toMatch(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/);
+  });
+
+  it("keeps raw controls distinct from literal backslash escape text", () => {
+    const out = stripAnsi(
+      renderEditPreview(
+        { path: "/n.ts", old_string: "same\x07", new_string: "same\\x07" },
+        60,
+      ),
+    );
+
+    expect(out).toContain("（+1 行，-1 行）");
+    expect(out).toContain("same\\x07");
+    expect(out).toContain("same\\\\x07");
   });
 });
 
@@ -100,5 +187,25 @@ describe("renderWritePreview", () => {
     writeFileSync(file, "old\n");
     const out = stripAnsi(renderWritePreview({ path: file, content: "new" }, 40));
     expect(out).toContain("⚠ 覆盖已有文件");
+  });
+
+  it("existing non-file targets return a safe warning instead of throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-diff-directory-"));
+    const out = stripAnsi(renderWritePreview({ path: dir, content: "new" }, 40));
+
+    expect(out).toContain("⚠ 目标不是普通文件");
+    expect(out).toContain("新 1 行");
+  });
+
+  it("write content renders terminal controls as visible escapes", () => {
+    const out = renderWritePreview(
+      { path: "/definitely/not/exist-control.ts", content: "before\x1b]52;c;attack\x07after" },
+      80,
+    );
+    const plain = stripAnsi(out);
+
+    expect(plain).toContain("before\\x1b]52;c;attack\\x07after");
+    expect(out).not.toContain("\x1b]52;");
+    expect(out).not.toContain("\x07");
   });
 });

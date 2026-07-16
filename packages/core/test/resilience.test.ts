@@ -15,6 +15,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentEngine, type AgentEvent } from "../src/agent/engine.js";
+import { SessionStore } from "../src/session/store.js";
 import type { Message, Provider, ProviderEvent, StopReason, ToolCall } from "../src/provider/types.js";
 
 /**
@@ -53,7 +54,7 @@ class FlakyProvider implements Provider {
 function makeEngine(provider: Provider, opts: Partial<ConstructorParameters<typeof AgentEngine>[0]> = {}) {
   return new AgentEngine({
     provider,
-    canUseTool: async () => true,
+    canUseTool: async () => ({ behavior: "allow" as const }),
     retryBaseMs: 1, // 测试不等真实退避
     ...opts,
   });
@@ -105,19 +106,30 @@ describe("流式重试", () => {
     expect(provider.calls).toHaveLength(3); // 首发 + 2 次重试
   });
 
-  it("退避等待期间用户中断 → 干净收尾，transcript 一致", async () => {
+  it("host disposal during retry backoff suppresses the interruption record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-retry-host-dispose-"));
+    const session = new SessionStore("retry-host-dispose", dir);
     const provider = new FlakyProvider([{ error: netError() }, { content: "不应到达" }]);
-    const engine = makeEngine(provider, { retryBaseMs: 60_000 }); // 长退避，靠 abort 打断
+    let active = true;
+    const engine = makeEngine(provider, {
+      retryBaseMs: 60_000,
+      canPersist: () => active,
+      session,
+    });
     const controller = new AbortController();
 
     const events: AgentEvent[] = [];
     for await (const ev of engine.runTurn("hi", controller.signal)) {
       events.push(ev);
-      if (ev.type === "stream_retry") controller.abort();
+      if (ev.type === "stream_retry") {
+        active = false;
+        controller.abort();
+      }
     }
 
     expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
     expect(provider.calls).toHaveLength(1); // 没有发起重试请求
+    expect(await session.load()).toEqual([{ role: "user", content: "hi" }]);
   });
 });
 
@@ -253,5 +265,44 @@ describe("中断恢复质量", () => {
     const lastCall = JSON.stringify(provider.calls.at(-1));
     expect(lastCall).toContain("重新注入");
     expect(lastCall).toContain("秘密工作台内容");
+  });
+
+  it("压缩检查点恢复后下一次 compact 仍重注入最近读过的文件", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-checkpoint-resume-"));
+    const file = join(dir, "checkpoint-work.ts");
+    await writeFile(file, "const 检查点工作台内容 = 84;");
+    const session = new SessionStore("checkpoint-resume", dir);
+    const history: Message[] = [
+      { role: "user", content: "旧任务 " + "x".repeat(600) },
+      { role: "assistant", content: "旧回复" },
+      { role: "user", content: "旧追问" },
+    ];
+    for (const message of history) await session.append(message);
+
+    const firstProvider = new FlakyProvider([{ content: "第一次持久化摘要" }]);
+    const firstEngine = makeEngine(firstProvider, {
+      history,
+      recentFiles: [file],
+      session,
+    });
+    await collect(firstEngine.compactNow());
+
+    const state = await new SessionStore("checkpoint-resume", dir).loadState();
+    expect(state.recentFiles).toEqual([file]);
+
+    const resumedProvider = new FlakyProvider([
+      { content: "第二次摘要" },
+      { content: "恢复后继续" },
+    ]);
+    const resumedEngine = makeEngine(resumedProvider, {
+      history: state.messages,
+      recentFiles: state.recentFiles,
+      maxContextChars: 700,
+    });
+    await collect(resumedEngine.runTurn("继续"));
+
+    const postCompactRequest = JSON.stringify(resumedProvider.calls.at(-1));
+    expect(postCompactRequest).toContain("重新注入");
+    expect(postCompactRequest).toContain("检查点工作台内容");
   });
 });

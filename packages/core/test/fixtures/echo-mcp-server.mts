@@ -5,8 +5,14 @@ import { z } from "zod";
 
 const server = new McpServer({ name: "echo-fixture", version: "1.0.0" });
 
-server.tool("echo", "原样返回输入的文本", { text: z.string() }, async ({ text }) => ({
-  content: [{ type: "text", text: `echo: ${text}` }],
-}));
+server.tool(
+  "echo",
+  "原样返回输入的文本",
+  { text: z.string(), delay_ms: z.number().optional() },
+  async ({ text, delay_ms }) => {
+    if (delay_ms) await new Promise((resolve) => setTimeout(resolve, delay_ms));
+    return { content: [{ type: "text", text: `echo: ${text}` }] };
+  },
+);
 
 await server.connect(new StdioServerTransport());

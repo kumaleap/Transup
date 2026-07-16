@@ -20,6 +20,7 @@
 import { homedir, userInfo } from "node:os";
 import { color } from "../ui.js";
 import { paint } from "../theme.js";
+import { sanitizeTerminalField } from "../terminal-sanitize.js";
 
 export interface BannerInfo {
   version: string;
@@ -128,7 +129,7 @@ function shortenPath(p: string, max: number): string {
 function leftColumn(info: BannerInfo, width: number): Cell[] {
   let name = "";
   try {
-    name = userInfo().username;
+    name = sanitizeTerminalField(userInfo().username);
   } catch {
     /* 极少数环境拿不到，欢迎语退化 */
   }
@@ -172,6 +173,14 @@ const MIN_TWO_COL = 84;
 const MAX_WIDTH = 104;
 
 export function renderBanner(info: BannerInfo, columns: number): string {
+  const safeInfo: BannerInfo = {
+    ...info,
+    version: sanitizeTerminalField(info.version),
+    providerId: sanitizeTerminalField(info.providerId),
+    model: sanitizeTerminalField(info.model),
+    sessionId: sanitizeTerminalField(info.sessionId),
+    cwd: sanitizeTerminalField(info.cwd),
+  };
   // 满宽渲染在部分终端会触发自动折行，留 1 列余量
   const W = Math.max(46, Math.min(columns - 1, MAX_WIDTH));
   const twoCol = W >= MIN_TWO_COL;
@@ -182,7 +191,7 @@ export function renderBanner(info: BannerInfo, columns: number): string {
   const leftW = twoCol ? 36 : inner;
   const rightW = inner - leftW - 3;
 
-  const left = leftColumn(info, leftW);
+  const left = leftColumn(safeInfo, leftW);
   const right = twoCol ? rightColumn(rightW) : [];
   const rows = Math.max(left.length, right.length);
   // 短的一栏垂直居中
@@ -192,7 +201,7 @@ export function renderBanner(info: BannerInfo, columns: number): string {
   const lines: string[] = [];
 
   // 标题嵌进上边框：╭─── transup v0.1.0 ───…───╮
-  const title = `transup v${info.version}`;
+  const title = `transup v${safeInfo.version}`;
   const fill = W - displayWidth(title) - 7; // "╭─── " + " " + "╮"
   lines.push(
     paint.frame("╭─── ") +

@@ -59,6 +59,25 @@ describe("task 子 agent", () => {
     expect(tool.readOnly).toBe(true);
   });
 
+  it("真实 task 工具把子 agent 的工具调用透出为进度", async () => {
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{id: "s1", name: "list_dir", args: '{"path":"."}'}],
+      },
+      {content: "结论完成"},
+    ]);
+    const progress: string[] = [];
+
+    const result = await createTaskTool(provider).execute(
+      {description: "检查当前目录"},
+      (chunk) => progress.push(chunk),
+    );
+
+    expect(progress).toEqual(["→ list_dir .\n"]);
+    expect(result).toContain("结论完成");
+  });
+
   it("子任务超迭代上限 → 返回部分结论而非报错", async () => {
     const loop = Array.from({ length: 20 }, () => ({
       content: "还在找…", toolCalls: [{ id: `x${Math.random()}`, name: "list_dir", args: "{}" }],
@@ -66,5 +85,45 @@ describe("task 子 agent", () => {
     const tool = createTaskTool(new MockProvider(loop));
     const result = await tool.execute({ description: "永远找不完的任务" });
     expect(result).toContain("子任务未完成");
+  });
+
+  it("turn signal reaches the provider and abort returns a partial-result outcome", async () => {
+    let seenSignal: AbortSignal | undefined;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const provider: Provider = {
+      id: "abort-aware",
+      model: "abort-aware-1",
+      async *stream(_messages, _tools, signal): AsyncIterable<ProviderEvent> {
+        seenSignal = signal;
+        yield { type: "text_delta", text: "partial evidence" };
+        markStarted();
+        await gate;
+        if (signal?.aborted) {
+          throw Object.assign(new Error("provider aborted"), { name: "AbortError" });
+        }
+        yield { type: "message_done", content: "late completion", toolCalls: [] };
+      },
+    };
+    const controller = new AbortController();
+
+    const result = createTaskTool(provider).execute(
+      { description: "cancel this exploration" },
+      undefined,
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+    release();
+
+    expect(await result).toContain("[子任务未完成: aborted]");
+    expect(await result).toContain("partial evidence");
+    expect(seenSignal).toBe(controller.signal);
   });
 });

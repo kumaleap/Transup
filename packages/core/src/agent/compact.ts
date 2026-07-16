@@ -28,12 +28,16 @@ const COMPACT_PROMPT =
   "只输出摘要正文，不要客套话。";
 
 /** 用专项 prompt 让模型生成摘要（无工具、单任务）。摘要为空视为失败。 */
-export async function summarize(provider: Provider, messages: Message[]): Promise<string> {
+export async function summarize(
+  provider: Provider,
+  messages: Message[],
+  signal?: AbortSignal,
+): Promise<string> {
   const request: Message[] = [...messages, { role: "user", content: COMPACT_PROMPT }];
 
   let summary = "";
   // 不传工具 —— 摘要任务禁止工具调用
-  for await (const ev of provider.stream(request, [])) {
+  for await (const ev of provider.stream(request, [], signal)) {
     if (ev.type === "message_done") summary = ev.content;
   }
   if (!summary.trim()) throw new Error("摘要为空");

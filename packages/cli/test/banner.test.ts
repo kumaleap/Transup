@@ -2,8 +2,18 @@
  * 横幅渲染测试 —— 核心是对齐不变量：
  * 盒子里每一行的【显示宽度】必须完全一致（CJK 双宽最容易把边框顶歪）。
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { renderBanner, displayWidth, type BannerInfo } from "../src/tui/banner-render.js";
+
+const osState = vi.hoisted(() => ({ username: "someone" }));
+
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return {
+    ...actual,
+    userInfo: () => ({ ...actual.userInfo(), username: osState.username }),
+  };
+});
 
 const info: BannerInfo = {
   version: "0.1.0",
@@ -53,6 +63,31 @@ describe("banner 渲染", () => {
     };
     const widths = lineWidths(renderBanner(long, 90));
     expect(new Set(widths).size).toBe(1);
+  });
+
+  it("净化所有结构元数据后再计算横幅布局", () => {
+    osState.username = "u\tser";
+    try {
+      const hostile: BannerInfo = {
+        ...info,
+        version: "1\x1b]52;c;dmVy\x07ok",
+        model: "m\x1b[2Jok",
+        providerId: "p\x9b2Jok",
+        sessionId: "s\x07ok",
+        cwd: "/tmp/bad\npath",
+      };
+
+      const out = renderBanner(hostile, 100);
+      const plain = stripAnsi(out);
+      expect(plain.replace(/\n/g, "")).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      expect(plain).toContain("m[2Jok · p2Jok");
+      expect(plain).toContain("/tmp/badpath");
+      expect(plain).toContain("会话 sok");
+      expect(plain).toContain("欢迎回来，user！");
+      expect(new Set(lineWidths(out)).size).toBe(1);
+    } finally {
+      osState.username = "someone";
+    }
   });
 
   it("displayWidth：CJK 双宽、box-drawing 单宽", () => {

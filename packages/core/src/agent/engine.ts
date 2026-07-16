@@ -20,7 +20,7 @@ import type { Message, Provider, StopReason, ToolCall, Usage } from "../provider
 import { ToolRegistry } from "../tools/registry.js";
 import type { PermissionFn, Tool } from "../tools/types.js";
 import { SessionStore } from "../session/store.js";
-import { summarize, reinjectFiles, trimHistory } from "./compact.js";
+import { REINJECT_FILES, summarize, reinjectFiles, trimHistory } from "./compact.js";
 import { executeToolBatch } from "./tool-runner.js";
 import { TurnGuard } from "./guard.js";
 
@@ -31,7 +31,8 @@ export type AgentEvent =
   | { type: "tool_end"; call: ToolCall; content: string; isError: boolean }
   | { type: "usage"; usage: Usage }
   | { type: "compact_start"; beforeChars: number }
-  | { type: "compact_end"; afterChars: number; ok: boolean }
+  /** ok 时带摘要正文 —— 宿主可做"一行摘要卡 + 展开查看"（规格 07 §1.2） */
+  | { type: "compact_end"; afterChars: number; ok: boolean; summary?: string }
   /** 模型调用失败，引擎将在 delayMs 后重试（宿主应提示并清掉已流出的半截文本） */
   | { type: "stream_retry"; attempt: number; maxAttempts: number; error: string; delayMs: number }
   /** 引擎自动催模型继续（截断续跑 / 空回复催跑） */
@@ -41,12 +42,16 @@ export type AgentEvent =
 export interface EngineOptions {
   provider: Provider;
   canUseTool: PermissionFn;
+  /** 宿主仍可接收持久化副作用；默认常驻（headless / 子 agent）。 */
+  canPersist?: () => boolean;
   /** 不传则不持久化（子 agent 的探索过程不值得落盘） */
   session?: SessionStore;
   /** 工具集覆盖：默认内建全集；子 agent 传只读子集 */
   tools?: Tool[];
   /** 恢复会话时传入历史消息（不含 system prompt） */
   history?: Message[];
+  /** 最近读过的文件检查点；恢复压缩后的会话时由 SessionStore.loadState() 提供。 */
+  recentFiles?: string[];
   /** 项目上下文（AGENT.md + repo map），用 buildProjectContext() 生成 */
   projectContext?: string;
   maxIterations?: number;
@@ -60,6 +65,21 @@ export interface EngineOptions {
 
 /** 每轮自动干预（截断续跑 + 空回复催跑）的总次数上限 */
 const AUTO_CONTINUE_LIMIT = 3;
+
+/**
+ * 判断一段会话历史是否终止在"半截 turn"上（恢复会话时提示用户可续跑）。
+ * 三种可靠的中断痕迹：
+ *   - 尾部是 user 消息 → 提问后没得到任何回应（请求期间崩溃/被杀）
+ *   - 尾部是 tool 结果 → 模型还没接话（工具阶段被中断，或熔断停轮）
+ *   - 尾部 assistant 带中断标记 → 流式阶段被 Ctrl+C（引擎写入的固定文案）
+ */
+export function wasInterrupted(history: Message[]): boolean {
+  const last = history.at(-1);
+  if (!last) return false;
+  if (last.role === "user") return !last.content.startsWith("[系统提示]");
+  if (last.role === "tool") return true;
+  return last.role === "assistant" && last.content.includes("已被用户中断");
+}
 
 /** 判断模型调用错误是否值得重试：4xx（限流/超时除外）是请求本身的问题，重试无意义 */
 function isRetryable(err: unknown): boolean {
@@ -89,6 +109,7 @@ export class AgentEngine {
   private provider: Provider;
   private registry: ToolRegistry;
   private canUseTool: PermissionFn;
+  private canPersist: () => boolean;
   private session?: SessionStore;
   private maxIterations: number;
   private maxContextChars: number;
@@ -100,6 +121,7 @@ export class AgentEngine {
   constructor(opts: EngineOptions) {
     this.provider = opts.provider;
     this.canUseTool = opts.canUseTool;
+    this.canPersist = opts.canPersist ?? (() => true);
     this.session = opts.session;
     this.registry = new ToolRegistry(opts.tools);
     this.maxIterations = opts.maxIterations ?? 40;
@@ -110,6 +132,7 @@ export class AgentEngine {
       { role: "system", content: systemPrompt(opts.projectContext) },
       ...(opts.history ?? []),
     ];
+    for (const path of opts.recentFiles ?? []) this.trackFile(path);
     // 中断恢复质量：从历史里重建"最近读过的文件"清单，
     // 恢复会话后第一次 compact 依然能重注入工作台
     for (const m of opts.history ?? []) {
@@ -126,6 +149,7 @@ export class AgentEngine {
 
   /** 消息进入系统的唯一入口：内存 + 持久化双写 */
   private async push(m: Message): Promise<void> {
+    if (!this.canPersist()) return;
     this.messages.push(m);
     await this.session?.append(m);
   }
@@ -141,11 +165,15 @@ export class AgentEngine {
 
   // ── 上下文压缩（计算在 compact.ts，历史替换在这里） ─────────
 
-  private async *compact(): AsyncGenerator<AgentEvent> {
+  private async *compact(signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     yield { type: "compact_start", beforeChars: this.contextSize() };
 
     try {
-      const summary = await summarize(this.provider, this.messages);
+      const summary = await summarize(this.provider, this.messages, signal);
+      if (signal?.aborted) return;
+
+      const reinjected = await reinjectFiles(this.recentFiles);
+      if (signal?.aborted) return;
 
       const newMessages: Message[] = [
         this.messages[0], // system prompt 保留
@@ -153,17 +181,22 @@ export class AgentEngine {
           role: "user",
           content:
             `[系统提示] 对话历史已被压缩。以下是此前对话的摘要，请基于它继续工作：\n\n${summary}` +
-            (await reinjectFiles(this.recentFiles)),
+            reinjected,
         },
         { role: "assistant", content: "已了解此前的工作进展，继续。" },
       ];
-      this.messages = newMessages;
-      // 压缩是历史重写，在 transcript 里记录为一个事件（新会话段）
-      await this.session?.append(newMessages[1]);
-      await this.session?.append(newMessages[2]);
+      if (signal?.aborted || !this.canPersist()) return;
 
-      yield { type: "compact_end", afterChars: this.contextSize(), ok: true };
+      // 从批量落盘到内存替换是不可取消的逻辑提交；开始后采用 commit-wins。
+      await this.session?.commitCompaction(
+        [newMessages[1], newMessages[2]],
+        this.recentFiles.slice(-REINJECT_FILES),
+      );
+      this.messages = newMessages;
+
+      yield { type: "compact_end", afterChars: this.contextSize(), ok: true, summary };
     } catch {
+      if (signal?.aborted || !this.canPersist()) return;
       // 熔断：压缩失败退回最简截断
       trimHistory(this.messages, this.maxContextChars);
       yield { type: "compact_end", afterChars: this.contextSize(), ok: false };
@@ -171,9 +204,9 @@ export class AgentEngine {
   }
 
   /** 手动触发压缩（/compact 命令用）。历史太短时不动。 */
-  async *compactNow(): AsyncGenerator<AgentEvent> {
+  async *compactNow(signal?: AbortSignal): AsyncGenerator<AgentEvent> {
     if (this.messages.length < 4) return;
-    yield* this.compact();
+    yield* this.compact(signal);
   }
 
   /** 当前上下文占预算的百分比（状态展示用） */
@@ -197,7 +230,11 @@ export class AgentEngine {
         return;
       }
       if (this.contextSize() > this.maxContextChars) {
-        yield* this.compact();
+        yield* this.compact(signal);
+        if (signal?.aborted) {
+          yield { type: "turn_end", reason: "aborted" };
+          return;
+        }
       }
 
       // 1. 调用模型，转发文本增量，收集完整消息

@@ -3,7 +3,7 @@
  * 写入极简、恢复路径能容忍损坏的行（崩溃时写一半）。
  */
 import { describe, it, expect } from "vitest";
-import { mkdtemp, appendFile } from "node:fs/promises";
+import { mkdtemp, appendFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/session/store.js";
@@ -21,6 +21,99 @@ describe("SessionStore", () => {
     const loaded = await new SessionStore("s1", dir).load();
     expect(loaded).toHaveLength(2);
     expect(loaded[1]).toMatchObject({ role: "assistant", toolCalls: [{ id: "t1" }] });
+  });
+
+  it("appendBatch 把多条消息按顺序序列化为一个连续批次", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("batch", dir);
+    const summary = { role: "user" as const, content: "compact summary" };
+    const acknowledgement = { role: "assistant" as const, content: "acknowledged" };
+
+    await s.append({ role: "user", content: "before" });
+    await s.appendBatch([summary, acknowledgement]);
+
+    expect(await s.load()).toEqual([
+      { role: "user", content: "before" },
+      summary,
+      acknowledgement,
+    ]);
+    const lines = (await readFile(join(dir, "batch.jsonl"), "utf-8")).split("\n");
+    expect(lines.filter(Boolean)).toEqual([
+      JSON.stringify({ role: "user", content: "before" }),
+      JSON.stringify(summary),
+      JSON.stringify(acknowledgement),
+    ]);
+    const summaryLine = lines.indexOf(JSON.stringify(summary));
+    expect(lines.slice(summaryLine, summaryLine + 2)).toEqual([
+      JSON.stringify(summary),
+      JSON.stringify(acknowledgement),
+    ]);
+  });
+
+  it("commitCompaction restores the latest complete checkpoint without rewriting the audit log", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("checkpoint", dir);
+    const summary = { role: "user" as const, content: "compact summary" };
+    const acknowledgement = { role: "assistant" as const, content: "acknowledged" };
+
+    await s.append({ role: "user", content: "original prompt" });
+    await s.append({ role: "assistant", content: "original response" });
+    await s.commitCompaction([summary, acknowledgement], ["/workspace/a.ts", "/workspace/b.ts"]);
+    await s.append({ role: "user", content: "after checkpoint" });
+
+    const state = await new SessionStore("checkpoint", dir).loadState();
+    expect(state).toEqual({
+      messages: [summary, acknowledgement, { role: "user", content: "after checkpoint" }],
+      recentFiles: ["/workspace/a.ts", "/workspace/b.ts"],
+    });
+
+    const auditLog = await readFile(join(dir, "checkpoint.jsonl"), "utf-8");
+    expect(auditLog).toContain("original prompt");
+    expect(auditLog).toContain("compact summary");
+  });
+
+  it("ignores a torn compaction checkpoint and preserves the prior replay state", async () => {
+    const dir = await tempDir();
+    const source = new SessionStore("checkpoint-source", dir);
+    await source.commitCompaction(
+      [
+        { role: "user", content: "replacement summary" },
+        { role: "assistant", content: "replacement acknowledgement" },
+      ],
+      ["/workspace/recent.ts"],
+    );
+    const checkpointLine = await readFile(join(dir, "checkpoint-source.jsonl"), "utf-8");
+
+    const target = new SessionStore("checkpoint-torn", dir);
+    const original = { role: "user" as const, content: "must survive" };
+    await target.append(original);
+    await appendFile(
+      join(dir, "checkpoint-torn.jsonl"),
+      checkpointLine.slice(0, Math.max(0, checkpointLine.length - 8)),
+    );
+
+    await expect(new SessionStore("checkpoint-torn", dir).loadState()).resolves.toEqual({
+      messages: [original],
+      recentFiles: [],
+    });
+  });
+
+  it("starts a new record boundary when appending after a torn JSONL tail", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "torn-tail.jsonl");
+    const original = { role: "user" as const, content: "before crash" };
+    const afterRestart = { role: "user" as const, content: "after restart" };
+    await new SessionStore("torn-tail", dir).append(original);
+    await appendFile(path, '{"type":"transup.compaction.v1","messages":[');
+
+    const restarted = new SessionStore("torn-tail", dir);
+    await expect(restarted.load()).resolves.toEqual([original]);
+    await restarted.append(afterRestart);
+
+    await expect(new SessionStore("torn-tail", dir).load()).resolves.toEqual([
+      original,
+      afterRestart,
+    ]);
   });
 
   it("损坏的行（崩溃写一半）被跳过而非报错", async () => {
@@ -42,5 +135,20 @@ describe("SessionStore", () => {
     await new SessionStore("2026-01-01", dir).append({ role: "user", content: "a" });
     await new SessionStore("2026-06-30", dir).append({ role: "user", content: "b" });
     expect(await SessionStore.latestId(dir)).toBe("2026-06-30");
+  });
+
+  it("firstPrompt：取首条真实用户输入，跳过系统注入，首行截断", async () => {
+    const dir = await tempDir();
+    const s = new SessionStore("s3", dir);
+    await s.append({ role: "user", content: "[系统提示] 对话历史已被压缩。" }); // 注入不算
+    await s.append({ role: "user", content: "帮我修登录页的 bug\n补充：报错在控制台" });
+    await s.append({ role: "assistant", content: "好" });
+    expect(await SessionStore.firstPrompt("s3", dir)).toBe("帮我修登录页的 bug");
+
+    const long = new SessionStore("s4", dir);
+    await long.append({ role: "user", content: "长".repeat(80) });
+    expect(await SessionStore.firstPrompt("s4", dir)).toBe("长".repeat(60) + "…");
+
+    expect(await SessionStore.firstPrompt("不存在", dir)).toBeNull();
   });
 });

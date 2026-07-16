@@ -21,7 +21,7 @@ export const grepTool: Tool<typeof schema> = {
     "在代码库中递归搜索正则表达式，返回 文件:行号:内容。修改代码前应先用它定位相关位置。",
   schema,
   readOnly: true,
-  async execute({ pattern, path = "." }) {
+  async execute({ pattern, path = "." }, _onProgress, signal) {
     try {
       const { stdout } = await exec("grep", [
         "-rn",
@@ -31,7 +31,7 @@ export const grepTool: Tool<typeof schema> = {
         "--exclude-dir=dist",
         "-E", pattern,
         path,
-      ], { maxBuffer: 1024 * 1024 });
+      ], { maxBuffer: 1024 * 1024, signal });
       const lines = stdout.trim().split("\n");
       if (lines.length > 100) {
         return lines.slice(0, 100).join("\n") + `\n… 共 ${lines.length} 条匹配，请缩小搜索范围`;

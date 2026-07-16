@@ -19,7 +19,8 @@
 import {
   AgentEngine,
   SessionStore,
-  isAllowed,
+  evaluatePermission,
+  settingsRules,
   type AgentEvent,
   type Message,
   type Provider,
@@ -27,6 +28,7 @@ import {
   type Tool,
 } from "@transup/core";
 import { formatArgs } from "./tui/Transcript.js";
+import { sanitizeTerminalField, sanitizeTerminalText } from "./highlight.js";
 
 export interface HeadlessOptions {
   provider: Provider;
@@ -35,8 +37,10 @@ export interface HeadlessOptions {
   projectContext: string;
   sessionId: string;
   history: Message[];
+  /** SessionStore compaction checkpoint metadata used for post-resume reinjection. */
+  recentFiles?: string[];
   prompt: string;
-  /** 跳过所有权限确认。只应在可信环境（CI/沙箱）使用。 */
+  /** 启用 bypass 模式；显式 ask 与 safety gate 仍会 fail-closed。 */
   allowAll?: boolean;
   /** 会话持久化目录覆盖（测试用） */
   sessionDir?: string;
@@ -55,13 +59,26 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 
   const engine = new AgentEngine({
     provider: opts.provider,
-    canUseTool: async (name) => {
-      if (opts.allowAll || isAllowed(opts.settings, name)) return true;
-      err(`⊘ 已拒绝写操作 ${name}（headless 模式需要 settings 允许清单或 --allow-all）\n`);
-      return false;
+    canUseTool: async (name, args, meta) => {
+      // 与 TUI 同一套判定链（deny 规则连 --allow-all 也拦得住）；
+      // 无人可问 → evaluator 留下的 ask 一律降级为 deny
+      const verdict = evaluatePermission(
+        { mode: opts.allowAll ? "bypassPermissions" : "default", rules: settingsRules(opts.settings) },
+        { toolName: name, args, readOnly: meta.readOnly },
+      );
+      if (verdict.behavior === "allow") return { behavior: "allow" };
+      if (verdict.behavior === "deny") {
+        const safeName = sanitizeTerminalField(name);
+        err(`⊘ 已拒绝 ${safeName}（权限规则禁止）\n`);
+        return { behavior: "deny", message: verdict.message };
+      }
+      const safeName = sanitizeTerminalField(name);
+      err(`⊘ 已拒绝写操作 ${safeName}（headless 模式需要 settings 允许清单或 --allow-all）\n`);
+      return { behavior: "deny" };
     },
     session: new SessionStore(opts.sessionId, opts.sessionDir),
     history: opts.history,
+    recentFiles: opts.recentFiles,
     projectContext: opts.projectContext,
     tools: opts.tools,
   });
@@ -72,16 +89,20 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       await opts.trace?.record(ev);
       switch (ev.type) {
         case "text_delta":
-          out(ev.text);
+          out(sanitizeTerminalText(ev.text));
           break;
         case "tool_start":
-          err(`⏺ ${ev.call.name}(${formatArgs(ev.parsedArgs)})\n`);
+          err(
+            `⏺ ${sanitizeTerminalField(ev.call.name)}(${formatArgs(ev.parsedArgs)})\n`,
+          );
           break;
         case "tool_end":
           if (ev.isError) err(`  ✗ ${firstLine(ev.content)}\n`);
           break;
         case "stream_retry":
-          err(`⚠ 模型调用失败（${ev.error}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}\n`);
+          err(
+            `⚠ 模型调用失败（${sanitizeTerminalField(ev.error)}），${Math.round(ev.delayMs / 1000)}s 后重试 ${ev.attempt}/${ev.maxAttempts}\n`,
+          );
           break;
         case "auto_continue":
           err(ev.reason === "truncated" ? "⟳ 输出被截断，自动续跑\n" : "⟳ 空回复，自动催跑\n");
@@ -98,7 +119,9 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
       }
     }
   } catch (e) {
-    err(`✗ API 错误: ${e instanceof Error ? e.message : String(e)}\n`);
+    err(
+      `✗ API 错误: ${sanitizeTerminalField(e instanceof Error ? e.message : String(e))}\n`,
+    );
     exitCode = 1;
   }
   out("\n");
@@ -106,6 +129,6 @@ export async function runHeadless(opts: HeadlessOptions): Promise<number> {
 }
 
 function firstLine(s: string): string {
-  const line = s.split("\n")[0];
+  const line = sanitizeTerminalField(s.split(/\r\n?|\n/, 1)[0] ?? "");
   return line.length > 120 ? line.slice(0, 120) + "…" : line;
 }

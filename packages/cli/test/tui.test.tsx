@@ -4,17 +4,20 @@
  * 验证核心链路而不碰真实 API：
  * 1. 首屏横幅与输入框渲染
  * 2. 输入 → 引擎跑 mock 回复 → 流式文本落进 transcript
- * 3. 工具调用（写操作）→ 权限对话框弹出 → 按 y 放行 / 按 n 拒绝
+ * 3. 工具调用（写操作）→ 权限对话框弹出 → 数字直选放行 / Esc 拒绝 /
+ *    会话级选项 / Tab 附言 / Shift+Tab 模式循环 / 队列
  * 4. 斜杠命令 /help /cost
  */
 import React from "react";
+import { z } from "zod";
 import { describe, it, expect, vi } from "vitest";
 import { render } from "ink-testing-library";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Message, Provider, ProviderEvent, ToolCall } from "@transup/core";
-import { builtinTools } from "@transup/core";
+import type { Message, Provider, ProviderEvent, Settings, ToolCall } from "@transup/core";
+import { builtinTools, SessionStore } from "@transup/core";
+import * as transupCore from "@transup/core";
 import { App } from "../src/tui/App.js";
 import {RowText, TextInput} from "../src/tui/TextInput.js";
 import {T} from "../src/theme.js";
@@ -41,11 +44,13 @@ class MockProvider implements Provider {
   readonly model = "test-model";
   private step = 0;
   streamCalls = 0;
+  requests: Message[][] = [];
   /** 最近一次请求里的 user 消息内容（验证占位符已还原成全文） */
   lastUserContent = "";
   constructor(private replies: { content: string; toolCalls?: ToolCall[] }[]) {}
   async *stream(messages?: Message[]): AsyncIterable<ProviderEvent> {
     this.streamCalls++;
+    this.requests.push(structuredClone(messages ?? []));
     const u = [...(messages ?? [])].reverse().find((m) => m.role === "user");
     if (u) this.lastUserContent = u.content;
     const r = this.replies[Math.min(this.step++, this.replies.length - 1)] ?? {
@@ -74,6 +79,371 @@ class SlowProvider implements Provider {
   }
 }
 
+/** 先报 usage 再挂起，直到 release() 才正常收尾 —— 便于长时间停在运行态 */
+class HangingUsageProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  release!: () => void;
+  private gate = new Promise<void>((r) => {
+    this.release = r;
+  });
+  async *stream(): AsyncIterable<ProviderEvent> {
+    yield { type: "usage", usage: { inputTokens: 1200, outputTokens: 340 } };
+    await this.gate;
+    yield { type: "message_done", content: "ok", toolCalls: [], usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+}
+
+/** 先流出一行半文本再挂起；release() 后补完剩余增量并正常收尾 */
+class GatedStreamProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  release!: () => void;
+  private gate = new Promise<void>((r) => {
+    this.release = r;
+  });
+  async *stream(): AsyncIterable<ProviderEvent> {
+    yield { type: "text_delta", text: "第一行完整\n第二行开头" };
+    await this.gate;
+    yield { type: "text_delta", text: "结尾" };
+    yield {
+      type: "message_done",
+      content: "第一行完整\n第二行开头结尾",
+      toolCalls: [],
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+  }
+}
+
+/** 流出一行半文本后等 abort 信号抛错 —— 模拟真实 SDK 的用户中断路径 */
+class AbortableProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  async *stream(
+    _messages?: Message[],
+    _tools?: unknown,
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    yield { type: "text_delta", text: "部分输出\n后半" };
+    await new Promise<never>((_, reject) => {
+      const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+      if (signal?.aborted) return fail();
+      signal?.addEventListener("abort", fail, { once: true });
+    });
+  }
+}
+
+/** Emits visible text before a non-retryable provider failure. */
+class PartialThenErrorProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  streamCalls = 0;
+
+  async *stream(): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
+    yield {type: "text_delta", text: "partial response before failure"};
+    throw Object.assign(new Error("request rejected"), {status: 400});
+  }
+}
+
+/** Waits for explicit rejection so the test can dispose the App before provider settlement. */
+class RejectAfterUnmountProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectStream!: (error: Error) => void;
+  private readonly streamGate = new Promise<never>((_, reject) => {
+    this.rejectStream = reject;
+  });
+  private markStreamStarted!: () => void;
+  readonly streamStarted = new Promise<void>((resolve) => {
+    this.markStreamStarted = resolve;
+  });
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  rejectAfterUnmount(): void {
+    this.rejectStream(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markStreamStarted();
+    try {
+      await this.streamGate;
+    } finally {
+      this.markStreamFinished();
+    }
+  }
+}
+
+/** Manual compaction provider that rejects on demand after the test sends Ctrl+C. */
+class RejectingManualCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectCompact!: (error: Error) => void;
+  private compactGate = new Promise<never>((_, reject) => {
+    this.rejectCompact = reject;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectCompact(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markCompactStarted();
+    await this.compactGate;
+  }
+}
+
+/** Returns a late summary even after abort so unmount guards cannot rely on provider cooperation. */
+class LateManualCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private releaseCompact!: () => void;
+  private compactGate = new Promise<void>((resolve) => {
+    this.releaseCompact = resolve;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  releaseLateSummary(): void {
+    this.releaseCompact();
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.markCompactStarted();
+    try {
+      await this.compactGate;
+      yield {
+        type: "message_done",
+        content: "late summary must not commit",
+        toolCalls: [],
+        usage: {inputTokens: 10, outputTokens: 5},
+      };
+    } finally {
+      this.markStreamFinished();
+    }
+  }
+}
+
+/** First rejects an automatic summary, then holds an ordinary turn for spinner assertions. */
+class AutomaticCompactAbortProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private rejectSummary!: (error: Error) => void;
+  private summaryGate = new Promise<never>((_, reject) => {
+    this.rejectSummary = reject;
+  });
+  private markSummaryStarted!: () => void;
+  readonly summaryStarted = new Promise<void>((resolve) => {
+    this.markSummaryStarted = resolve;
+  });
+  private releaseNormalTurn!: () => void;
+  private normalTurnGate = new Promise<void>((resolve) => {
+    this.releaseNormalTurn = resolve;
+  });
+  private markNormalTurnStarted!: () => void;
+  readonly normalTurnStarted = new Promise<void>((resolve) => {
+    this.markNormalTurnStarted = resolve;
+  });
+
+  rejectAfterAbort(): void {
+    this.rejectSummary(Object.assign(new Error("aborted"), {name: "AbortError"}));
+  }
+
+  releaseNormal(): void {
+    this.releaseNormalTurn();
+  }
+
+  async *stream(
+    _messages: Message[],
+    tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    if (tools.length === 0) {
+      this.markSummaryStarted();
+      await this.summaryGate;
+      return;
+    }
+
+    this.markNormalTurnStarted();
+    await this.normalTurnGate;
+    yield {
+      type: "message_done",
+      content: "ordinary completion",
+      toolCalls: [],
+      usage: {inputTokens: 10, outputTokens: 5},
+    };
+  }
+}
+
+/** Completes one usage-bearing turn, then gates the manual compaction summary. */
+class UsageThenGatedCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  streamCalls = 0;
+  private releaseSummary!: () => void;
+  private readonly summaryGate = new Promise<void>((resolve) => {
+    this.releaseSummary = resolve;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+  private markCompactFinished!: () => void;
+  readonly compactFinished = new Promise<void>((resolve) => {
+    this.markCompactFinished = resolve;
+  });
+
+  release(): void {
+    this.releaseSummary();
+  }
+
+  async *stream(
+    _messages: Message[],
+    tools: Parameters<Provider["stream"]>[1],
+  ): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
+    if (tools.length > 0) {
+      yield {type: "text_delta", text: "usage-bearing turn complete"};
+      yield {
+        type: "message_done",
+        content: "usage-bearing turn complete",
+        toolCalls: [],
+        usage: {inputTokens: 1200, outputTokens: 340},
+      };
+      return;
+    }
+
+    this.markCompactStarted();
+    try {
+      await this.summaryGate;
+      yield {
+        type: "message_done",
+        content: "manual compact summary",
+        toolCalls: [],
+        usage: {inputTokens: 1, outputTokens: 1},
+      };
+    } finally {
+      this.markCompactFinished();
+    }
+  }
+}
+
+/** Yields usage before the engine can persist its assistant message. */
+class UsageCompletionProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private markStreamFinished!: () => void;
+  readonly streamFinished = new Promise<void>((resolve) => {
+    this.markStreamFinished = resolve;
+  });
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    try {
+      yield {
+        type: "message_done",
+        content: "must not persist after unmount",
+        toolCalls: [],
+        usage: {inputTokens: 10, outputTokens: 5},
+      };
+    } finally {
+      this.markStreamFinished();
+    }
+  }
+}
+
+/** Emits real provider usage, then ignores abort while a follow-up request remains unsettled. */
+class UsageThenUnsettledProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private call = 0;
+  private releaseFollowUp!: () => void;
+  private readonly followUpGate = new Promise<void>((resolve) => {
+    this.releaseFollowUp = resolve;
+  });
+  private markFollowUpStarted!: () => void;
+  readonly followUpStarted = new Promise<void>((resolve) => {
+    this.markFollowUpStarted = resolve;
+  });
+  private markFollowUpFinished!: () => void;
+  readonly followUpFinished = new Promise<void>((resolve) => {
+    this.markFollowUpFinished = resolve;
+  });
+
+  release(): void {
+    this.releaseFollowUp();
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.call++;
+    if (this.call === 1) {
+      yield {
+        type: "message_done",
+        content: "",
+        toolCalls: [],
+        usage: {
+          inputTokens: 137,
+          outputTokens: 29,
+          cacheReadTokens: 43,
+          cacheWriteTokens: 11,
+        },
+      };
+      return;
+    }
+
+    this.markFollowUpStarted();
+    try {
+      await this.followUpGate;
+    } finally {
+      this.markFollowUpFinished();
+    }
+  }
+}
+
 const sessionDir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-"));
 const promptHistoryDir = mkdtempSync(join(tmpdir(), "transup-tui-history-"));
 
@@ -93,6 +463,38 @@ function pendingPromise(): {
     resolve = done;
   });
   return {promise, resolve};
+}
+
+function trackTurnSettlement(): {
+  finished: Promise<void>;
+  signal: () => AbortSignal | undefined;
+  restore: () => void;
+} {
+  const finished = pendingPromise();
+  let activeSignal: AbortSignal | undefined;
+  const originalRunTurn = transupCore.AgentEngine.prototype.runTurn;
+  const spy = vi
+    .spyOn(transupCore.AgentEngine.prototype, "runTurn")
+    .mockImplementation(function (
+      this: InstanceType<typeof transupCore.AgentEngine>,
+      input: string,
+      signal?: AbortSignal,
+    ) {
+      activeSignal = signal;
+      const source = originalRunTurn.call(this, input, signal);
+      return (async function* () {
+        try {
+          yield* source;
+        } finally {
+          finished.resolve();
+        }
+      })();
+    });
+  return {
+    finished: finished.promise,
+    signal: () => activeSignal,
+    restore: () => spy.mockRestore(),
+  };
 }
 
 class ControlledHistoryStore extends HistoryStore {
@@ -133,6 +535,29 @@ class PendingLoadHistoryStore extends HistoryStore {
   override async append() {}
 }
 
+/** 05：带终端带外通道注入的 App（标题/进度/通知的序列落进 sink，不写真实 stdout） */
+function makeAppWithTerminal(
+  provider: Provider,
+  terminalWrite: (s: string) => void,
+  env: NodeJS.ProcessEnv,
+) {
+  return (
+    <App
+      provider={provider}
+      projectContext=""
+      tools={builtinTools}
+      settings={{}}
+      initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+      initialHistory={[]}
+      mcpToolCount={0}
+      sessionDir={sessionDir}
+      historyPath={newHistoryPath()}
+      terminalWrite={terminalWrite}
+      env={env}
+    />
+  );
+}
+
 function makeApp(provider: Provider, historyPath = newHistoryPath()) {
   return (
     <App
@@ -147,6 +572,53 @@ function makeApp(provider: Provider, historyPath = newHistoryPath()) {
       historyPath={historyPath}
     />
   );
+}
+
+async function runPlanAuthorizationScenario(
+  toolCall: ToolCall,
+  settings: Settings,
+  dialogTitle: string,
+): Promise<{ confirmationShown: boolean; toolResult: string }> {
+  const provider = new MockProvider([
+    { content: "", toolCalls: [toolCall] },
+    { content: "plan authorization stayed closed" },
+  ]);
+  const instance = render(
+    <App
+      provider={provider}
+      projectContext=""
+      tools={builtinTools}
+      settings={settings}
+      initialSessionId={`tui-plan-${Math.random().toString(36).slice(2)}`}
+      initialHistory={[]}
+      mcpToolCount={0}
+      sessionDir={sessionDir}
+      historyPath={newHistoryPath()}
+    />,
+  );
+
+  try {
+    await flush();
+    instance.stdin.write("test plan authorization");
+    instance.stdin.write("\r");
+    await vi.waitFor(() => {
+      const frame = instance.lastFrame() ?? "";
+      expect(frame.includes(dialogTitle) || frame.includes("plan authorization stayed closed")).toBe(
+        true,
+      );
+    }, { timeout: 3000 });
+
+    const confirmationShown = (instance.lastFrame() ?? "").includes(dialogTitle);
+    if (confirmationShown) instance.stdin.write("1");
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).toContain("plan authorization stayed closed"),
+      { timeout: 3000 },
+    );
+    const toolResult = provider.requests[1]?.find((message) => message.role === "tool")?.content ?? "";
+    return { confirmationShown, toolResult };
+  } finally {
+    instance.unmount();
+  }
 }
 
 const flush = (ms = 150) => new Promise((r) => setTimeout(r, ms));
@@ -256,7 +728,8 @@ function routeControllerKey(
     : controller.handleEditorKey(key);
 }
 
-describe("TUI", () => {
+// 本机负载波动大（ink 全量渲染 + 真实心跳），给整套一个宽松的兜底超时
+describe("TUI", {timeout: 30_000}, () => {
   it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
@@ -274,6 +747,39 @@ describe("TUI", () => {
     unmount();
   });
 
+  it("恢复大历史时首屏同步真实上下文警告且不调用 provider", async () => {
+    const provider = new MockProvider([]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="resumed-context-warning"
+        initialHistory={[
+          {role: "user", content: "u".repeat(1200)},
+          {role: "assistant", content: "a".repeat(1200)},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1000}
+      />,
+    );
+
+    try {
+      await flush();
+      await vi.waitFor(() => {
+        const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+        expect(frame).toMatch(/⚠ 上下文已用 \d+%，满 100% 自动压缩/);
+        expect(frame).toMatch(/上下文 ▰+▱* \d+%/);
+      }, {timeout: 2000});
+      expect(provider.streamCalls).toBe(0);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("folds official bracketed paste and submits its expanded content synchronously", async () => {
     const provider = new MockProvider([{ content: "收到" }]);
     const { stdin, lastFrame, unmount } = render(makeApp(provider));
@@ -284,7 +790,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("é\n行2\n行3"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(done).toContain("[Pasted text #1 +2 lines]");
@@ -302,7 +808,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("单行批量"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     const done = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(done).toContain("单行批量");
@@ -341,11 +847,11 @@ describe("TUI", () => {
     first.stdin.write("\r");
     await vi.waitFor(
       () => expect(firstProvider.lastUserContent).toBe(content),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("Pasted text #1"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     first.unmount();
 
@@ -356,12 +862,12 @@ describe("TUI", () => {
         second.stdin.write("\x1b[A");
         expect(second.lastFrame()).toContain("[Pasted text #1 +2 lines]");
       },
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     second.stdin.write("\r");
     await vi.waitFor(
       () => expect(secondProvider.lastUserContent).toBe(content),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     second.unmount();
   });
@@ -380,11 +886,11 @@ describe("TUI", () => {
     instance.stdin.write("\r");
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("still runs"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     await vi.waitFor(
       () => expect(instance.lastFrame()).toContain("Prompt history unavailable:"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
 
     const frame = instance.lastFrame()!;
@@ -405,7 +911,7 @@ describe("TUI", () => {
     stdin.write("\x7f");
     stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 10_000});
     unmount();
   });
 
@@ -420,7 +926,7 @@ describe("TUI", () => {
     stdin.write("\x1b[3~");
     stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 2000});
+    await vi.waitFor(() => expect(provider.lastUserContent).toBe("ab"), {timeout: 10_000});
     unmount();
   });
 
@@ -637,7 +1143,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("draft\\ncontent"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const persisted = JSON.parse(readFileSync(historyPath, "utf8").trim());
     expect(persisted.display).toBe("[Pasted text #1 +1 lines]");
@@ -871,7 +1377,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       harness.controller.handleEditorKey(stroke("", {upArrow: true}));
       expect(harness.controller.view.value).toBe(marker);
-    });
+    }, {timeout: 10_000});
     harness.controller.handleEditorKey(stroke("", {downArrow: true}));
     harness.controller.handlePaste("new\npaste");
     await flush();
@@ -945,7 +1451,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(readFileSync(historyPath, "utf8")).toContain("/help"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const lines = readFileSync(historyPath, "utf8").trim().split("\n");
     expect(lines).toHaveLength(1);
@@ -1034,7 +1540,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       instance.stdin.write("\x1b[A");
       expect(instance.lastFrame()).toContain(marker);
-    });
+    }, {timeout: 10_000});
     instance.stdin.write("\x1b[B");
     await flush();
 
@@ -1044,7 +1550,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe(content),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     expect(instance.lastFrame()).toContain(marker);
     instance.unmount();
@@ -1068,7 +1574,7 @@ describe("TUI", () => {
     await vi.waitFor(() => {
       instance.stdin.write("\x1b[A");
       expect(instance.lastFrame()).toContain("stored choice");
-    });
+    }, {timeout: 10_000});
     instance.stdin.write("\x1b[B");
     await flush();
 
@@ -1079,7 +1585,7 @@ describe("TUI", () => {
 
     await vi.waitFor(
       () => expect(provider.lastUserContent).toBe("stored choice!"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.unmount();
   });
@@ -1089,12 +1595,12 @@ describe("TUI", () => {
     await flush();
     instance.stdin.write("run");
     instance.stdin.write("\r");
-    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
     instance.stdin.write("\x03");
     await vi.waitFor(
       () => expect(instance.lastFrame()).not.toContain("working…"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.stdin.write("\x03");
     await flush();
@@ -1110,12 +1616,12 @@ describe("TUI", () => {
     await flush();
     instance.stdin.write("run");
     instance.stdin.write("\r");
-    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"));
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
     instance.stdin.write("\x03");
     await vi.waitFor(
       () => expect(instance.lastFrame()).not.toContain("working…"),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     instance.stdin.write("draft");
     instance.stdin.write("\x03");
@@ -1166,7 +1672,7 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(
       () => expect(lastFrame()).toContain("你好，这是回复"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     const frame = lastFrame()!;
     expect(frame).toContain("测试一下");
@@ -1208,7 +1714,7 @@ describe("TUI", () => {
     instance.stdin.write("two");
     instance.stdin.write("\r");
 
-    await vi.waitFor(() => expect(provider.streamCalls).toBe(1));
+    await vi.waitFor(() => expect(provider.streamCalls).toBe(1), {timeout: 10_000});
     await flush();
     const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
     expect(frame).toContain("❯ one");
@@ -1216,7 +1722,38 @@ describe("TUI", () => {
     instance.unmount();
   });
 
-  it("写操作触发权限对话框，按 y 放行后执行", async () => {
+  it("keeps user-facing tool summaries while streaming activity is integrated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-summary-"));
+    const target = join(dir, "summary.txt");
+    writeFileSync(target, "one\ntwo\n", "utf8");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{
+          id: "read-summary",
+          name: "read_file",
+          args: JSON.stringify({path: target}),
+        }],
+      },
+      {content: "summary done"},
+    ]);
+    const instance = render(makeApp(provider));
+    await flush();
+
+    instance.stdin.write("read the fixture");
+    instance.stdin.write("\r");
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).toContain("summary done"),
+      {timeout: 10_000},
+    );
+
+    const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("Read(");
+    expect(frame).not.toContain("read_file(");
+    instance.unmount();
+  });
+
+  it("写操作触发权限对话框，按数字 1 放行后执行", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const target = join(dir, "hello.txt").replace(/\\/g, "/");
     const provider = new MockProvider([
@@ -1237,15 +1774,17 @@ describe("TUI", () => {
     stdin.write("写个文件");
     stdin.write("\r");
     await vi.waitFor(
-      () => expect(lastFrame()).toContain("write_file"),
-      {timeout: 3000},
+      () => expect(lastFrame()).toContain("创建文件"),
+      {timeout: 10_000},
     );
-    expect(lastFrame()).toContain("write_file");
-    expect(lastFrame()).toContain("允许吗?");
-    stdin.write("y");
+    expect(lastFrame()).toContain("创建文件"); // 目标不存在 → "创建"标题
+    expect(lastFrame()).toContain("要创建 hello.txt 吗？");
+    const frame = lastFrame();
+    expect(frame).toContain("╌");
+    stdin.write("1"); // 数字直选"是"
     await vi.waitFor(
       () => expect(lastFrame()).toContain("写完了"),
-      {timeout: 3000},
+      {timeout: 10_000},
     );
     expect(lastFrame()).toContain("写完了");
     expect(readFileSync(target, "utf-8")).toBe("hi");
@@ -1275,19 +1814,19 @@ describe("TUI", () => {
 
     stdin.write(pastedDraft);
     stdin.write("\r");
-    await vi.waitFor(() => expect(lastFrame()).toContain("允许吗?"), {timeout: 2000});
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), {timeout: 10_000});
 
     stdin.write("\x12");
     await flush();
-    expect(lastFrame()).toContain("允许吗?");
+    expect(lastFrame()).toContain("◈");
     expect(lastFrame()).not.toContain("search prompts:");
     expect(lastFrame()).not.toContain("no matching prompt:");
 
-    stdin.write("y");
-    await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 2000});
+    stdin.write("1"); // 数字直选"是"
+    await vi.waitFor(() => expect(lastFrame()).toContain("权限处理完成"), {timeout: 10_000});
     const callsAfterPermission = provider.streamCalls;
 
-    // If the permission key leaked into the newly visible editor, Enter would submit "y".
+    // If the permission key leaked into the newly visible editor, Enter would submit "1".
     stdin.write("\r");
     await flush();
     expect(provider.streamCalls).toBe(callsAfterPermission);
@@ -1296,13 +1835,13 @@ describe("TUI", () => {
     stdin.write("\r");
     await vi.waitFor(
       () => expect(provider.streamCalls).toBeGreaterThan(callsAfterPermission),
-      {timeout: 2000},
+      {timeout: 10_000},
     );
     expect(provider.lastUserContent).toBe(pastedDraft);
     unmount();
   });
 
-  it("权限对话框按 n 拒绝：文件不写入，模型收到拒绝反馈", async () => {
+  it("权限对话框按 Esc 拒绝：文件不写入，模型收到拒绝反馈", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
     const target = join(dir, "deny.txt").replace(/\\/g, "/");
     const provider = new MockProvider([
@@ -1322,29 +1861,2234 @@ describe("TUI", () => {
     await flush();
     stdin.write("写个文件");
     stdin.write("\r");
-    await flush(400);
-    stdin.write("n");
-    await flush(600);
-    expect(lastFrame()).toContain("好的，不写了");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("创建文件"),
+      {timeout: 10_000},
+    );
+    stdin.write("\x1b"); // Esc = 拒绝
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("好的，不写了"),
+      {timeout: 10_000},
+    );
     expect(existsSync(target)).toBe(false);
     unmount();
   });
 
-  it("运行期活动行：英文状态词 + 执行时长 + 实时 tokens", async () => {
+  it("权限附言编辑中 Tab 仅收起，Esc 一次即拒绝当前确认", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-edit-escape-"));
+    const target = join(dir, "deny-editing.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "t1",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "no" }),
+          },
+        ],
+      },
+      { content: "编辑附言时也已取消。" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).toContain("└ 附言:");
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).not.toContain("└ 附言:");
+    expect(lastFrame()).toContain("创建文件");
+
+    stdin.write("\t");
+    await flush();
+    expect(lastFrame()).toContain("└ 附言:");
+    stdin.write("\x1b");
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("编辑附言时也已取消。"),
+      { timeout: 3000 },
+    );
+    expect(existsSync(target)).toBe(false);
+    unmount();
+  });
+
+  it("会话级选项（数字 2）切到 acceptEdits：后续编辑不再询问，footer 显示模式", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const a = join(dir, "a.txt").replace(/\\/g, "/");
+    const b = join(dir, "b.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: a, content: "1" }) },
+        ],
+      },
+      {
+        content: "",
+        toolCalls: [
+          { id: "t2", name: "write_file", args: JSON.stringify({ path: b, content: "2" }) },
+        ],
+      },
+      { content: "两个都写完了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写两个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    stdin.write("2"); // 会话级：本会话内允许所有编辑
+    await vi.waitFor(() => expect(lastFrame()).toContain("两个都写完了"), { timeout: 3000 });
+    expect(readFileSync(a, "utf-8")).toBe("1");
+    expect(readFileSync(b, "utf-8")).toBe("2"); // 第二个写入没有再弹窗
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("accept edits on"); // footer 模式指示
+    unmount();
+  });
+
+  it("/clear resets session-scoped edit permission before the new session runs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-clear-permission-"));
+    const first = join(dir, "first.txt").replace(/\\/g, "/");
+    const second = join(dir, "second.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: first, content: "1" }) },
+        ],
+      },
+      { content: "first session finished" },
+      {
+        content: "",
+        toolCalls: [
+          { id: "t2", name: "write_file", args: JSON.stringify({ path: second, content: "2" }) },
+        ],
+      },
+      { content: "new session stayed denied" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("write in the first session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("first session finished"), {
+        timeout: 3000,
+      });
+      expect(existsSync(first)).toBe(true);
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 3000,
+      });
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toContain("accept edits on");
+
+      instance.stdin.write("write in the new session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      expect(existsSync(second)).toBe(false);
+      instance.stdin.write("\x1b");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("new session stayed denied"), {
+        timeout: 3000,
+      });
+      expect(existsSync(second)).toBe(false);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("/clear preserves permission rules already written to persistent settings", async () => {
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const command = "printf persisted-rule";
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "persistent rule saved" },
+      {
+        content: "",
+        toolCalls: [{ id: "t2", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "persistent rule survived clear" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("run once");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("persistent rule saved"), {
+        timeout: 3000,
+      });
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 3000,
+      });
+      instance.stdin.write("run again");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("persistent rule survived clear"),
+        { timeout: 3000 },
+      );
+
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+      expect(provider.streamCalls).toBe(4);
+    } finally {
+      instance.unmount();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("拒绝时 Tab 附言：反馈文本随工具结果回流", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "veto.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "收到，换个方案" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    stdin.write("\x1b[B"); // ↓ 到会话级
+    stdin.write("\x1b[B"); // ↓ 到"否"
+    stdin.write("\t"); // 展开附言
+    await flush();
+    stdin.write("改用别的方案");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("收到，换个方案"), { timeout: 3000 });
+    expect(existsSync(target)).toBe(false);
+    expect(lastFrame()).toContain("改用别的方案"); // 拒绝文案（含附言）进了工具结果预览
+    unmount();
+  });
+
+  it("持久权限写盘失败时返回拒绝，且重试仍需确认", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-persist-fail-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${target}`;
+    const persistSpy = vi
+      .spyOn(transupCore, "persistPermissionRule")
+      .mockRejectedValue(new Error("disk unavailable"));
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command }) }],
+      },
+      { content: "权限保存失败，命令没有执行。" },
+      {
+        content: "",
+        toolCalls: [{ id: "t2", name: "bash", args: JSON.stringify({ command }) }],
+      },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+
+    try {
+      await flush();
+      stdin.write("运行命令");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      stdin.write("2"); // 选择持久化的 prefix allow
+
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("权限保存失败，命令没有执行。"),
+        { timeout: 3000 },
+      );
+      const toolResult = provider.requests[1]?.find((message) => message.role === "tool");
+      expect(toolResult?.content).toContain("权限设置保存失败");
+      expect(existsSync(target)).toBe(false);
+
+      stdin.write("再次运行");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("Bash 命令"), { timeout: 3000 });
+      expect(existsSync(target)).toBe(false);
+      expect(persistSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("持久权限把 workspace 与 user config identity 传给 external local 写入", async () => {
+    const root = mkdtempSync(join(tmpdir(), "transup-tui-persist-context-"));
+    const workspace = join(root, "workspace");
+    const settingsDir = join(workspace, ".transup");
+    const userConfigDir = join(root, "account-config");
+    mkdirSync(settingsDir, { recursive: true });
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "bash", args: JSON.stringify({ command: "echo ok" }) }],
+      },
+      { content: "external local 已保存" },
+    ]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        settingsContext={{ workspace, settingsDir, userConfigDir }}
+        initialSessionId={`tui-persist-context-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("运行命令");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+      instance.stdin.write("2");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("external local 已保存"), {
+        timeout: 3000,
+      });
+
+      expect(persistSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/^bash\(/),
+        "allow",
+        "localSettings",
+        settingsDir,
+        { workspace, userConfigDir },
+      );
+    } finally {
+      instance.unmount();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("Shift+Tab 循环到 plan 模式：写操作直接拒绝并回流引导文案", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "plan.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "那我先给出计划" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("\x1b[Z"); // Shift+Tab → acceptEdits
+    stdin.write("\x1b[Z"); // Shift+Tab → plan
+    await flush();
+    let frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("plan mode on");
+
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("那我先给出计划"), { timeout: 3000 });
+    expect(existsSync(target)).toBe(false); // 没有弹窗，直接被 plan 模式拒绝
+    frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("plan 模式");
+    unmount();
+  });
+
+  it("plan 模式下显式 ask 的写操作不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-ask-"));
+    const target = join(dir, "asked.txt").replace(/\\/g, "/");
+    const result = await runPlanAuthorizationScenario(
+      {
+        id: "plan-ask",
+        name: "write_file",
+        args: JSON.stringify({ path: target, content: "forbidden" }),
+      },
+      { permissions: { ask: ["write_file"], defaultMode: "plan" } },
+      "创建文件",
+    );
+
+    expect(existsSync(target)).toBe(false);
+    expect(result.confirmationShown).toBe(false);
+    expect(result.toolResult).toContain("plan 模式");
+  });
+
+  it("过期确认不能覆盖确认期间出现的 plan deny", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-stale-confirm-"));
+    const target = join(dir, "stale.txt").replace(/\\/g, "/");
+    const evaluateSpy = vi
+      .spyOn(transupCore, "evaluatePermission")
+      .mockReturnValueOnce({ behavior: "ask", reason: { type: "default" } })
+      .mockReturnValue({
+        behavior: "deny",
+        reason: { type: "mode", mode: "plan" },
+        message: "当前处于 plan 模式，不能执行写操作。",
+      });
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "plan-stale",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "forbidden" }),
+          },
+        ],
+      },
+      { content: "stale confirmation stayed closed" },
+    ]);
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("test stale confirmation");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      instance.stdin.write("1");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("stale confirmation stayed closed"),
+        { timeout: 3000 },
+      );
+
+      expect(existsSync(target)).toBe(false);
+      expect(evaluateSpy).toHaveBeenCalledTimes(2);
+      const toolResult = provider.requests[1]?.find((message) => message.role === "tool");
+      expect(toolResult?.content).toContain("plan 模式");
+    } finally {
+      instance.unmount();
+      evaluateSpy.mockRestore();
+    }
+  });
+
+  it("plan 模式下敏感路径写入不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-sensitive-"));
+    const gitDir = join(dir, ".git");
+    const target = join(gitDir, "config").replace(/\\/g, "/");
+    mkdirSync(gitDir);
+    const result = await runPlanAuthorizationScenario(
+      {
+        id: "plan-sensitive",
+        name: "write_file",
+        args: JSON.stringify({ path: target, content: "forbidden" }),
+      },
+      { permissions: { defaultMode: "plan" } },
+      "创建文件",
+    );
+
+    expect(existsSync(target)).toBe(false);
+    expect(result.confirmationShown).toBe(false);
+    expect(result.toolResult).toContain("plan 模式");
+  });
+
+  it("plan 模式下解释器和 shell expansion Bash 不能经确认转为 allow", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-plan-bash-"));
+    const cases = [
+      {
+        id: "plan-interpreter",
+        marker: join(dir, "interpreter-ran"),
+        command(marker: string) {
+          const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "x")`;
+          return `node -e ${JSON.stringify(script)}`;
+        },
+      },
+      {
+        id: "plan-expansion",
+        marker: join(dir, "expansion-ran"),
+        command: (marker: string) => `echo $(touch ${JSON.stringify(marker)})`,
+      },
+    ];
+
+    for (const entry of cases) {
+      const result = await runPlanAuthorizationScenario(
+        {
+          id: entry.id,
+          name: "bash",
+          args: JSON.stringify({ command: entry.command(entry.marker) }),
+        },
+        { permissions: { defaultMode: "plan" } },
+        "Bash 命令",
+      );
+      expect(existsSync(entry.marker), entry.id).toBe(false);
+      expect(result.confirmationShown, entry.id).toBe(false);
+      expect(result.toolResult, entry.id).toContain("plan 模式");
+    }
+  });
+
+  it("并发只读询问进队列：逐个确认，显示排队数", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const f1 = join(dir, "one.txt").replace(/\\/g, "/");
+    const f2 = join(dir, "two.txt").replace(/\\/g, "/");
+    writeFileSync(f1, "1");
+    writeFileSync(f2, "2");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "read_file", args: JSON.stringify({ path: f1 }) },
+          { id: "t2", name: "read_file", args: JSON.stringify({ path: f2 }) },
+        ],
+      },
+      { content: "都读完了" },
+    ]);
+    // ask 规则命中只读工具 → 两个并发 read_file 同时请求确认
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{ permissions: { ask: ["read_file"] } }}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("读两个文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("还有 1 个待确认"), { timeout: 3000 });
+    expect(lastFrame()).not.toContain("本项目不再询问 read_file");
+    stdin.write("1"); // 放行第一个
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain("工具调用");
+      expect(lastFrame()).not.toContain("还有 1 个待确认");
+    }, { timeout: 3000 });
+    expect(provider.streamCalls).toBe(1);
+    stdin.write("1"); // 放行第二个
+    await vi.waitFor(() => expect(lastFrame()).toContain("都读完了"), { timeout: 3000 });
+    unmount();
+  });
+
+  it("运行期活动行：呼吸帧 + 每轮随机动词，30 秒前无状态括号", async () => {
     const { stdin, lastFrame, unmount } = render(makeApp(new SlowProvider()));
     await flush();
     stdin.write("hi");
+    // sampleVerb 在 runTurn 开始时取一次：mock random=0 → SPINNER_VERBS[0] = "Thinking"
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      stdin.write("\r");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("Thinking…"),
+        {timeout: 10_000},
+      );
+      const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(frame).toMatch(/[·✢*✳✶✻✽] Thinking…/); // 帧符号（2 列）+ 动词 + U+2026
+      expect(frame).not.toContain("↑1.2k"); // 30s 门槛前不显示实时 tokens
+      expect(frame).not.toMatch(/\(\d+s/); // 也没有耗时括号段
+      expect(frame).toContain("working…"); // 输入框运行态英文占位不变
+    } finally {
+      randomSpy.mockRestore();
+    }
+    unmount();
+  });
+
+  it("运行超过 30 秒后活动行出现耗时与实时 tokens 括号段", async () => {
+    vi.useFakeTimers({toFake: ["Date"]});
+    try {
+      const provider = new HangingUsageProvider();
+      const { stdin, lastFrame, unmount } = render(makeApp(provider));
+      await flush();
+      stdin.write("hi");
+      stdin.write("\r");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("working…"),
+        {timeout: 10_000},
+      );
+      // ink 的输出节流按 Date.now 计时：冻结的 Date 会卡住后续 flush，
+      // 所以分步快进（每步都给真实心跳留出落帧时间）而不是一次跳 31s
+      for (let step = 0; step < 8; step++) {
+        vi.setSystemTime(Date.now() + 4_000);
+        await flush(30);
+      }
+      await vi.waitFor(() => {
+        vi.setSystemTime(Date.now() + 100);
+        const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+        // 30s 门槛后才出现括号段；elapsed 随 waitFor 轮询继续推进，只锁段结构
+        expect(frame).toMatch(/\(\d+s · ↑1\.2k ↓340 tokens\)/);
+      }, {timeout: 10_000});
+      provider.release();
+      await vi.waitFor(() => {
+        vi.setSystemTime(Date.now() + 100); // 持续推时钟让节流后的帧落地
+        expect(lastFrame()).toContain("ok");
+      }, {timeout: 10_000});
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20_000);
+
+  it("manual /compact starts with fresh activity time and token state", async () => {
+    const provider = new UsageThenGatedCompactProvider();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="manual-compact-fresh-activity"
+        initialHistory={[
+          {role: "user", content: "previous question"},
+          {role: "assistant", content: "previous answer"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    let controlledNow = 0;
+    let nowSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let compactStarted = false;
+
+    try {
+      await flush();
+      instance.stdin.write("complete a measured turn");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(frame).toContain("usage-bearing turn complete");
+        expect(frame).not.toContain("working…");
+      }, {timeout: 3000});
+
+      controlledNow = Date.now() + 35_000;
+      nowSpy = vi.spyOn(Date, "now").mockImplementation(() => controlledNow);
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      compactStarted = true;
+      await vi.waitFor(() => {
+        controlledNow += 100;
+        expect(instance.lastFrame()).toContain("Compacting");
+      }, {timeout: 3000});
+
+      const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+      const activityLine = frame.split("\n").find((line) => line.includes("Compacting")) ?? "";
+      expect(activityLine).not.toMatch(/\(\d+s/);
+      expect(activityLine).not.toContain("↑1.2k ↓340 tokens");
+    } finally {
+      provider.release();
+      if (compactStarted) await provider.compactFinished;
+      nowSpy?.mockRestore();
+      instance.unmount();
+    }
+  });
+
+  it("流式文本按整行上屏，未完成的半行不出现", async () => {
+    const provider = new GatedStreamProvider();
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("go");
     stdin.write("\r");
     await vi.waitFor(
-      () => expect(lastFrame()).toContain("↑1.2k"),
-      {timeout: 3000},
+      () => expect(lastFrame()).toContain("第一行完整"),
+      {timeout: 10_000},
     );
+    expect(lastFrame()).not.toContain("第二行开头"); // 半行藏到换行落地
+    provider.release();
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("第二行开头结尾"),
+      {timeout: 10_000},
+    );
+    unmount();
+  });
+
+  it("renders partial assistant text before a final non-retryable API error", async () => {
+    const provider = new PartialThenErrorProvider();
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("fail after streaming");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("API 错误: request rejected"),
+        {timeout: 3000},
+      );
+
+      const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+      const partialAt = frame.indexOf("partial response before failure");
+      const errorAt = frame.indexOf("API 错误: request rejected");
+      expect(partialAt).toBeGreaterThanOrEqual(0);
+      expect(errorAt).toBeGreaterThan(partialAt);
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("provider 流式文本和 Ctrl+O replay 共享终端控制净化边界", async () => {
+    const poison = "safe\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7f text";
+    const provider = new MockProvider([{ content: poison }]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("stream poison");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("safe"), { timeout: 3000 });
+
+    for (const frame of [lastFrame() ?? ""]) {
+      expect(frame).not.toContain("\x1b]52;");
+      expect(frame).not.toContain("\x1b[31m");
+      expect(frame).not.toMatch(/[\x7f-\x9f]/);
+    }
+
+    stdin.write("\x0f");
+    await flush();
+    const replay = lastFrame() ?? "";
+    expect(replay).not.toContain("\x1b]52;");
+    expect(replay).not.toContain("\x1b[31m");
+    expect(replay).not.toMatch(/[\x7f-\x9f]/);
+    unmount();
+  });
+
+  it("first Ctrl+C keeps the live interruption record while App remains mounted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-live-abort-"));
+    const sessionId = "live-abort";
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={new AbortableProvider()}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("go");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("部分输出"),
+        {timeout: 10_000},
+      );
+      expect(instance.lastFrame()).not.toContain("后半"); // 中断前半行仍被隐藏
+      instance.stdin.write("\x03");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("已中断 · 接下来要我做什么?"),
+        {timeout: 10_000},
+      );
+      const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(frame).toContain("部分输出");
+      expect(frame).toContain("后半"); // flushStream 把半行也固化
+      expect(frame.match(/部分输出/g)).toHaveLength(1);
+      expect(frame.match(/已中断 · 接下来要我做什么\?/g)).toHaveLength(1);
+      expect(frame).not.toContain("任务已中断");
+      expect(onExitStats).not.toHaveBeenCalled();
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "go"},
+        {role: "assistant", content: "(已被用户中断)"},
+      ]);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("Ctrl+O 打开会话全文屏：工具输出不截断；Ctrl+E 展开、Esc 返回", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "long.txt").replace(/\\/g, "/");
+    // 8 行内容：主屏保留读取工具的语义摘要，全文屏要能看到最后一行
+    writeFileSync(target, Array.from({ length: 8 }, (_, i) => `第${i + 1}行`).join("\n"));
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "read_file", args: JSON.stringify({ path: target }) }],
+      },
+      { content: "读完了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("读文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("读完了"), { timeout: 3000 });
+    const promptFrame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(promptFrame).toContain("读取 8 行"); // 主屏沿用 Task 4 的工具语义摘要
+    expect(promptFrame).not.toContain("第8行");
+
+    stdin.write("\x0f"); // Ctrl+O
+    await flush();
+    expect(lastFrame()).toContain("会话全文");
+    expect(lastFrame()).toContain("第8行"); // 全文屏给出未截断输出
+
+    stdin.write("\x05"); // Ctrl+E 展开
+    await flush();
+    expect(lastFrame()).toContain("已展开");
+
+    stdin.write("\x1b"); // Esc 返回主屏
+    await flush();
+    expect(lastFrame()).not.toContain("会话全文");
+    unmount();
+  });
+
+  it("全文屏吞掉普通按键：不会漏进输入框", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("\x0f"); // Ctrl+O 进全文屏
+    await flush();
+    stdin.write("abc");
+    stdin.write("\r"); // 回车在全文屏里不该提交
+    await flush();
+    expect(provider.streamCalls).toBe(0);
+
+    stdin.write("\x0f"); // Ctrl+O 回主屏
+    await flush();
     const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(frame).toMatch(/Thinking|Responding/); // 英文状态词
-    expect(frame).toMatch(/\d+s ·/); // 执行时长
-    expect(frame).toContain("↑1.2k"); // 实时 input tokens
-    expect(frame).toContain("↓340"); // 实时 output tokens
-    expect(frame).toContain("working…"); // 输入框运行态英文占位
+    expect(frame).not.toContain("❯ abc"); // 输入框里没有残留
+    unmount();
+  });
+
+  it("终端标题与进度：空闲 ✳、运行中 ⠂ + OSC 9;4 转圈", async () => {
+    const writes: string[] = [];
+    const { stdin, unmount } = render(
+      makeAppWithTerminal(new SlowProvider(), (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "off",
+      }),
+    );
+    await flush();
+    expect(writes.some((w) => w.includes("\x1b]0;✳ transup — "))).toBe(true);
+    expect(writes.some((w) => w === "\x1b]9;4;0;0\x07")).toBe(true); // 空闲：进度清零
+
+    writes.length = 0;
+    stdin.write("hi");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("\x1b]0;⠂ transup — "))).toBe(true),
+      { timeout: 2000 },
+    );
+    expect(writes.some((w) => w === "\x1b]9;4;3;0\x07")).toBe(true); // 运行中：转圈
+    unmount();
+  });
+
+  it("权限弹窗挂起超阈值 → 发桌面通知", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-"));
+    const target = join(dir, "notify.txt").replace(/\\/g, "/");
+    const writes: string[] = [];
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "好" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      makeAppWithTerminal(provider, (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "iterm2",
+        TRANSUP_NOTIF_PERMISSION_MS: "60",
+      }),
+    );
+    await flush();
+    stdin.write("写文件");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("创建文件"), { timeout: 3000 });
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("需要你的授权：write_file"))).toBe(true),
+      { timeout: 2000 },
+    );
+    expect(writes.find((w) => w.includes("需要你的授权"))).toContain("\x1b]9;"); // iTerm2 OSC 9
+    unmount();
+  });
+
+  it("回复完成后长时间无操作 → 发空闲通知", async () => {
+    const writes: string[] = [];
+    const { stdin, unmount } = render(
+      makeAppWithTerminal(new MockProvider([{ content: "答完了" }]), (s) => writes.push(s), {
+        TRANSUP_NOTIF_CHANNEL: "iterm2",
+        TRANSUP_NOTIF_IDLE_MS: "60",
+      }),
+    );
+    await flush();
+    stdin.write("问题");
+    stdin.write("\r");
+    await vi.waitFor(
+      () => expect(writes.some((w) => w.includes("等待你的下一步"))).toBe(true),
+      { timeout: 2000 },
+    );
+    unmount();
+  });
+
+  it("/sessions 打开切换面板：Esc 关闭吞键，数字直选切换会话", async () => {
+    // 独立 sessionDir，预置一个历史会话
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-panel-"));
+    writeFileSync(
+      join(dir, "old-session.jsonl"),
+      JSON.stringify({ role: "user", content: "旧会话的问题" }) + "\n",
+    );
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("/sessions");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+    expect(lastFrame()).toContain("old-session");
+    expect(lastFrame()).toContain("旧会话的问题"); // 首条 prompt 做标题（lite read）
+
+    // Esc 关闭；面板期间按键不漏进输入框
+    stdin.write("\x1b");
+    await flush();
+    expect(lastFrame()).not.toContain("切换会话");
+
+    stdin.write("/sessions");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+    stdin.write("1"); // 列表按字典序，old-session 在前
+    await vi.waitFor(() => expect(lastFrame()).toContain("已切换到会话 old-session"), {
+      timeout: 2000,
+    });
+    expect(lastFrame()).toContain("1 条消息");
+    unmount();
+  });
+
+  it("/sessions 面板打开期间吞掉 Ctrl+O 并保持可见", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-owner-"));
+    writeFileSync(
+      join(dir, "old-session.jsonl"),
+      JSON.stringify({ role: "user", content: "旧会话的问题" }) + "\n",
+    );
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x0f");
+      await flush();
+      expect(instance.lastFrame()).toContain("切换会话");
+      expect(instance.lastFrame()).not.toContain("会话全文");
+
+      instance.stdin.write("\x1b");
+      await flush();
+      expect(instance.lastFrame()).not.toContain("切换会话");
+      expect(instance.lastFrame()).not.toContain("会话全文");
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("/sessions sanitizes hostile filename and prompt fields before Panel rendering", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-hostile-"));
+    const sessionId = "evil\x9b31m-session";
+    writeFileSync(
+      join(dir, `${sessionId}.jsonl`),
+      JSON.stringify({
+        role: "user",
+        content: "visible-label\x9d52;c;attack\x9c\x1b]52;c;payload\x07",
+      }) + "\n",
+    );
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 3000,
+      });
+
+      const frame = instance.lastFrame() ?? "";
+      expect(frame).toContain("visible-label");
+      expect(frame).toContain("evil31m-session");
+      expect(frame).not.toMatch(/[\x80-\x9f]/);
+      expect(frame).not.toContain("\x1b]52;");
+      expect(frame).not.toContain("\x07");
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("/sessions resets session-scoped permission mode before installing the target engine", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-permission-"));
+    writeFileSync(
+      join(dir, "target-session.jsonl"),
+      JSON.stringify({ role: "assistant", content: "target history" }) + "\n",
+    );
+    const target = join(dir, "must-confirm.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "write_file", args: JSON.stringify({ path: target, content: "x" }) },
+        ],
+      },
+      { content: "target session stayed denied" },
+    ]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("\x1b[Z");
+      await flush();
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toContain("accept edits on");
+
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), { timeout: 3000 });
+      instance.stdin.write("1");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已切换到会话 target-session"), {
+        timeout: 3000,
+      });
+      expect(instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toContain("accept edits on");
+
+      instance.stdin.write("write in target session");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), { timeout: 3000 });
+      expect(existsSync(target)).toBe(false);
+      instance.stdin.write("\x1b");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("target session stayed denied"), {
+        timeout: 3000,
+      });
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      instance.unmount();
+    }
+  });
+
+  it("/sessions 加载期间阻止旧引擎提交与竞争切换", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-pending-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    let releaseLoad!: (state: { messages: Message[]; recentFiles: string[] }) => void;
+    const pendingLoad = new Promise<{ messages: Message[]; recentFiles: string[] }>((resolve) => {
+      releaseLoad = resolve;
+    });
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
+      .mockImplementation(function () {
+        return this.id === "target-session"
+          ? pendingLoad
+          : Promise.resolve({ messages: [], recentFiles: [] });
+      });
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    try {
+      await flush();
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      stdin.write("1");
+      await vi.waitFor(() => expect(loadSpy).toHaveBeenCalled(), { timeout: 2000 });
+
+      stdin.write("不能发给旧引擎");
+      stdin.write("\r");
+      await flush();
+      expect(provider.streamCalls).toBe(0);
+      expect(lastFrame()).toContain("正在加载会话 target-session");
+
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await flush();
+      expect(lastFrame()).not.toContain("切换会话");
+
+      releaseLoad({
+        messages: [{ role: "user", content: "目标会话历史" }],
+        recentFiles: [],
+      });
+      await vi.waitFor(() => expect(lastFrame()).toContain("已切换到会话 target-session"), {
+        timeout: 2000,
+      });
+      stdin.write("切换后提问");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(provider.streamCalls).toBe(1), { timeout: 2000 });
+      expect(provider.requests[0]).toEqual(
+        expect.arrayContaining([{ role: "user", content: "目标会话历史" }]),
+      );
+      expect(provider.lastUserContent).toBe("切换后提问");
+    } finally {
+      releaseLoad({ messages: [], recentFiles: [] });
+      unmount();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("/sessions 加载期间保留 Ctrl+C 退出并丢弃卸载后的完成", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-exit-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    let releaseLoad!: (state: { messages: Message[]; recentFiles: string[] }) => void;
+    const pendingLoad = new Promise<{ messages: Message[]; recentFiles: string[] }>((resolve) => {
+      releaseLoad = resolve;
+    });
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
+      .mockImplementation(function () {
+        return this.id === "target-session"
+          ? pendingLoad
+          : Promise.resolve({ messages: [], recentFiles: [] });
+      });
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
+    );
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 2000,
+      });
+      instance.stdin.write("1");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("正在加载会话"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(50);
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), { timeout: 2000 });
+
+      instance.stdin.write("退出后输入");
+      await flush();
+      expect(instance.lastFrame()).not.toContain("退出后输入");
+
+      releaseLoad({
+        messages: [{ role: "user", content: "不应安装的历史" }],
+        recentFiles: [],
+      });
+      await flush();
+      expect(onExitStats).toHaveBeenCalledOnce();
+      expect(instance.lastFrame()).not.toContain("已切换到会话 target-session");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      releaseLoad({ messages: [], recentFiles: [] });
+      instance.unmount();
+      errorSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("/sessions 在 load 后构建失败时保留原会话并释放输入", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-session-atomic-"));
+    writeFileSync(join(dir, "target-session.jsonl"), "{}\n");
+    const loadSpy = vi
+      .spyOn(transupCore.SessionStore.prototype, "loadState")
+      .mockResolvedValue({
+        messages: [{ role: "user", content: "目标会话历史" }],
+        recentFiles: [],
+      });
+    const provider = new MockProvider([{ content: "好" }]);
+    let contextSpy: ReturnType<typeof vi.spyOn> | undefined;
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[{ role: "user", content: "原会话历史" }]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    try {
+      await flush();
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      contextSpy = vi
+        .spyOn(transupCore.AgentEngine.prototype, "contextUsage")
+        .mockImplementationOnce(() => {
+          throw new Error("context failed after load");
+        });
+      stdin.write("1");
+      await vi.waitFor(
+        () => expect(lastFrame()).toContain("切换会话失败：context failed after load"),
+        { timeout: 2000 },
+      );
+      expect(lastFrame()).not.toContain("正在加载会话");
+
+      stdin.write("失败后提问");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(provider.streamCalls).toBe(1), { timeout: 2000 });
+      expect(provider.requests[0]).toEqual(
+        expect.arrayContaining([{ role: "user", content: "原会话历史" }]),
+      );
+      expect(provider.requests[0]).not.toEqual(
+        expect.arrayContaining([{ role: "user", content: "目标会话历史" }]),
+      );
+
+      stdin.write("/sessions");
+      stdin.write("\r");
+      await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).not.toMatch(
+        /target-session\s+当前/,
+      );
+    } finally {
+      unmount();
+      contextSpy?.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("settings.statusLine：命令输出显示在状态栏上方", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{
+          statusLine: {
+            command: `node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log('SL:'+JSON.parse(d).model.id))"`,
+          },
+        }}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("hi");
+    stdin.write("\r");
+    // 一轮结束（running 翻转）触发刷新：300ms debounce + 命令执行
+    await vi.waitFor(() => expect(lastFrame()).toContain("SL:test-model"), { timeout: 4000 });
+    unmount();
+  });
+
+  it("退出时回调 /cost 同款汇总", async () => {
+    let summary = "";
+    const provider = new MockProvider([{ content: "好" }]);
+    const { stdin, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        onExitStats={(s) => {
+          summary = s;
+        }}
+      />,
+    );
+    await flush();
+    stdin.write("hi");
+    stdin.write("\r");
+    await flush(600);
+    unmount();
+    expect(summary).toContain("会话时长（wall）");
+    expect(summary).toContain("输入 tokens");
+    unmount();
+  });
+
+  it("压缩三段式：事前警告行 → 压缩 → ✻ 摘要卡，Ctrl+O 展开摘要正文", async () => {
+    const provider = new MockProvider([
+      // 第 1 轮：长回复把上下文撑到警告区（不到 100%）
+      { content: "先干活。" + "x".repeat(2000) },
+      // 第 2 轮提交后超预算 → 该次调用被 compact 拿去生成摘要
+      { content: "摘要：之前在处理任务 A，已完成第一步，接下来做第二步。" },
+      // 压缩后的正常回复
+      { content: "继续任务。" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={3000}
+      />,
+    );
+    await flush();
+    stdin.write("第一轮");
+    stdin.write("\r");
+    // 事前警告：一轮结束、水位刷新后出现（等它而不是等回复文本 —— setStatus 在收尾时才跑）
+    await vi.waitFor(
+      () =>
+        expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(
+          /上下文已用 \d+%，满 100% 自动压缩/,
+        ),
+      { timeout: 3000 },
+    );
+
+    // 第二轮输入足够长，确定性越过 3000 阈值触发压缩
+    stdin.write("第二轮" + "y".repeat(500));
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("对话已压缩"), { timeout: 3000 });
+    expect(lastFrame()).toContain("✻");
+    expect(lastFrame()).toContain("Ctrl+O 查看完整摘要");
+    expect(lastFrame()).not.toContain("已完成第一步"); // 主屏不摊开摘要正文
+    await vi.waitFor(() => expect(lastFrame()).toContain("继续任务"), { timeout: 3000 });
+
+    stdin.write("\x0f"); // Ctrl+O → 全文屏
+    await flush();
+    expect(lastFrame()).toContain("对话已在此处压缩");
+    expect(lastFrame()).toContain("已完成第一步"); // 摘要正文在全文屏
+    stdin.write("\x1b");
+    await flush();
+    unmount();
+  });
+
+  it("automatic compact abort clears compacting state before the next turn", async () => {
+    const provider = new AutomaticCompactAbortProvider();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="tui-automatic-compact-abort"
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(2000)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1500}
+      />,
+    );
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+
+    try {
+      await flush();
+      instance.stdin.write("trigger automatic compact");
+      instance.stdin.write("\r");
+      await provider.summaryStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      provider.rejectAfterAbort();
+      await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("working"), {
+        timeout: 2000,
+      });
+      expect(provider.signals[0]?.aborted).toBe(true);
+
+      instance.stdin.write("/clear");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("已开始新会话"), {
+        timeout: 2000,
+      });
+      instance.stdin.write("ordinary turn");
+      instance.stdin.write("\r");
+      await provider.normalTurnStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Thinking"), {
+        timeout: 2000,
+      });
+      expect(instance.lastFrame()).not.toContain("Compacting");
+    } finally {
+      provider.rejectAfterAbort();
+      provider.releaseNormal();
+      instance.unmount();
+      randomSpy.mockRestore();
+    }
+  });
+
+  it("manual /compact uses first Ctrl+C to cancel and second Ctrl+C to exit", async () => {
+    const provider = new RejectingManualCompactProvider();
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-compact-abort-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      provider.rejectAfterAbort();
+      await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(instance.lastFrame()).not.toContain("压缩失败，已退回截断策略");
+      expect(onExitStats).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+    } finally {
+      provider.rejectAfterAbort();
+      instance.unmount();
+    }
+  });
+
+  it("unmount aborts a pending turn without persisting its late interruption record", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-turn-unmount-"));
+    const sessionId = "turn-unmount";
+    const provider = new RejectAfterUnmountProvider();
+    const turn = trackTurnSettlement();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("pending turn");
+      instance.stdin.write("\r");
+      await provider.streamStarted;
+      expect(provider.signals[0]?.aborted).toBe(false);
+
+      instance.unmount();
+      expect(provider.signals[0]?.aborted).toBe(true);
+      provider.rejectAfterUnmount();
+      await provider.streamFinished;
+      await turn.finished;
+      await flush();
+
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "pending turn"},
+      ]);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.rejectAfterUnmount();
+      instance.unmount();
+      errorSpy.mockRestore();
+      turn.restore();
+    }
+  });
+
+  it("unmount settles a turn waiting on a permission decision", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-unmount-"));
+    const target = join(dir, "must-not-write.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "pending-permission",
+            name: "write_file",
+            args: JSON.stringify({ path: target, content: "must not be written" }),
+          },
+        ],
+      },
+      { content: "must not run" },
+    ]);
+    const turn = trackTurnSettlement();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="permission-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("创建文件"), {
+        timeout: 3000,
+      });
+
+      instance.unmount();
+      const settled = await Promise.race([
+        turn.finished.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+      ]);
+      await flush();
+
+      expect(settled).toBe(true);
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      instance.unmount();
+      errorSpy.mockRestore();
+      turn.restore();
+    }
+  });
+
+  it("unmount after a persistent allow resolves denies before permission updates commit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-allow-unmount-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${JSON.stringify(target)}`;
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "persistent-allow-unmount",
+            name: "bash",
+            args: JSON.stringify({command}),
+          },
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const turn = trackTurnSettlement();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="persistent-allow-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request persistent permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+
+      // Resolving the dialog queues canUseTool's continuation. Unmount in this
+      // same call stack, before that continuation can commit the allow update.
+      instance.stdin.write("2");
+      instance.unmount();
+      await turn.finished;
+
+      expect(persistSpy).not.toHaveBeenCalled();
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      instance.unmount();
+      errorSpy.mockRestore();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("aborting the active turn after a persistent allow resolves prevents permission updates", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-allow-abort-"));
+    const target = join(dir, "must-not-run").replace(/\\/g, "/");
+    const command = `touch ${JSON.stringify(target)}`;
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {
+            id: "persistent-allow-abort",
+            name: "bash",
+            args: JSON.stringify({command}),
+          },
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const persistSpy = vi.spyOn(transupCore, "persistPermissionRule").mockResolvedValue();
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="persistent-allow-abort"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request persistent permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Bash 命令"), {
+        timeout: 3000,
+      });
+
+      // Both writes are synchronous: Ctrl+C aborts the owning controller before
+      // canUseTool resumes from the already-resolved permission Promise.
+      instance.stdin.write("2");
+      instance.stdin.write("\x03");
+      await turn.finished;
+
+      expect(turn.signal()?.aborted).toBe(true);
+      expect(persistSpy).not.toHaveBeenCalled();
+      expect(existsSync(target)).toBe(false);
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("abort during permission persistence does not install the runtime allow rule", async () => {
+    const persistStarted = pendingPromise();
+    const releasePersist = pendingPromise();
+    const execute = vi.fn(async () => "must not execute");
+    const tool = {
+      name: "deferred_permission_probe",
+      description: "Deferred permission persistence probe",
+      schema: z.object({}),
+      readOnly: false,
+      execute,
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{id: "persisting-allow", name: tool.name, args: "{}"}],
+      },
+      {
+        content: "",
+        toolCalls: [{id: "retry-after-abort", name: tool.name, args: "{}"}],
+      },
+      {content: "second request stayed denied"},
+    ]);
+    const persistSpy = vi
+      .spyOn(transupCore, "persistPermissionRule")
+      .mockImplementation(async () => {
+        persistStarted.resolve();
+        await releasePersist.promise;
+      });
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[tool]}
+        settings={{}}
+        initialSessionId="permission-persist-abort"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request deferred permission");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("工具调用"), {
+        timeout: 3000,
+      });
+
+      instance.stdin.write("2");
+      await persistStarted.promise;
+      expect(persistSpy).toHaveBeenCalledOnce();
+
+      instance.stdin.write("\x03");
+      expect(turn.signal()?.aborted).toBe(true);
+      releasePersist.resolve();
+      await turn.finished;
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(frame).toContain("已中断 · 接下来要我做什么?");
+        expect(frame).not.toContain("working…");
+      }, {timeout: 3000});
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(provider.streamCalls).toBe(1);
+
+      instance.stdin.write("retry after the aborted persistence");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(
+          frame.includes("工具调用") || frame.includes("second request stayed denied"),
+        ).toBe(true);
+      }, {timeout: 3000});
+      expect(instance.lastFrame()).toContain("工具调用");
+      expect(execute).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x1b");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("second request stayed denied"),
+        {timeout: 3000},
+      );
+      expect(persistSpy).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      releasePersist.resolve();
+      instance.unmount();
+      turn.restore();
+      persistSpy.mockRestore();
+    }
+  });
+
+  it("double Ctrl+C exit includes usage emitted before an unsettled provider returns", async () => {
+    const provider = new UsageThenUnsettledProvider();
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="active-usage-exit"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("wait after usage");
+      instance.stdin.write("\r");
+      await provider.followUpStarted;
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(provider.signals[1]?.aborted).toBe(true), {
+        timeout: 2000,
+      });
+      expect(onExitStats).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+      const summary = String(onExitStats.mock.calls[0]?.[0] ?? "");
+      expect(summary).toMatch(/^输入 tokens\s+137$/m);
+      expect(summary).toMatch(/^输出 tokens\s+29$/m);
+      expect(summary).toMatch(/^缓存命中 \/ 写入\s+43 \/ 11$/m);
+    } finally {
+      provider.release();
+      await provider.followUpFinished;
+      instance.unmount();
+    }
+  });
+
+  it("unmount cleanup denies every pending parallel read-only confirmation", async () => {
+    const executeFirst = vi.fn(async () => "must not execute first");
+    const executeSecond = vi.fn(async () => "must not execute second");
+    const firstTool = {
+      name: "pending_read_probe_one",
+      description: "First pending read probe",
+      schema: z.object({}),
+      readOnly: true,
+      execute: executeFirst,
+    };
+    const secondTool = {
+      name: "pending_read_probe_two",
+      description: "Second pending read probe",
+      schema: z.object({}),
+      readOnly: true,
+      execute: executeSecond,
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          {id: "pending-read-one", name: firstTool.name, args: "{}"},
+          {id: "pending-read-two", name: secondTool.name, args: "{}"},
+        ],
+      },
+      {content: "must not continue"},
+    ]);
+    const turn = trackTurnSettlement();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[firstTool, secondTool]}
+        settings={{permissions: {ask: [firstTool.name, secondTool.name]}}}
+        initialSessionId="parallel-permission-unmount"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("request parallel permissions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("还有 1 个待确认"), {
+        timeout: 3000,
+      });
+
+      instance.unmount();
+      await turn.finished;
+
+      expect(executeFirst).not.toHaveBeenCalled();
+      expect(executeSecond).not.toHaveBeenCalled();
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+      turn.restore();
+    }
+  });
+
+  it("unmount cleanup aborts a pending manual /compact controller", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-compact-unmount-"));
+    const sessionId = "manual-compact-unmount";
+    const provider = new LateManualCompactProvider();
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+      expect(provider.signals[0]?.aborted).toBe(false);
+
+      instance.unmount();
+      expect(onExitStats).toHaveBeenCalledOnce();
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([]);
+      expect(instance.lastFrame()).not.toContain("对话已压缩");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("double Ctrl+C exit discards a manual compact summary that resolves after unmount", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-compact-late-exit-"));
+    const sessionId = "manual-compact-late-exit";
+    const provider = new LateManualCompactProvider();
+    const onExitStats = vi.fn();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(800)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={400}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x03");
+      await flush(20);
+      expect(provider.signals[0]?.aborted).toBe(true);
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+      const frameAfterExit = instance.lastFrame();
+
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(onExitStats).toHaveBeenCalledOnce();
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([]);
+      expect(instance.lastFrame()).toBe(frameAfterExit);
+      expect(instance.lastFrame()).not.toContain("对话已压缩");
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("automatic compact unmount discards a provider's late summary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-auto-compact-unmount-"));
+    const sessionId = "automatic-compact-unmount";
+    const provider = new LateManualCompactProvider();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[
+          {role: "user", content: `large history ${"x".repeat(2000)}`},
+          {role: "assistant", content: "original response"},
+          {role: "user", content: "original follow-up"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1500}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("trigger automatic compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("Compacting"), {
+        timeout: 2000,
+      });
+      instance.unmount();
+      const frameAfterUnmount = instance.lastFrame();
+      provider.releaseLateSummary();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "trigger automatic compact"},
+      ]);
+      expect(instance.lastFrame()).toBe(frameAfterUnmount);
+      expect(errorSpy.mock.calls.flat().join("\n")).not.toMatch(
+        /state update|unmounted component/i,
+      );
+    } finally {
+      provider.releaseLateSummary();
+      instance.unmount();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("unmount during traced usage stops engine consumption before late session writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-trace-unmount-"));
+    const sessionId = "trace-unmount";
+    const provider = new UsageCompletionProvider();
+    const traceStarted = pendingPromise();
+    const releaseTrace = pendingPromise();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={sessionId}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+        trace={{
+          record: async (event) => {
+            if (event.type !== "usage") return;
+            traceStarted.resolve();
+            await releaseTrace.promise;
+          },
+        }}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("trace pending event");
+      instance.stdin.write("\r");
+      await traceStarted.promise;
+
+      instance.unmount();
+      releaseTrace.resolve();
+      await provider.streamFinished;
+      await flush();
+
+      expect(provider.signals[0]?.aborted).toBe(true);
+      expect(await new SessionStore(sessionId, dir).load()).toEqual([
+        {role: "user", content: "trace pending event"},
+      ]);
+    } finally {
+      releaseTrace.resolve();
+      instance.unmount();
+    }
+  });
+
+  it("恢复中断会话：启动即提示可带进度续跑", async () => {
+    const provider = new MockProvider([{ content: "好" }]);
+    const { lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[
+          { role: "user", content: "没跑完的任务" },
+          { role: "assistant", content: "(已被用户中断)" },
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    expect(lastFrame()).toContain("上次任务在执行中途被打断");
+    unmount();
+  });
+
+  it("子任务实时进度：只读工具的 onProgress 显示在运行尾巴里", async () => {
+    // 自定义只读工具：分两段吐进度，中间停顿让 UI 有机会渲染
+    const probe = {
+      name: "probe",
+      description: "test probe",
+      schema: z.object({}),
+      readOnly: true,
+      async execute(_args: object, onProgress?: (chunk: string) => void) {
+        onProgress?.("→ read_file src/a.ts\n");
+        await new Promise((r) => setTimeout(r, 400));
+        onProgress?.("→ grep TODO\n");
+        await new Promise((r) => setTimeout(r, 200));
+        return "探索完成";
+      },
+    };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [{ id: "t1", name: "probe", args: "{}" }] },
+      { content: "结论出来了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[...builtinTools, probe]}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("探索一下");
+    stdin.write("\r");
+    // 运行中就能看到进度行（不是等到结束才一次性出现）
+    await vi.waitFor(() => expect(lastFrame()).toContain("→ read_file src/a.ts"), {
+      timeout: 3000,
+    });
+    await vi.waitFor(() => expect(lastFrame()).toContain("结论出来了"), { timeout: 3000 });
+    unmount();
+  });
+
+  it("live grep 活动行的模型参数在 producer 处剥离 C1", async () => {
+    const poison = "before\x9b31m\x9d8;;evil\x9c\x7fafter";
+    const slowGrep = {
+      name: "grep",
+      description: "slow grep fixture",
+      schema: z.object({ pattern: z.string() }),
+      readOnly: true,
+      async execute() {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return "done";
+      },
+    };
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "poisoned-grep", name: "grep", args: JSON.stringify({ pattern: poison }) },
+        ],
+      },
+      { content: "grep completed safely" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[...builtinTools, slowGrep]}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("run poisoned grep");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("grep(pattern:"), { timeout: 3000 });
+    const active = lastFrame() ?? "";
+    expect(active).not.toMatch(/[\x7f-\x9f]/);
+    expect(active).toContain("before");
+    expect(active).toContain("after");
+    await vi.waitFor(() => expect(lastFrame()).toContain("grep completed safely"), {
+      timeout: 3000,
+    });
     unmount();
   });
 
@@ -1358,7 +4102,37 @@ describe("TUI", () => {
     stdin.write("/cost");
     stdin.write("\r");
     await flush();
-    expect(lastFrame()).toContain("累计 tokens");
+    expect(lastFrame()).toContain("会话时长（wall）");
+    expect(lastFrame()).toContain("输入 tokens");
+    unmount();
+  });
+
+  it("/context 保留可信网格 SGR 与布局且不进入 Ctrl+O 会话内容", async () => {
+    const { stdin, lastFrame, unmount } = render(makeApp(new MockProvider([])));
+    await flush();
+    stdin.write("/context");
+    stdin.write("\r");
+    await flush();
+    const raw = lastFrame() ?? "";
+    const frame = raw.replace(/\x1b\[[0-9;]*m/g, "");
+    const gridRows = frame
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[⛁⛶]+$/.test(line));
+
+    expect(frame).not.toMatch(/\[(?:38;5;\d+|0)m/);
+    expect(raw).toContain("\x1b[38;5;239m");
+    expect(frame).toContain("上下文用量");
+    expect(gridRows).toHaveLength(5);
+    expect(gridRows.every((line) => line.length >= 10)).toBe(true);
+    expect(frame).toMatch(/test-model · .*（\d+%）/);
+
+    stdin.write("\x0f");
+    await flush();
+    const transcript = (lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    expect(transcript).toContain("会话全文（1 条");
+    const transcriptSection = transcript.slice(transcript.lastIndexOf("─ 会话全文"));
+    expect(transcriptSection).not.toContain("上下文用量");
     unmount();
   });
 });

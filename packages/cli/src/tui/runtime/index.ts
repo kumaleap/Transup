@@ -9,5 +9,6 @@ export {
   useInput,
   usePaste,
   useStdout,
+  useWindowSize,
 } from "ink";
 export type {DOMElement, Key} from "ink";

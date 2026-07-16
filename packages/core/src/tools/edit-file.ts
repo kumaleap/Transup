@@ -22,8 +22,8 @@ export const editFileTool: Tool<typeof schema> = {
     "若不唯一，请在 old_string 中包含更多上下文行。修改前必须先 read_file 确认内容。",
   schema,
   readOnly: false,
-  async execute({ path, old_string, new_string }) {
-    const text = await readFile(path, "utf-8");
+  async execute({ path, old_string, new_string }, _onProgress, signal, beginCommit) {
+    const text = await readFile(path, { encoding: "utf-8", signal });
 
     const count = text.split(old_string).length - 1;
     if (count === 0) {
@@ -37,6 +37,9 @@ export const editFileTool: Tool<typeof schema> = {
       );
     }
 
+    signal?.throwIfAborted();
+    // writeFile cancellation can leave a truncated partial file; once started, let the write commit.
+    beginCommit?.();
     await writeFile(path, text.replace(old_string, new_string), "utf-8");
     return `已修改 ${path}`;
   },
