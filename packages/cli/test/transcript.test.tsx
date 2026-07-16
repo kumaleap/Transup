@@ -271,6 +271,24 @@ describe("terminal-safe transcript data", () => {
     expect(frame).toContain("before");
     expect(frame).toContain("after");
   });
+
+  it("Ctrl+O transcript renders every counted error and bash-input item", () => {
+    const rendered = render(
+      <TranscriptScreen
+        expanded
+        items={[
+          { id: 1, kind: "error", text: "Error: visible failure" },
+          { id: 2, kind: "bash-input", text: "echo visible" },
+        ]}
+      />,
+    );
+    const frame = rendered.lastFrame() ?? "";
+    rendered.unmount();
+
+    expect(frame).toContain("会话全文（2 条，已展开）");
+    expect(frame).toContain("Error: visible failure");
+    expect(frame).toContain("! echo visible");
+  });
 });
 
 describe("TranscriptItemView", () => {

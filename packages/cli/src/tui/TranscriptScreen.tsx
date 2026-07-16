@@ -16,7 +16,7 @@ import React from "react";
 import { Box, Text } from "./runtime/index.js";
 import { T } from "../theme.js";
 import { renderMarkdown, sanitizeTerminalText } from "../highlight.js";
-import { DOT, type TranscriptItem } from "./Transcript.js";
+import { DOT, ResultLine, type TranscriptItem } from "./Transcript.js";
 
 export const MAX_ITEMS = 30;
 export const MAX_TOOL_LINES = 100;
@@ -34,6 +34,17 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
         <Box marginTop={1}>
           <Text dimColor>❯ </Text>
           <Text>{sanitizeTerminalText(item.text)}</Text>
+        </Box>
+      );
+    case "bash-input":
+      return (
+        <Box marginTop={1} paddingRight={1} backgroundColor={T.bashMessageBg}>
+          <Box flexShrink={0}>
+            <Text color={T.bashAccent}>! </Text>
+          </Box>
+          <Box flexGrow={1} flexShrink={1}>
+            <Text>{sanitizeTerminalText(item.text)}</Text>
+          </Box>
         </Box>
       );
     case "assistant":
@@ -94,9 +105,15 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
           </Box>
         </Box>
       );
+    case "error":
+      return <ResultLine color={T.danger}>{sanitizeTerminalText(item.text)}</ResultLine>;
     case "info":
     case "banner":
       return null; // 启动横幅与过程提示不是会话内容，全文里省掉
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
   }
 }
 
