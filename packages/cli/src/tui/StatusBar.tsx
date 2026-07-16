@@ -9,6 +9,7 @@
 import React from "react";
 import {Box, Text} from "./runtime/index.js";
 import { T } from "../theme.js";
+import { sanitizeTerminalField } from "../terminal-sanitize.js";
 
 export interface StatusInfo {
   providerId: string;
@@ -41,11 +42,13 @@ function meter(pct: number): { bar: string; color: string } {
 export function StatusBar({ status }: { status: StatusInfo }) {
   const m = meter(status.contextPercent);
   const cache = status.cacheRead > 0 ? ` (缓存 ${fmtTokens(status.cacheRead)})` : "";
+  const model = sanitizeTerminalField(status.model);
+  const providerId = sanitizeTerminalField(status.providerId);
 
   return (
     <Box>
-      <Text color={T.primary}>◆ {status.model}</Text>
-      <Text dimColor> · {status.providerId}</Text>
+      <Text color={T.primary}>◆ {model}</Text>
+      <Text dimColor> · {providerId}</Text>
       {status.mcpToolCount > 0 && <Text dimColor> ⋮ mcp {status.mcpToolCount}</Text>}
       <Text dimColor>
         {" "}

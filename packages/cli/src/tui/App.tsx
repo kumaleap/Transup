@@ -616,9 +616,9 @@ export function App(props: AppProps) {
   screenRef.current = screen;
 
   const handleGlobalKey = (stroke: Keystroke): boolean => {
-    // Ctrl+O 双向切换会话全文屏；有权限弹窗挂起时不让走开（那弹窗必须先答）
+    // Ctrl+O 双向切换会话全文屏；可见 modal 必须保持当前输入所有权。
     if (stroke.ctrl && stroke.input === "o") {
-      if (confirmQueueRef.current.length > 0) return true;
+      if (confirmQueueRef.current.length > 0 || panelRef.current !== null) return true;
       setScreen(screenRef.current === "transcript" ? "prompt" : "transcript");
       setTranscriptExpanded(false);
       return true;
@@ -859,11 +859,18 @@ export function App(props: AppProps) {
       stream = "";
       setStreamText("");
     };
-    const turnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const turnUsage = { input: 0, output: 0 };
 
     try {
       for await (const ev of engineRef.current!.runTurn(input, controller.signal)) {
         if (!mountedRef.current) break;
+        if (ev.type === "usage") {
+          const t = totals.current;
+          t.input += ev.usage.inputTokens;
+          t.output += ev.usage.outputTokens;
+          t.cacheRead += ev.usage.cacheReadTokens ?? 0;
+          t.cacheWrite += ev.usage.cacheWriteTokens ?? 0;
+        }
         await props.trace?.record(ev);
         if (!mountedRef.current) break;
         switch (ev.type) {
@@ -918,8 +925,6 @@ export function App(props: AppProps) {
           case "usage":
             turnUsage.input += ev.usage.inputTokens;
             turnUsage.output += ev.usage.outputTokens;
-            turnUsage.cacheRead += ev.usage.cacheReadTokens ?? 0;
-            turnUsage.cacheWrite += ev.usage.cacheWriteTokens ?? 0;
             // 供运行期活动行实时展示（每个模型往返更新一次）
             liveUsage.current = { input: turnUsage.input, output: turnUsage.output };
             break;
@@ -962,7 +967,10 @@ export function App(props: AppProps) {
         }
       }
     } catch (err: any) {
-      if (mountedRef.current) pushError(`API 错误: ${err.message}`);
+      if (mountedRef.current) {
+        flushStream();
+        pushError(`API 错误: ${err.message}`);
+      }
     } finally {
       const ownsController = controllerRef.current === controller;
       if (ownsController) {
@@ -977,10 +985,6 @@ export function App(props: AppProps) {
       setActiveTool(null);
 
       const t = totals.current;
-      t.input += turnUsage.input;
-      t.output += turnUsage.output;
-      t.cacheRead += turnUsage.cacheRead;
-      t.cacheWrite += turnUsage.cacheWrite;
       const { percent } = engineRef.current!.contextUsage();
       setStatus((s) => ({
         ...s,

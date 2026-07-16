@@ -133,6 +133,19 @@ class AbortableProvider implements Provider {
   }
 }
 
+/** Emits visible text before a non-retryable provider failure. */
+class PartialThenErrorProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  streamCalls = 0;
+
+  async *stream(): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
+    yield {type: "text_delta", text: "partial response before failure"};
+    throw Object.assign(new Error("request rejected"), {status: 400});
+  }
+}
+
 /** Waits for explicit rejection so the test can dispose the App before provider settlement. */
 class RejectAfterUnmountProvider implements Provider {
   readonly id = "mock";
@@ -320,6 +333,60 @@ class UsageCompletionProvider implements Provider {
       };
     } finally {
       this.markStreamFinished();
+    }
+  }
+}
+
+/** Emits real provider usage, then ignores abort while a follow-up request remains unsettled. */
+class UsageThenUnsettledProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  readonly signals: (AbortSignal | undefined)[] = [];
+  private call = 0;
+  private releaseFollowUp!: () => void;
+  private readonly followUpGate = new Promise<void>((resolve) => {
+    this.releaseFollowUp = resolve;
+  });
+  private markFollowUpStarted!: () => void;
+  readonly followUpStarted = new Promise<void>((resolve) => {
+    this.markFollowUpStarted = resolve;
+  });
+  private markFollowUpFinished!: () => void;
+  readonly followUpFinished = new Promise<void>((resolve) => {
+    this.markFollowUpFinished = resolve;
+  });
+
+  release(): void {
+    this.releaseFollowUp();
+  }
+
+  async *stream(
+    _messages: Message[],
+    _tools: Parameters<Provider["stream"]>[1],
+    signal?: AbortSignal,
+  ): AsyncIterable<ProviderEvent> {
+    this.signals.push(signal);
+    this.call++;
+    if (this.call === 1) {
+      yield {
+        type: "message_done",
+        content: "",
+        toolCalls: [],
+        usage: {
+          inputTokens: 137,
+          outputTokens: 29,
+          cacheReadTokens: 43,
+          cacheWriteTokens: 11,
+        },
+      };
+      return;
+    }
+
+    this.markFollowUpStarted();
+    try {
+      await this.followUpGate;
+    } finally {
+      this.markFollowUpFinished();
     }
   }
 }
@@ -2297,6 +2364,30 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
+  it("renders partial assistant text before a final non-retryable API error", async () => {
+    const provider = new PartialThenErrorProvider();
+    const instance = render(makeApp(provider));
+
+    try {
+      await flush();
+      instance.stdin.write("fail after streaming");
+      instance.stdin.write("\r");
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("API 错误: request rejected"),
+        {timeout: 3000},
+      );
+
+      const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+      const partialAt = frame.indexOf("partial response before failure");
+      const errorAt = frame.indexOf("API 错误: request rejected");
+      expect(partialAt).toBeGreaterThanOrEqual(0);
+      expect(errorAt).toBeGreaterThan(partialAt);
+      expect(provider.streamCalls).toBe(1);
+    } finally {
+      instance.unmount();
+    }
+  });
+
   it("provider 流式文本和 Ctrl+O replay 共享终端控制净化边界", async () => {
     const poison = "safe\x1b]52;c;YXR0YWNr\x07\x1b[31m\x9b31m\x9d8;;evil\x9c\x7f text";
     const provider = new MockProvider([{ content: poison }]);
@@ -2537,6 +2628,48 @@ describe("TUI", {timeout: 30_000}, () => {
     });
     expect(lastFrame()).toContain("1 条消息");
     unmount();
+  });
+
+  it("/sessions 面板打开期间吞掉 Ctrl+O 并保持可见", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-sessions-owner-"));
+    writeFileSync(
+      join(dir, "old-session.jsonl"),
+      JSON.stringify({ role: "user", content: "旧会话的问题" }) + "\n",
+    );
+    const instance = render(
+      <App
+        provider={new MockProvider([])}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="current-session"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={dir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("/sessions");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => expect(instance.lastFrame()).toContain("切换会话"), {
+        timeout: 2000,
+      });
+
+      instance.stdin.write("\x0f");
+      await flush();
+      expect(instance.lastFrame()).toContain("切换会话");
+      expect(instance.lastFrame()).not.toContain("会话全文");
+
+      instance.stdin.write("\x1b");
+      await flush();
+      expect(instance.lastFrame()).not.toContain("切换会话");
+      expect(instance.lastFrame()).not.toContain("会话全文");
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("/sessions sanitizes hostile filename and prompt fields before Panel rendering", async () => {
@@ -3379,6 +3512,49 @@ describe("TUI", {timeout: 30_000}, () => {
       instance.unmount();
       turn.restore();
       persistSpy.mockRestore();
+    }
+  });
+
+  it("double Ctrl+C exit includes usage emitted before an unsettled provider returns", async () => {
+    const provider = new UsageThenUnsettledProvider();
+    const onExitStats = vi.fn();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="active-usage-exit"
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        onExitStats={onExitStats}
+      />,
+    );
+
+    try {
+      await flush();
+      instance.stdin.write("wait after usage");
+      instance.stdin.write("\r");
+      await provider.followUpStarted;
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(provider.signals[1]?.aborted).toBe(true), {
+        timeout: 2000,
+      });
+      expect(onExitStats).not.toHaveBeenCalled();
+
+      instance.stdin.write("\x03");
+      await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
+      const summary = String(onExitStats.mock.calls[0]?.[0] ?? "");
+      expect(summary).toMatch(/^输入 tokens\s+137$/m);
+      expect(summary).toMatch(/^输出 tokens\s+29$/m);
+      expect(summary).toMatch(/^缓存命中 \/ 写入\s+43 \/ 11$/m);
+    } finally {
+      provider.release();
+      await provider.followUpFinished;
+      instance.unmount();
     }
   });
 

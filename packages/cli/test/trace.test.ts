@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@transup/core";
-import { TraceRecorder, readTrace, renderTrace } from "../src/trace.js";
+import { TraceRecorder, readTrace, renderTrace, renderTraceFile } from "../src/trace.js";
 
 async function tempDir() {
   return mkdtemp(join(tmpdir(), "transup-trace-"));
@@ -191,5 +191,38 @@ describe("trace replay renderer", () => {
 
     expect(text).toContain('Trace null · 42/false · {"toString":null,"path":"/repo"}');
     expect(text).toContain('[null] tool_start: {"toString":null}(null)');
+  });
+
+  it("renders malformed recognized events and preserves later valid trace entries", async () => {
+    const dir = await tempDir();
+    const recorder = new TraceRecorder({
+      dir,
+      sessionId: "malformed-event",
+      providerId: "mock",
+      model: "mock-1",
+      cwd: "/repo",
+    });
+    const base = {
+      version: 1,
+      timestamp: "2026-07-09T00:00:00.000Z",
+      sessionId: "malformed-event",
+      providerId: "mock",
+      model: "mock-1",
+      cwd: "/repo",
+      turn: 1,
+    };
+    await recorder.appendRaw(JSON.stringify({
+      ...base,
+      event: {type: "tool_start", call: null, parsedArgs: {}},
+    }));
+    await recorder.appendRaw(JSON.stringify({
+      ...base,
+      event: {type: "turn_end", reason: "done"},
+    }));
+
+    const text = await renderTraceFile(recorder.path);
+
+    expect(text).toContain("[1] invalid_event: tool_start");
+    expect(text).toContain("[1] turn_end: done");
   });
 });

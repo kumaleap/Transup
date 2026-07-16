@@ -113,37 +113,43 @@ export async function renderTraceFile(path: string): Promise<string> {
 }
 
 function formatEvent(event: AgentEvent): string {
-  switch (event.type) {
-    case "text_delta":
-      return `text: ${oneLine(event.text)}`;
-    case "tool_start":
-      return (
-        `tool_start: ${traceField(event.call.name)}(` +
-        `${traceField(event.parsedArgs)})`
-      );
-    case "tool_progress":
-      return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;
-    case "tool_end":
-      return `tool_end: ${traceField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
-    case "usage":
-      return (
-        `usage: input ${traceField(event.usage.inputTokens)} / ` +
-        `output ${traceField(event.usage.outputTokens)}`
-      );
-    case "compact_start":
-      return `compact_start: before ${traceField(event.beforeChars)}`;
-    case "compact_end":
-      return `compact_end: ${event.ok ? "ok" : "failed"} after ${traceField(event.afterChars)}`;
-    case "stream_retry":
-      return (
-        `stream_retry: ${traceField(event.attempt)}/` +
-        `${traceField(event.maxAttempts)} ${oneLine(event.error)}`
-      );
-    case "auto_continue":
-      return `auto_continue: ${traceField(event.reason)}`;
-    case "turn_end":
-      return `turn_end: ${traceField(event.reason)}`;
+  try {
+    switch (event.type) {
+      case "text_delta":
+        return `text: ${oneLine(event.text)}`;
+      case "tool_start":
+        return (
+          `tool_start: ${traceField(event.call.name)}(` +
+          `${traceField(event.parsedArgs)})`
+        );
+      case "tool_progress":
+        return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;
+      case "tool_end":
+        return `tool_end: ${traceField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
+      case "usage":
+        return (
+          `usage: input ${traceField(event.usage.inputTokens)} / ` +
+          `output ${traceField(event.usage.outputTokens)}`
+        );
+      case "compact_start":
+        return `compact_start: before ${traceField(event.beforeChars)}`;
+      case "compact_end":
+        return `compact_end: ${event.ok ? "ok" : "failed"} after ${traceField(event.afterChars)}`;
+      case "stream_retry":
+        return (
+          `stream_retry: ${traceField(event.attempt)}/` +
+          `${traceField(event.maxAttempts)} ${oneLine(event.error)}`
+        );
+      case "auto_continue":
+        return `auto_continue: ${traceField(event.reason)}`;
+      case "turn_end":
+        return `turn_end: ${traceField(event.reason)}`;
+    }
+  } catch {
+    // Persisted JSONL is an untyped boundary; one malformed row must not stop replay.
   }
+  const type = (event as {type?: unknown} | null | undefined)?.type ?? "unknown";
+  return `invalid_event: ${traceField(type)}`;
 }
 
 function oneLine(text: string): string {
