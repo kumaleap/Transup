@@ -69,11 +69,6 @@ export class ToolRegistry {
     return this.map.get(name)?.readOnly ?? false;
   }
 
-  /** 已进入不可取消提交阶段的工具，中断后仍需等待真实结果。 */
-  commitsOnAbort(name: string): boolean {
-    return this.map.get(name)?.commitOnAbort ?? false;
-  }
-
   /** 转成 provider 中立的工具声明（zod → JSON Schema；外部工具用自带的） */
   specs(): ToolSpec[] {
     return [...this.map.values()].map((t) => ({
@@ -90,6 +85,7 @@ export class ToolRegistry {
     canUse: PermissionFn,
     onProgress?: (chunk: string) => void,
     signal?: AbortSignal,
+    onCommitStart?: () => void,
   ): Promise<ToolResult> {
     const fail = (content: string): ToolResult => ({ toolCallId, content, isError: true });
     const interrupted = (note = ""): ToolResult => fail(`工具执行已被用户中断。${note}`);
@@ -144,7 +140,7 @@ export class ToolRegistry {
     const note = decision.feedback ? `\n\n[用户附言] ${decision.feedback}` : "";
     if (signal?.aborted) return interrupted(note);
     try {
-      const result = await tool.execute(finalArgs, onProgress, signal);
+      const result = await tool.execute(finalArgs, onProgress, signal, onCommitStart);
       return { toolCallId, content: (result || "(无输出)") + note, isError: false };
     } catch (error) {
       if (signal?.aborted && isAbortFailure(error, signal)) return interrupted(note);

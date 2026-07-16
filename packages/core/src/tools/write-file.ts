@@ -16,12 +16,11 @@ export const writeFileTool: Tool<typeof schema> = {
   description: "创建新文件或完整覆盖已有文件。修改已有文件请优先用 edit_file。",
   schema,
   readOnly: false,
-  commitOnAbort: true,
-  async execute({ path, content }, _onProgress, signal) {
+  async execute({ path, content }, _onProgress, signal, beginCommit) {
     signal?.throwIfAborted();
+    // Recursive mkdir is the first mutation; after this boundary, finish mkdir and write together.
+    beginCommit?.();
     await mkdir(dirname(path), { recursive: true });
-    signal?.throwIfAborted();
-    // writeFile cancellation can leave a truncated partial file; once started, let the write commit.
     await writeFile(path, content, "utf-8");
     return `已写入 ${path}（${content.split("\n").length} 行）`;
   },

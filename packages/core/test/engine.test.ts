@@ -6,7 +6,7 @@
  * transcript 一致性）。
  */
 import { describe, it, expect } from "vitest";
-import { mkdtemp } from "node:fs/promises";
+import { access, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -441,6 +441,123 @@ describe("AgentEngine 主循环", () => {
     expect(provider.calls).toHaveLength(1);
   });
 
+  it("abort does not wait for write_file while its permission decision is pending", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-permission-abort-"));
+    const target = join(dir, "must-not-write.txt");
+    let markPermissionStarted!: () => void;
+    const permissionStarted = new Promise<void>((resolve) => {
+      markPermissionStarted = resolve;
+    });
+    let releasePermission!: () => void;
+    const permissionGate = new Promise<void>((resolve) => {
+      releasePermission = resolve;
+    });
+    const call = {
+      id: "pending-write-permission",
+      name: "write_file",
+      args: JSON.stringify({ path: target, content: "must not be written" }),
+    };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [call] },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, {
+      canUseTool: async () => {
+        markPermissionStarted();
+        await permissionGate;
+        return { behavior: "allow" as const };
+      },
+    });
+    const controller = new AbortController();
+    const turn = collect(engine.runTurn("request a write", controller.signal));
+
+    await permissionStarted;
+    controller.abort();
+    try {
+      const outcome = await Promise.race([
+        turn,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 250)),
+      ]);
+
+      expect(outcome).not.toBeNull();
+      expect(outcome?.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+      expect(outcome).toContainEqual(expect.objectContaining({
+        type: "tool_end",
+        call,
+        isError: true,
+        content: expect.stringContaining("中断"),
+      }));
+      expect(provider.calls).toHaveLength(1);
+      await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      releasePermission();
+      await turn;
+    }
+  });
+
+  it("abort wins atomically when a tool attempts beginCommit during the grace turn", async () => {
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    let releaseCommitAttempt!: () => void;
+    const commitAttemptGate = new Promise<void>((resolve) => {
+      releaseCommitAttempt = resolve;
+    });
+    let boundaryFailure: unknown;
+    let mutationStarted = false;
+    const lateCommitTool = {
+      name: "late_commit_tool",
+      description: "attempts commit after abort wins",
+      schema: z.object({}),
+      readOnly: false,
+      async execute(
+        _args: object,
+        _onProgress?: (chunk: string) => void,
+        signal?: AbortSignal,
+        beginCommit?: () => void,
+      ) {
+        signal?.addEventListener("abort", () => {
+          setImmediate(releaseCommitAttempt);
+        }, { once: true });
+        markToolStarted();
+        await commitAttemptGate;
+        try {
+          beginCommit?.();
+          mutationStarted = true;
+          return "late mutation completed";
+        } catch (error) {
+          boundaryFailure = error;
+          throw error;
+        }
+      },
+    };
+    const call = { id: "late-commit-1", name: lateCommitTool.name, args: "{}" };
+    const provider = new MockProvider([
+      { content: "", toolCalls: [call] },
+      { content: "must not run" },
+    ]);
+    const engine = await makeEngine(provider, { tools: [lateCommitTool] });
+    const controller = new AbortController();
+    const abortReason = new Error("abort won before commit");
+
+    const turn = collect(engine.runTurn("run late commit", controller.signal));
+    await toolStarted;
+    controller.abort(abortReason);
+    const events = await turn;
+
+    expect.soft(boundaryFailure).toBe(abortReason);
+    expect.soft(mutationStarted).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool_end",
+      call,
+      content: expect.stringContaining("中断"),
+      isError: true,
+    }));
+    expect(events.at(-1)).toEqual({ type: "turn_end", reason: "aborted" });
+    expect(provider.calls).toHaveLength(1);
+  });
+
   it("abort waits for a tool that has entered a commit-wins operation", async () => {
     let markToolStarted!: () => void;
     const toolStarted = new Promise<void>((resolve) => {
@@ -455,10 +572,17 @@ describe("AgentEngine 主循环", () => {
       description: "must finish an in-flight commit",
       schema: z.object({}),
       readOnly: false,
-      commitOnAbort: true,
-      async execute() {
+      async execute(
+        _args: object,
+        _onProgress?: (chunk: string) => void,
+        signal?: AbortSignal,
+        beginCommit?: () => void,
+      ) {
+        signal?.throwIfAborted();
+        beginCommit?.();
         markToolStarted();
         await commitGate;
+        beginCommit?.();
         return "commit completed";
       },
     };

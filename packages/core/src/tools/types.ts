@@ -21,18 +21,19 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   parameters?: Record<string, unknown>;
   /** true = 不修改任何状态，可免确认执行 */
   readOnly: boolean;
-  /** true = 副作用一旦开始必须等它提交完，abort 不能把真实结果留在后台 */
-  commitOnAbort?: boolean;
   /**
    * 约定：返回字符串（给模型看）；抛异常 = 失败，错误信息也会喂回模型。
    * onProgress：长任务（如 bash）可在执行中吐出增量输出，供 UI 实时显示；
    * signal：宿主取消当前 turn 时向已启动工具传播，工具应尽快停止副作用并收尾；
+   * beginCommit：必须在首个不可取消 mutation 前立即调用；若 abort 已胜出会抛出，
+   * 工具不得吞掉该错误后继续 mutation；调用成功后 abort 必须等待真实结果；
    * 最终返回值仍是完整结果 —— 进度只给人看，结果才给模型看。
    */
   execute: (
     args: z.infer<S>,
     onProgress?: (chunk: string) => void,
     signal?: AbortSignal,
+    beginCommit?: () => void,
   ) => Promise<string>;
 }
 

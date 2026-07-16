@@ -45,6 +45,7 @@ interface ProgressChannel {
 interface RunningTool {
   result: Promise<ToolResult>;
   channel: ProgressChannel;
+  execution: { commitStarted: boolean };
 }
 
 function openChannel(result: Promise<ToolResult>): ProgressChannel {
@@ -78,34 +79,62 @@ async function* drainChannel(
   call: ToolCall,
   channel: ProgressChannel,
   signal?: AbortSignal,
+  mustFinish: () => boolean = () => false,
 ): AsyncGenerator<AgentEvent, boolean> {
   while (!channel.settled || channel.queue.length > 0) {
     if (channel.queue.length > 0) {
       yield { type: "tool_progress", call, chunk: channel.queue.shift()! };
     } else {
-      if (signal?.aborted) {
+      if (signal?.aborted && !mustFinish()) {
         await nextEventLoopTurn();
         while (channel.queue.length > 0) {
           yield { type: "tool_progress", call, chunk: channel.queue.shift()! };
         }
+        if (mustFinish()) continue;
         return channel.settled;
       }
+      const waitSignal = signal?.aborted && mustFinish() ? undefined : signal;
       await new Promise<void>((resolve) => {
         let resolved = false;
         const wake = () => {
           if (resolved) return;
           resolved = true;
-          signal?.removeEventListener("abort", wake);
+          waitSignal?.removeEventListener("abort", wake);
           resolve();
         };
         channel.wake = wake;
-        signal?.addEventListener("abort", wake, { once: true });
-        if (signal?.aborted) wake();
+        waitSignal?.addEventListener("abort", wake, { once: true });
+        if (waitSignal?.aborted) wake();
       });
       channel.wake = null;
     }
   }
   return true;
+}
+
+function startTool(
+  ctx: ToolRunContext,
+  call: ToolCall,
+  signal?: AbortSignal,
+): RunningTool {
+  let channel: ProgressChannel | null = null;
+  const execution = { commitStarted: false };
+  const result = ctx.registry.execute(
+    call.id,
+    call.name,
+    call.args,
+    ctx.canUseTool,
+    (chunk) => enqueueProgress(channel, chunk),
+    signal,
+    () => {
+      if (execution.commitStarted) return;
+      signal?.throwIfAborted();
+      execution.commitStarted = true;
+      channel?.wake?.();
+    },
+  );
+  channel = openChannel(result);
+  return { result, channel, execution };
 }
 
 function interruptedResult(call: ToolCall): ToolResult {
@@ -148,17 +177,7 @@ export async function* executeToolBatch(
   let observedAbort = false;
   for (const call of toolCalls) {
     if (ctx.registry.isReadOnly(call.name)) {
-      let channel: ProgressChannel | null = null;
-      const result = ctx.registry.execute(
-        call.id,
-        call.name,
-        call.args,
-        ctx.canUseTool,
-        (chunk) => enqueueProgress(channel, chunk),
-        signal,
-      );
-      channel = openChannel(result);
-      started.set(call.id, { result, channel });
+      started.set(call.id, startTool(ctx, call, signal));
     }
   }
 
@@ -171,12 +190,12 @@ export async function* executeToolBatch(
         await letStartedToolsObserveAbort(started);
       }
       const running = started.get(call.id);
-      const mustFinish = ctx.registry.commitsOnAbort(call.name);
+      const mustFinish = running?.execution.commitStarted ?? false;
       if (running && (running.channel.settled || mustFinish)) {
         let parsedArgs: Record<string, unknown> = {};
         try { parsedArgs = JSON.parse(call.args || "{}"); } catch {}
         yield { type: "tool_start", call, parsedArgs };
-        yield* drainChannel(call, running.channel, mustFinish ? undefined : signal);
+        yield* drainChannel(call, running.channel, signal, () => running.execution.commitStarted);
         closeChannel(running.channel);
         const result = await running.result;
         if (call.name === "read_file" && typeof parsedArgs.path === "string" && !result.isError) {
@@ -199,22 +218,13 @@ export async function* executeToolBatch(
     // 写 → 现在才串行执行（权限门在里面），进度全程实时。
     let running = started.get(call.id);
     if (!running) {
-      let channel: ProgressChannel | null = null;
-      const result = ctx.registry.execute(
-        call.id,
-        call.name,
-        call.args,
-        ctx.canUseTool,
-        (chunk) => enqueueProgress(channel, chunk),
-        signal,
-      );
-      channel = openChannel(result);
-      running = { result, channel };
+      running = startTool(ctx, call, signal);
     }
     const settled = yield* drainChannel(
       call,
       running.channel,
-      ctx.registry.commitsOnAbort(call.name) ? undefined : signal,
+      signal,
+      () => running.execution.commitStarted,
     );
     if (!settled) {
       closeChannel(running.channel);

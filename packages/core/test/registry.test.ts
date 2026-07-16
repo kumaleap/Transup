@@ -5,12 +5,13 @@
  * 这里逐个验证每一道关卡。
  */
 import { describe, it, expect, vi } from "vitest";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { Tool } from "../src/tools/types.js";
+import { writeFileTool } from "../src/tools/write-file.js";
 
 const allow = async () => ({ behavior: "allow" as const });
 const deny = async () => ({ behavior: "deny" as const });
@@ -209,6 +210,25 @@ describe("工具执行管线", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("disk full");
     expect(result.content).not.toContain("用户中断");
+  });
+
+  it("write_file declares commit before creating a missing parent directory", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "transup-write-boundary-"));
+    const parent = join(dir, "new", "nested");
+    const target = join(parent, "file.txt");
+    const sentinel = new Error("commit boundary rejected");
+
+    await expect(
+      writeFileTool.execute(
+        { path: target, content: "must not be written" },
+        undefined,
+        undefined,
+        () => {
+          throw sentinel;
+        },
+      ),
+    ).rejects.toBe(sentinel);
+    await expect(access(parent)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("只读工具也过权限回调（deny 规则才能管到它们），并带 readOnly 标记", async () => {
