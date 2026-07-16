@@ -6,7 +6,7 @@
  *   动态区    正在流式输出的文本 / 运行中的工具（含 bash 实时输出尾巴）
  *   权限对话框（有请求时替换输入框）
  *   输入框    常驻底部
- *   状态栏    模型 · tokens · 上下文水位
+ *   状态栏    模型 · 启动工作区
  *
  * 引擎桥接：runTurn 的 AsyncGenerator 事件流在 useRef 的异步任务里消费，
  * 每个事件映射为 setState；canUseTool 挂起为 Promise，由权限对话框 resolve。
@@ -63,13 +63,14 @@ import type { PermissionOutcome, ToolUseConfirm } from "./permission/types.js";
 import { Layout } from "./Layout.js";
 import { TranscriptScreen } from "./TranscriptScreen.js";
 import { useTerminalStatus } from "./terminal/use-terminal-status.js";
+import { useCursorStyle } from "./terminal/cursor-style.js";
 import { useTerminalNotifications } from "./terminal/use-terminal-notifications.js";
 import type { TerminalWriter } from "./terminal/writer.js";
 import { useStatusLine } from "./use-status-line.js";
 import { formatCostSummary, type UsageTotals } from "./cost-summary.js";
 import { Panel } from "./panel/Panel.js";
 import { usePanelController, type PanelRequest } from "./panel/use-panel-controller.js";
-import { StatusBar, type StatusInfo } from "./StatusBar.js";
+import { StatusBar } from "./StatusBar.js";
 import {
   normalizeKeystroke,
   routeKeystroke,
@@ -98,6 +99,8 @@ export interface AppProps {
   /** 最近文件检查点；恢复已压缩会话后继续用于下一次重注入。 */
   initialRecentFiles?: string[];
   mcpToolCount: number;
+  /** 用户最初执行 transup 的工作区。 */
+  cwd: string;
   /** 显示在首屏横幅上的版本号（入口从 package.json 读出传入） */
   version?: string;
   trace?: {
@@ -127,7 +130,8 @@ const HELP = `命令：
   exit / quit    退出
 输入技巧：
   @路径          引用文件，内容自动附加到消息（如 "解释 @src/index.ts"）
-  Ctrl+C         任务运行中按一次中断任务，再按一次退出
+  Esc            中断正在运行的任务
+  Ctrl+C         按两次退出
   Ctrl+O         查看会话全文（工具输出不截断），Ctrl+E 展开全部
   Shift+Tab      循环权限模式（default → accept edits → plan）`;
 
@@ -160,6 +164,7 @@ interface ActiveTool {
 const TAIL_LINES = 6;
 
 export function App(props: AppProps) {
+  const cwd = props.cwd;
   const { exit } = useApp();
   const appRootRef = useRef<DOMElement | null>(null);
   const inputAreaRef = useRef<DOMElement | null>(null);
@@ -222,16 +227,7 @@ export function App(props: AppProps) {
   // 心跳回调里需要读"是否有活动工具"，state 闭包会过期，用 ref 镜像
   const activeToolRef = useRef<ActiveTool | null>(null);
 
-  const [status, setStatus] = useState<StatusInfo>({
-    providerId: props.provider.id,
-    model: props.provider.model,
-    sessionId: props.initialSessionId,
-    totalInput: 0,
-    totalOutput: 0,
-    cacheRead: 0,
-    contextPercent: 0,
-    mcpToolCount: props.mcpToolCount,
-  });
+  const [contextPercent, setContextPercent] = useState(0);
 
   // Omit 不分配到联合类型的每个成员上，手写分配式版本
   type NewItem = TranscriptItem extends infer T
@@ -435,19 +431,16 @@ export function App(props: AppProps) {
     );
   }
 
-  // ── 首屏横幅（logo + 版本 + 模型/目录/会话/MCP 状态） ─────
+  // ── 首屏横幅（logo + 版本 + 模型/启动目录/MCP 状态） ─────
   useEffect(() => {
     const {percent} = engineRef.current!.contextUsage();
-    setStatus((s) => ({...s, contextPercent: percent}));
+    setContextPercent(percent);
     push({
       kind: "banner",
       info: {
         version: props.version ?? "dev",
-        providerId: props.provider.id,
         model: props.provider.model,
-        sessionId: props.initialSessionId,
-        resumedMessages: props.initialHistory.length,
-        cwd: process.cwd(),
+        cwd,
         mcpToolCount: props.mcpToolCount,
       },
     });
@@ -536,7 +529,7 @@ export function App(props: AppProps) {
     props.settings.statusLine,
     () => ({
       model: { id: props.provider.model, display_name: props.provider.model },
-      workspace: { current_dir: process.cwd() },
+      workspace: { current_dir: cwd },
       version: props.version ?? "dev",
       permission_mode: permissionModeRef.current,
       cost: {
@@ -544,16 +537,17 @@ export function App(props: AppProps) {
         total_output_tokens: totals.current.output,
         total_duration_ms: Date.now() - sessionStartAt.current,
       },
-      context_window: { used_percentage: status.contextPercent },
+      context_window: { used_percentage: contextPercent },
     }),
     // 一轮落定（running 翻转）/ 权限模式 / 上下文水位变化时刷新
-    [running, permissionMode, status.contextPercent],
+    [running, permissionMode, contextPercent],
   );
 
-  // ── 终端带外通道：窗口标题 + 进度 + 桌面通知 ──────────────
+  // ── 终端带外通道：窗口标题 + 进度 + 桌面通知 + 光标样式 ──
+  useCursorStyle(props.terminalWrite);
   const activeConfirm = confirmQueue[0] ?? null;
   useTerminalStatus(
-    { busy: running, text: `transup — ${basename(process.cwd())}` },
+    { busy: running, text: `transup — ${basename(cwd)}` },
     props.terminalWrite,
   );
   useTerminalNotifications(
@@ -639,17 +633,20 @@ export function App(props: AppProps) {
     }
     if (!runningRef.current) return inputController.handleGlobalKey(stroke);
 
-    if (controllerRef.current?.signal.aborted) {
-      abortExitArmedRef.current = true;
-      inputController.requestExit();
-      return true;
-    }
+    // 运行中 Ctrl+C 只负责退出（中断任务交给 Esc），双击确认防误触
+    info("⚠ 再按一次 Ctrl+C 退出（中断任务按 Esc）", "yellow");
+    abortExitArmedRef.current = true;
+    return true;
+  };
+
+  // Esc 中断运行中的任务。只在编辑器上下文触发：权限弹窗（拒绝）、
+  // 面板（关闭）、全文屏（返回）、历史搜索（取消）各自消费 Esc。
+  const interruptTask = (): void => {
+    if (controllerRef.current?.signal.aborted) return; // 已在中断中
     // 权限对话框挂起时引擎在等 canUseTool —— 先替用户答"否"
     rejectAllConfirms();
-    info("⚠ 正在中断当前任务…（再按一次 Ctrl+C 退出）", "yellow");
-    abortExitArmedRef.current = true;
+    info("⚠ 正在中断当前任务…", "yellow");
     controllerRef.current?.abort();
-    return true;
   };
 
   const cyclePermissionMode = () => {
@@ -708,6 +705,10 @@ export function App(props: AppProps) {
           cyclePermissionMode();
           return true;
         }
+        if (editorStroke.name === "escape" && runningRef.current) {
+          interruptTask();
+          return true;
+        }
         return submitPendingRef.current || inputController.handleEditorKey(editorStroke);
       },
     });
@@ -739,7 +740,7 @@ export function App(props: AppProps) {
         resetSessionPermissionState();
         sessionIdRef.current = id;
         engineRef.current = nextEngine;
-        setStatus((s) => ({ ...s, sessionId: id, contextPercent: 0 }));
+        setContextPercent(0);
         info(`已开始新会话 ${id}`, "green");
         return true;
       }
@@ -759,7 +760,7 @@ export function App(props: AppProps) {
           if (!mountedRef.current) return true;
           if (!acted) info("会话还很短，无需压缩");
           const { percent } = engineRef.current!.contextUsage();
-          setStatus((s) => ({ ...s, contextPercent: percent }));
+          setContextPercent(percent);
         } finally {
           const ownsController = controllerRef.current === controller;
           if (ownsController) {
@@ -816,7 +817,7 @@ export function App(props: AppProps) {
                 resetSessionPermissionState();
                 engineRef.current = nextEngine;
                 sessionIdRef.current = sessionId;
-                setStatus((s) => ({ ...s, sessionId, contextPercent: percent }));
+                setContextPercent(percent);
                 info(`已切换到会话 ${sessionId}（${history.length} 条消息）`, "green");
                 if (wasInterrupted(history)) {
                   info(
@@ -989,15 +990,8 @@ export function App(props: AppProps) {
       flushStream();
       setActiveTool(null);
 
-      const t = totals.current;
       const { percent } = engineRef.current!.contextUsage();
-      setStatus((s) => ({
-        ...s,
-        totalInput: t.input,
-        totalOutput: t.output,
-        cacheRead: t.cacheRead,
-        contextPercent: percent,
-      }));
+      setContextPercent(percent);
 
       setCompacting(false);
       setRunning(false);
@@ -1122,10 +1116,13 @@ export function App(props: AppProps) {
         sessionSwitching === null &&
         !panelController.view &&
         (permissionController.view ? null : (
-          // 圆角边框把输入框上下框起来，跟上方记录区在视觉上分隔开
+          // 只保留贴齐终端两侧的上下边线，输入区左右开放。
           <Box
             ref={inputBorderRef}
+            width="100%"
             borderStyle="round"
+            borderLeft={false}
+            borderRight={false}
             borderColor={T.border}
             paddingX={1}
           >
@@ -1149,18 +1146,12 @@ export function App(props: AppProps) {
           <Text dimColor>(shift+tab 循环)</Text>
         </Text>
       )}
-      {/* 事前警告（规格 07 §1.2）：接近压缩触发点时给出倒计时式提示 */}
-      {!transcriptMode && status.contextPercent >= 80 && (
-        <Text color={status.contextPercent >= 95 ? T.danger : T.warn}>
-          ⚠ 上下文已用 {status.contextPercent}%，满 100% 自动压缩 · /compact 可手动压缩
-        </Text>
-      )}
       {statusLineText && (
         <Text dimColor wrap="truncate">
           {statusLineText}
         </Text>
       )}
-      <StatusBar status={status} />
+      <StatusBar model={props.provider.model} cwd={cwd} />
     </>
   );
 

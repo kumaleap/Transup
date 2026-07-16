@@ -169,7 +169,7 @@ describe("TextInput terminal cursor placement", () => {
     );
 
     await vi.waitFor(() =>
-      expect(onContentWidthChange).toHaveBeenLastCalledWith(14),
+      expect(onContentWidthChange).toHaveBeenLastCalledWith(16),
     );
 
     runtimeMocks.currentMetrics = metrics({width: 8});
@@ -204,6 +204,32 @@ describe("TextInput terminal cursor placement", () => {
       x: 41,
       y: 47,
     });
+    instance.unmount();
+  });
+
+  it("真实终端光标可用时不叠加反色软件光标", () => {
+    runtimeMocks.currentMetrics = metrics({width: 8, left: 19, top: 23});
+    const instance = render(
+      <NestedTextInput
+        ancestorMetrics={measuredAncestors()}
+        view={{...activeView, cursor: 7}}
+      />,
+    );
+
+    expect(runtimeMocks.setCursorPosition).toHaveBeenLastCalledWith({
+      x: 41,
+      y: 47,
+    });
+    expect(instance.lastFrame()).not.toContain("\x1b[7m");
+    instance.unmount();
+  });
+
+  it("真实终端光标不可用时保留反色软件光标", () => {
+    runtimeMocks.currentMetrics = metrics({width: 8});
+    const instance = render(<TextInput view={{...activeView, cursor: 7}} />);
+
+    expect(runtimeMocks.setCursorPosition).toHaveBeenLastCalledWith(undefined);
+    expect(instance.lastFrame()).toContain("\x1b[7m");
     instance.unmount();
   });
 

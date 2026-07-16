@@ -18,7 +18,7 @@ import { join } from "node:path";
 import type { Message, Provider, ProviderEvent, Settings, ToolCall } from "@transup/core";
 import { builtinTools, SessionStore } from "@transup/core";
 import * as transupCore from "@transup/core";
-import { App } from "../src/tui/App.js";
+import {App as TransupApp, type AppProps} from "../src/tui/App.js";
 import {RowText, TextInput} from "../src/tui/TextInput.js";
 import {T} from "../src/theme.js";
 import {Box} from "../src/tui/runtime/index.js";
@@ -37,6 +37,11 @@ import {
 } from "../src/tui/input/history-store.js";
 import {pasteMarker} from "../src/tui/input/paste-registry.js";
 import {TextBuffer} from "../src/tui/input/text-buffer.js";
+
+/** 所有测试宿主必须显式给生产 App 一个稳定工作区。 */
+function App(props: Omit<AppProps, "cwd"> & {cwd?: string}) {
+  return <TransupApp {...props} cwd={props.cwd ?? "/workspace/Transup"} />;
+}
 
 /** 每轮回一段文本；可选带工具调用。usage 挂在 message_done 上。 */
 class MockProvider implements Provider {
@@ -550,6 +555,7 @@ function makeAppWithTerminal(
       initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
       initialHistory={[]}
       mcpToolCount={0}
+      cwd="/workspace/terminal-project"
       sessionDir={sessionDir}
       historyPath={newHistoryPath()}
       terminalWrite={terminalWrite}
@@ -568,6 +574,7 @@ function makeApp(provider: Provider, historyPath = newHistoryPath()) {
       initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
       initialHistory={[]}
       mcpToolCount={0}
+      cwd="/workspace/Transup"
       sessionDir={sessionDir}
       historyPath={historyPath}
     />
@@ -733,21 +740,36 @@ describe("TUI", {timeout: 30_000}, () => {
   it("首屏渲染横幅（logo/版本/模型/目录）、输入框和状态栏", async () => {
     const { lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
-    // tagline 逐字符渐变，字符间夹着色码 —— 剥掉 ANSI 再断言原文
+    // 剥掉 ANSI 再断言内容层级
     const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-    expect(frame).toContain("transup vdev"); // 边框标题（未传 version 时兜底 dev）
-    expect(frame).toContain("做极致体验的编程 agent"); // tagline
+    expect(frame).toContain(">_ transup vdev"); // 盒内标题（未传 version 时兜底 dev）
     expect(frame).toContain("test-model"); // 横幅：模型行
-    expect(frame).toContain("会话");
-    expect(frame).toContain("◆ test-model"); // 底部状态栏（模型 + 主题标记）
+    expect(frame).toContain("/workspace/Transup");
+    expect(frame).toContain("◆ test-model · /workspace/Transup");
     expect(frame).toContain("❯");
-    expect(frame).toContain("上下文");
-    expect(frame).toContain("▱"); // 上下文水位仪表条
+    expect(frame).not.toContain("会话");
+    expect(frame).not.toContain("· mock");
+    expect(frame).not.toContain("上下文");
+    expect(frame).not.toMatch(/[↑↓▰▱]/);
     expect(/[╭╮╰╯]/.test(frame)).toBe(true); // 输入框圆角边框
     unmount();
   });
 
-  it("恢复大历史时首屏同步真实上下文警告且不调用 provider", async () => {
+  it("输入框只保留与终端等宽的上下边线", async () => {
+    const {lastFrame, unmount} = render(makeApp(new MockProvider([])));
+    await flush();
+    const lines = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "").split("\n");
+    const promptLine = lines.findIndex((line) => line.includes("❯"));
+    expect(promptLine).toBeGreaterThan(0);
+    expect(lines[promptLine - 1]).toMatch(/^─+$/);
+    expect(lines[promptLine]).not.toMatch(/[│╭╮╰╯]/);
+    expect(lines[promptLine + 1]).toMatch(/^─+$/);
+    expect(lines[promptLine - 1]).toHaveLength(100);
+    expect(lines[promptLine + 1]).toHaveLength(100);
+    unmount();
+  });
+
+  it("恢复大历史时不常驻上下文状态且不调用 provider", async () => {
     const provider = new MockProvider([]);
     const instance = render(
       <App
@@ -769,11 +791,9 @@ describe("TUI", {timeout: 30_000}, () => {
 
     try {
       await flush();
-      await vi.waitFor(() => {
-        const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
-        expect(frame).toMatch(/⚠ 上下文已用 \d+%，满 100% 自动压缩/);
-        expect(frame).toMatch(/上下文 ▰+▱* \d+%/);
-      }, {timeout: 2000});
+      const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+      expect(frame).not.toContain("上下文已用");
+      expect(frame).not.toMatch(/上下文 [▰▱]+ \d+%/);
       expect(provider.streamCalls).toBe(0);
     } finally {
       instance.unmount();
@@ -1590,7 +1610,30 @@ describe("TUI", {timeout: 30_000}, () => {
     instance.unmount();
   });
 
-  it("lets a second Ctrl+C exit after an aborted turn has settled", async () => {
+  it("Esc 中断后双击 Ctrl+C 退出", async () => {
+    const instance = render(makeApp(new SlowProvider()));
+    await flush();
+    instance.stdin.write("run");
+    instance.stdin.write("\r");
+    await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
+
+    instance.stdin.write("\x1b"); // Esc 中断（孤立 ESC 由 ink 20ms 后 flush）
+    await vi.waitFor(
+      () => expect(instance.lastFrame()).not.toContain("working…"),
+      {timeout: 10_000},
+    );
+    instance.stdin.write("\x03");
+    await flush(50);
+    instance.stdin.write("\x03");
+    await flush();
+    instance.stdin.write("after exit");
+    await flush();
+
+    expect(instance.lastFrame()).not.toContain("after exit");
+    instance.unmount();
+  });
+
+  it("运行中 Ctrl+C 不中断任务，只武装退出确认", async () => {
     const instance = render(makeApp(new SlowProvider()));
     await flush();
     instance.stdin.write("run");
@@ -1598,16 +1641,11 @@ describe("TUI", {timeout: 30_000}, () => {
     await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
     instance.stdin.write("\x03");
-    await vi.waitFor(
-      () => expect(instance.lastFrame()).not.toContain("working…"),
-      {timeout: 10_000},
-    );
-    instance.stdin.write("\x03");
-    await flush();
-    instance.stdin.write("after exit");
-    await flush();
-
-    expect(instance.lastFrame()).not.toContain("after exit");
+    await flush(50);
+    const frame = instance.lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("再按一次 Ctrl+C 退出");
+    expect(frame).toContain("working…"); // 任务没有被中断
+    expect(frame).not.toContain("已中断");
     instance.unmount();
   });
 
@@ -1618,7 +1656,7 @@ describe("TUI", {timeout: 30_000}, () => {
     instance.stdin.write("\r");
     await vi.waitFor(() => expect(instance.lastFrame()).toContain("working…"), {timeout: 10_000});
 
-    instance.stdin.write("\x03");
+    instance.stdin.write("\x1b"); // Esc 中断
     await vi.waitFor(
       () => expect(instance.lastFrame()).not.toContain("working…"),
       {timeout: 10_000},
@@ -1662,7 +1700,7 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("输入任务 → mock 回复渲染进记录，状态栏累计 tokens", async () => {
+  it("输入任务完成后默认状态栏仍只显示模型和工作区", async () => {
     const { stdin, lastFrame, unmount } = render(
       makeApp(new MockProvider([{ content: "你好，这是回复" }])),
     );
@@ -1677,7 +1715,8 @@ describe("TUI", {timeout: 30_000}, () => {
     const frame = lastFrame()!;
     expect(frame).toContain("测试一下");
     expect(frame).toContain("你好，这是回复");
-    expect(frame).toContain("↑10"); // 状态栏 tokens
+    expect(frame).toContain("◆ test-model · /workspace/Transup");
+    expect(frame).not.toMatch(/[↑↓▰▱]/);
     unmount();
   });
 
@@ -2386,7 +2425,7 @@ describe("TUI", {timeout: 30_000}, () => {
         {timeout: 10_000},
       );
       const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
-      expect(frame).toMatch(/[·✢*✳✶✻✽] Thinking…/); // 帧符号（2 列）+ 动词 + U+2026
+      expect(frame).toMatch(/[∙•●] Thinking…/); // 呼吸帧（1 列）+ 动词 + U+2026
       expect(frame).not.toContain("↑1.2k"); // 30s 门槛前不显示实时 tokens
       expect(frame).not.toMatch(/\(\d+s/); // 也没有耗时括号段
       expect(frame).toContain("working…"); // 输入框运行态英文占位不变
@@ -2553,7 +2592,7 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("first Ctrl+C keeps the live interruption record while App remains mounted", async () => {
+  it("Esc keeps the live interruption record while App remains mounted", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-live-abort-"));
     const sessionId = "live-abort";
     const onExitStats = vi.fn();
@@ -2581,7 +2620,7 @@ describe("TUI", {timeout: 30_000}, () => {
         {timeout: 10_000},
       );
       expect(instance.lastFrame()).not.toContain("后半"); // 中断前半行仍被隐藏
-      instance.stdin.write("\x03");
+      instance.stdin.write("\x1b"); // Esc 中断
       await vi.waitFor(
         () => expect(instance.lastFrame()).toContain("已中断 · 接下来要我做什么?"),
         {timeout: 10_000},
@@ -2656,7 +2695,7 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("终端标题与进度：空闲 ✳、运行中 ⠂ + OSC 9;4 转圈", async () => {
+  it("终端标题与进度：空闲 ●、运行中 ⠂ + OSC 9;4 转圈", async () => {
     const writes: string[] = [];
     const { stdin, unmount } = render(
       makeAppWithTerminal(new SlowProvider(), (s) => writes.push(s), {
@@ -2664,18 +2703,25 @@ describe("TUI", {timeout: 30_000}, () => {
       }),
     );
     await flush();
-    expect(writes.some((w) => w.includes("\x1b]0;✳ transup — "))).toBe(true);
+    expect(writes.some((w) => w.includes("\x1b]0;● transup — terminal-project"))).toBe(true);
     expect(writes.some((w) => w === "\x1b]9;4;0;0\x07")).toBe(true); // 空闲：进度清零
+    expect(writes).toContain("\x1b[1 q"); // 挂载即把光标设为闪烁块（DECSCUSR 1）
 
     writes.length = 0;
     stdin.write("hi");
     stdin.write("\r");
     await vi.waitFor(
-      () => expect(writes.some((w) => w.includes("\x1b]0;⠂ transup — "))).toBe(true),
+      () =>
+        expect(
+          writes.some((w) => w.includes("\x1b]0;⠂ transup — terminal-project")),
+        ).toBe(true),
       { timeout: 2000 },
     );
     expect(writes.some((w) => w === "\x1b]9;4;3;0\x07")).toBe(true); // 运行中：转圈
+
+    writes.length = 0;
     unmount();
+    expect(writes).toContain("\x1b[0 q"); // 卸载时还原终端默认光标样式
   });
 
   it("权限弹窗挂起超阈值 → 发桌面通知", async () => {
@@ -3125,12 +3171,13 @@ describe("TUI", {timeout: 30_000}, () => {
         tools={builtinTools}
         settings={{
           statusLine: {
-            command: `node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log('SL:'+JSON.parse(d).model.id))"`,
+            command: `node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log('SL:'+j.model.id+'·'+j.workspace.current_dir)})"`,
           },
         }}
         initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
         initialHistory={[]}
         mcpToolCount={0}
+        cwd="/workspace/status-line-project"
         sessionDir={sessionDir}
         historyPath={newHistoryPath()}
       />,
@@ -3139,7 +3186,10 @@ describe("TUI", {timeout: 30_000}, () => {
     stdin.write("hi");
     stdin.write("\r");
     // 一轮结束（running 翻转）触发刷新：300ms debounce + 命令执行
-    await vi.waitFor(() => expect(lastFrame()).toContain("SL:test-model"), { timeout: 4000 });
+    await vi.waitFor(
+      () => expect(lastFrame()).toContain("SL:test-model·/workspace/status-line-project"),
+      { timeout: 4000 },
+    );
     unmount();
   });
 
@@ -3172,9 +3222,9 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("压缩三段式：事前警告行 → 压缩 → ✻ 摘要卡，Ctrl+O 展开摘要正文", async () => {
+  it("自动压缩 → ✻ 摘要卡，Ctrl+O 展开摘要正文", async () => {
     const provider = new MockProvider([
-      // 第 1 轮：长回复把上下文撑到警告区（不到 100%）
+      // 第 1 轮：长回复把上下文撑到接近阈值（不到 100%）
       { content: "先干活。" + "x".repeat(2000) },
       // 第 2 轮提交后超预算 → 该次调用被 compact 拿去生成摘要
       { content: "摘要：之前在处理任务 A，已完成第一步，接下来做第二步。" },
@@ -3198,14 +3248,11 @@ describe("TUI", {timeout: 30_000}, () => {
     await flush();
     stdin.write("第一轮");
     stdin.write("\r");
-    // 事前警告：一轮结束、水位刷新后出现（等它而不是等回复文本 —— setStatus 在收尾时才跑）
     await vi.waitFor(
-      () =>
-        expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(
-          /上下文已用 \d+%，满 100% 自动压缩/,
-        ),
+      () => expect(lastFrame()).toContain("先干活。"),
       { timeout: 3000 },
     );
+    expect(lastFrame()).not.toContain("上下文已用");
 
     // 第二轮输入足够长，确定性越过 3000 阈值触发压缩
     stdin.write("第二轮" + "y".repeat(500));
@@ -3256,13 +3303,14 @@ describe("TUI", {timeout: 30_000}, () => {
         timeout: 2000,
       });
 
-      instance.stdin.write("\x03");
-      await flush(20);
+      instance.stdin.write("\x1b"); // Esc 中断
+      await vi.waitFor(() => expect(provider.signals[0]?.aborted).toBe(true), {
+        timeout: 2000,
+      });
       provider.rejectAfterAbort();
       await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("working"), {
         timeout: 2000,
       });
-      expect(provider.signals[0]?.aborted).toBe(true);
 
       instance.stdin.write("/clear");
       instance.stdin.write("\r");
@@ -3284,7 +3332,7 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   });
 
-  it("manual /compact uses first Ctrl+C to cancel and second Ctrl+C to exit", async () => {
+  it("manual /compact uses Esc to cancel and double Ctrl+C to exit", async () => {
     const provider = new RejectingManualCompactProvider();
     const onExitStats = vi.fn();
     const instance = render(
@@ -3316,17 +3364,20 @@ describe("TUI", {timeout: 30_000}, () => {
         timeout: 2000,
       });
 
-      instance.stdin.write("\x03");
-      await flush(20);
+      instance.stdin.write("\x1b"); // Esc 中断
+      await vi.waitFor(() => expect(provider.signals[0]?.aborted).toBe(true), {
+        timeout: 2000,
+      });
       provider.rejectAfterAbort();
       await vi.waitFor(() => expect(instance.lastFrame()).not.toContain("Compacting"), {
         timeout: 2000,
       });
 
-      expect(provider.signals[0]?.aborted).toBe(true);
       expect(instance.lastFrame()).not.toContain("压缩失败，已退回截断策略");
       expect(onExitStats).not.toHaveBeenCalled();
 
+      instance.stdin.write("\x03");
+      await flush(50);
       instance.stdin.write("\x03");
       await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
     } finally {
@@ -3505,7 +3556,7 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   });
 
-  it("aborting the active turn after a persistent allow resolves prevents permission updates", async () => {
+  it("权限弹窗打开时 Esc 是拒绝而非中断任务", async () => {
     const dir = mkdtempSync(join(tmpdir(), "transup-tui-permission-allow-abort-"));
     const target = join(dir, "must-not-run").replace(/\\/g, "/");
     const command = `touch ${JSON.stringify(target)}`;
@@ -3546,16 +3597,18 @@ describe("TUI", {timeout: 30_000}, () => {
         timeout: 3000,
       });
 
-      // Both writes are synchronous: Ctrl+C aborts the owning controller before
-      // canUseTool resumes from the already-resolved permission Promise.
-      instance.stdin.write("2");
-      instance.stdin.write("\x03");
+      // 弹窗上下文自己消费 Esc（= 拒绝），不会触发全局中断；
+      // 引擎拿到 deny 后继续走后续轮次而不是被 abort。
+      instance.stdin.write("\x1b");
       await turn.finished;
 
-      expect(turn.signal()?.aborted).toBe(true);
+      expect(turn.signal()?.aborted).toBe(false);
       expect(persistSpy).not.toHaveBeenCalled();
       expect(existsSync(target)).toBe(false);
-      expect(provider.streamCalls).toBe(1);
+      await vi.waitFor(
+        () => expect(instance.lastFrame()).toContain("must not continue"),
+        {timeout: 3000},
+      );
     } finally {
       instance.unmount();
       turn.restore();
@@ -3618,8 +3671,10 @@ describe("TUI", {timeout: 30_000}, () => {
       await persistStarted.promise;
       expect(persistSpy).toHaveBeenCalledOnce();
 
-      instance.stdin.write("\x03");
-      expect(turn.signal()?.aborted).toBe(true);
+      instance.stdin.write("\x1b"); // Esc 中断（持久化挂起，任务仍在运行）
+      await vi.waitFor(() => expect(turn.signal()?.aborted).toBe(true), {
+        timeout: 2000,
+      });
       releasePersist.resolve();
       await turn.finished;
       await vi.waitFor(() => {
@@ -3681,12 +3736,14 @@ describe("TUI", {timeout: 30_000}, () => {
       instance.stdin.write("\r");
       await provider.followUpStarted;
 
-      instance.stdin.write("\x03");
+      instance.stdin.write("\x1b"); // Esc 中断
       await vi.waitFor(() => expect(provider.signals[1]?.aborted).toBe(true), {
         timeout: 2000,
       });
       expect(onExitStats).not.toHaveBeenCalled();
 
+      instance.stdin.write("\x03");
+      await flush(50);
       instance.stdin.write("\x03");
       await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
       const summary = String(onExitStats.mock.calls[0]?.[0] ?? "");
@@ -3852,9 +3909,12 @@ describe("TUI", {timeout: 30_000}, () => {
         timeout: 2000,
       });
 
+      instance.stdin.write("\x1b"); // Esc 中断
+      await vi.waitFor(() => expect(provider.signals[0]?.aborted).toBe(true), {
+        timeout: 2000,
+      });
       instance.stdin.write("\x03");
-      await flush(20);
-      expect(provider.signals[0]?.aborted).toBe(true);
+      await flush(50);
       instance.stdin.write("\x03");
       await vi.waitFor(() => expect(onExitStats).toHaveBeenCalledOnce(), {timeout: 2000});
       const frameAfterExit = instance.lastFrame();

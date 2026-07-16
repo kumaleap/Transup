@@ -1,28 +1,47 @@
 import React from "react";
 import { render } from "ink-testing-library";
-import { describe, expect, it } from "vitest";
-import { StatusBar, type StatusInfo } from "../src/tui/StatusBar.js";
+import { describe, expect, it, vi } from "vitest";
+import { StatusBar } from "../src/tui/StatusBar.js";
+import {sanitizeTerminalField} from "../src/terminal-sanitize.js";
+import {Box} from "../src/tui/runtime/index.js";
+
+vi.mock("node:os", async () => {
+  const actual = await vi.importActual<typeof import("node:os")>("node:os");
+  return {...actual, homedir: () => "/Users/kuma"};
+});
 
 const stripSgr = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 
 describe("StatusBar", () => {
-  it("净化 model 和 provider 结构元数据", () => {
-    const status: StatusInfo = {
-      model: "m\x1b]52;c;dmVy\x07\x1b[2J\x9b31m\n\tok",
-      providerId: "p\x1b]52;c;cHJvdmlkZXI=\x07\x1b[2J\x9b31m\n\tok",
-      sessionId: "session",
-      totalInput: 0,
-      totalOutput: 0,
-      cacheRead: 0,
-      contextPercent: 0,
-      mcpToolCount: 0,
-    };
-
-    const instance = render(<StatusBar status={status} />);
+  it("只显示净化后的模型和启动工作区", () => {
+    const model = "m\x1b]52;c;dmVy\x07\x1b[2J\x9b31m\n\tok";
+    expect(sanitizeTerminalField(model)).toBe("m]52;c;dmVy[2J31mok");
+    const instance = render(
+      <StatusBar
+        model={model}
+        cwd="/Users/kuma/workspace/Transup"
+      />,
+    );
     const frame = stripSgr(instance.lastFrame() ?? "");
     expect(frame.replace(/\n/g, "")).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
-    expect(frame).toContain("m]52;c;dmVy[2J31mok");
-    expect(frame).toContain("p]52;c;cHJvdmlkZXI=[2J31mok");
+    expect(frame).toBe("◆ m]52;c;dmVy[2J31mok · ~/workspace/Transup");
+    expect(frame).not.toMatch(/mcp|缓存|上下文|[↑↓▰▱%]/);
+    instance.unmount();
+  });
+
+  it("窄终端把整条 footer 截成一行", () => {
+    const instance = render(
+      <Box width={20}>
+        <StatusBar
+          model="claude-sonnet-4-5-20250929"
+          cwd="/Users/kuma/workspace/Transup"
+        />
+      </Box>,
+    );
+    const frame = stripSgr(instance.lastFrame() ?? "");
+    expect(frame.split("\n")).toHaveLength(1);
+    expect(frame).toHaveLength(20);
+    expect(frame).toContain("…");
     instance.unmount();
   });
 });

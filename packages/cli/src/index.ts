@@ -41,10 +41,12 @@ import { runDogfood } from "./dogfood.js";
 import { ensureProviderConfigured } from "./setup.js";
 import { prepareWorkspaceStartup } from "./workspace-startup.js";
 import { sanitizeTerminalField } from "./highlight.js";
+import { restoreInvocationCwd } from "./invocation-cwd.js";
 
-// 从 cwd 向上逐级找最近的 .env 再加载。
-// 关键：`npm start -w transup` 会把 cwd 切到 packages/cli，直接读 "./.env"
-// 会漏掉仓库根目录的 .env（表现为每次都重新走 setup 引导）。
+// npm workspace scripts 会把 cwd 改到包目录；恢复用户最初执行命令的位置。
+const workspaceCwd = restoreInvocationCwd();
+
+// 从已恢复的启动目录向上逐级找最近的 .env 再加载。
 function loadNearestDotenv(): void {
   let dir = process.cwd();
   for (;;) {
@@ -107,7 +109,7 @@ if (flag("--version") || flag("-v")) {
 
 if (argv[0] === "trust") {
   try {
-    const workspace = await trustWorkspace(process.cwd());
+    const workspace = await trustWorkspace(workspaceCwd);
     console.log(
       `已信任工作区：${sanitizeTerminalField(workspace)}`,
     );
@@ -143,7 +145,10 @@ if ((flag("-p") || flag("--print")) && !headlessPrompt) {
 }
 
 if (argv[0] === "doctor" || flag("--doctor")) {
-  const { settings } = await prepareWorkspaceStartup({ connectMcp: false });
+  const { settings } = await prepareWorkspaceStartup({
+    workspace: workspaceCwd,
+    connectMcp: false,
+  });
   process.exit(await runDoctor({ settings }));
 }
 
@@ -234,8 +239,9 @@ async function resolveSession(): Promise<{ id: string; history: Message[]; recen
 }
 
 const provider = createProvider();
-const projectContext = await buildProjectContext(process.cwd());
+const projectContext = await buildProjectContext(workspaceCwd);
 const { settings, settingsContext, mcp } = await prepareWorkspaceStartup({
+  workspace: workspaceCwd,
   onMcpError: (name, err) => {
     const safeName = sanitizeTerminalField(name);
     const safeMessage = sanitizeTerminalField(err.message);
@@ -248,7 +254,7 @@ const trace = new TraceRecorder({
   sessionId: id,
   providerId: provider.id,
   model: provider.model,
-  cwd: process.cwd(),
+  cwd: workspaceCwd,
 });
 
 if (headlessPrompt) {
@@ -285,6 +291,7 @@ const instance = render(
     initialHistory: history,
     initialRecentFiles: recentFiles,
     mcpToolCount: mcp.tools.length,
+    cwd: workspaceCwd,
     version: VERSION,
     trace,
     onExitStats: (summary) => {

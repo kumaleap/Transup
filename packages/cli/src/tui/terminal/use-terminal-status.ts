@@ -1,7 +1,7 @@
 /**
  * 终端标题与任务进度（规格 05 §3.4）
  *
- * 忙碌时标题前缀在 ⠂/⠐ 两帧间 960ms 轮换，空闲时静态 ✳；
+ * 忙碌时标题前缀在 ⠂/⠐ 两帧间 960ms 轮换，空闲时静态 ●；
  * 同时用 OSC 9;4 让支持的终端（Ghostty / iTerm2 / Windows Terminal）
  * 在标签页上显示任务进行中的指示。
  *
@@ -15,7 +15,7 @@ import { progressSequence, setTitleSequence } from "./osc.js";
 import { defaultTerminalWriter, type TerminalWriter } from "./writer.js";
 
 const BUSY_FRAMES = ["⠂", "⠐"];
-const IDLE_MARK = "✳";
+const IDLE_MARK = "●";
 const FRAME_MS = 960;
 
 export interface TerminalStatus {

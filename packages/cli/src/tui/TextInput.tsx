@@ -9,6 +9,7 @@ import {
   type DOMElement,
 } from "./runtime/index.js";
 import { T } from "../theme.js";
+import { color } from "../ui.js";
 import type {InputViewState} from "./input/use-input-controller.js";
 import {measureText, type VisualRow} from "./input/measured-text.js";
 import {TextBuffer} from "./input/text-buffer.js";
@@ -36,7 +37,8 @@ interface Props {
 
 const PROMPT_WIDTH = 2;
 const CURSOR_RESERVE = 1;
-const OUTER_COLUMNS = 4;
+// 输入容器只有左右 padding；上下边线不占横向列，左右边线已关闭。
+const OUTER_COLUMNS = 2;
 const MIN_ROOT_WIDTH = PROMPT_WIDTH + 2 + CURSOR_RESERVE;
 
 interface RowTextProps {
@@ -61,12 +63,13 @@ export function RowText({buffer, row, showCursor, match}: RowTextProps) {
 
   if (!showCursor) return <Text>{buffer.text.slice(row.start, row.end)}</Text>;
 
+  // 软件光标用自家 ANSI 反白而不是 <Text inverse>：Ink 的色码在非 TTY
+  // 环境会被吞掉（测试里断言不到），自家色码始终输出
   const before = buffer.text.slice(row.start, buffer.cursor);
   if (buffer.cursor === row.end) {
     return (
       <Text>
-        {before}
-        <Text inverse> </Text>
+        {before + color.inverse(" ")}
       </Text>
     );
   }
@@ -74,9 +77,7 @@ export function RowText({buffer, row, showCursor, match}: RowTextProps) {
   const next = buffer.moveRight().cursor;
   return (
     <Text>
-      {before}
-      <Text inverse>{buffer.text.slice(buffer.cursor, next)}</Text>
-      {buffer.text.slice(next, row.end)}
+      {before + color.inverse(buffer.text.slice(buffer.cursor, next)) + buffer.text.slice(next, row.end)}
     </Text>
   );
 }
@@ -143,7 +144,7 @@ export function TextInput({
   if (!view.active) {
     return (
       <Box ref={rootRef} width="100%">
-        <Text dimColor>❯ working… (ctrl+c to interrupt)</Text>
+        <Text dimColor>❯ working… (esc to interrupt)</Text>
       </Box>
     );
   }
@@ -165,7 +166,13 @@ export function TextInput({
           <RowText
             buffer={buffer}
             row={row}
-            showCursor={!view.historySearch && measured.cursor.row === index}
+            // 真实终端光标可用时交给它（原生闪烁）；反白软件光标只做兜底，
+            // 两者叠加会变成一个不闪的实心块
+            showCursor={
+              !view.historySearch &&
+              !showTerminalCursor &&
+              measured.cursor.row === index
+            }
             match={view.historySearch?.match}
           />
         </Box>

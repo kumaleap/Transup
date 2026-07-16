@@ -14,6 +14,7 @@ const codes = {
   green: "\x1b[32m",
   red: "\x1b[31m",
   magenta: "\x1b[35m",
+  inverse: "\x1b[7m",
 };
 
 export const color = {
@@ -26,4 +27,5 @@ export const color = {
   green: (s: string) => `${codes.green}${s}${codes.reset}`,
   red: (s: string) => `${codes.red}${s}${codes.reset}`,
   magenta: (s: string) => `${codes.magenta}${s}${codes.reset}`,
+  inverse: (s: string) => `${codes.inverse}${s}${codes.reset}`,
 };

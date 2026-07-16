@@ -91,11 +91,11 @@ describe("通知频道", () => {
 });
 
 describe("标题动画", () => {
-  it("忙碌时两帧轮换，空闲时静态 ✳", () => {
+  it("忙碌时两帧轮换，空闲时静态 ●", () => {
     const busy = { busy: true, text: "transup — demo" };
     expect(titleFor(busy, 0)).toBe("⠂ transup — demo");
     expect(titleFor(busy, 1)).toBe("⠐ transup — demo");
     expect(titleFor(busy, 2)).toBe("⠂ transup — demo"); // 回环
-    expect(titleFor({ busy: false, text: "transup — demo" }, 7)).toBe("✳ transup — demo");
+    expect(titleFor({ busy: false, text: "transup — demo" }, 7)).toBe("● transup — demo");
   });
 });

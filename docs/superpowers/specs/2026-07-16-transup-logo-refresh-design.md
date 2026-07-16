@@ -85,6 +85,8 @@ Constraints:
   layouts.
 
 The banner title `transup v<version>` and existing product tagline remain.
+Runtime metadata is limited to the model, original invocation workspace, and
+optional MCP tool count. Provider and session identifiers are omitted.
 
 ## Theme Alignment
 
@@ -109,8 +111,9 @@ Automated coverage will verify:
 - All rendered banner lines keep their expected display width in narrow and
   wide layouts.
 - The logo uses the primary paint path and no gradient helper.
-- Existing banner content, including version, tagline, model, directory, and
-  session information, remains present.
+- Existing banner content, including version, tagline, model, original
+  invocation directory, and optional MCP information, remains present.
+- Provider and session identifiers are absent from the banner.
 - Type checking and the relevant CLI test suite pass.
 
 Asset verification will confirm:

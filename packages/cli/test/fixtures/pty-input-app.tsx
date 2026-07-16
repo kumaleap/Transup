@@ -68,7 +68,14 @@ function PtyInputApp() {
   return (
     <Box ref={appRootRef} width="100%" flexDirection="column">
       <Box ref={inputAreaRef} width="100%" flexDirection="column">
-        <Box ref={borderRef} width="100%" borderStyle="round" paddingX={1}>
+        <Box
+          ref={borderRef}
+          width="100%"
+          borderStyle="round"
+          borderLeft={false}
+          borderRight={false}
+          paddingX={1}
+        >
           <TextInput
             view={controller.view}
             ancestorMetrics={{appRoot, inputArea, border}}
