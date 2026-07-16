@@ -107,6 +107,7 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
       );
     case "error":
       return <ResultLine color={T.danger}>{sanitizeTerminalText(item.text)}</ResultLine>;
+    case "context":
     case "info":
     case "banner":
       return null; // 启动横幅与过程提示不是会话内容，全文里省掉
@@ -124,7 +125,9 @@ export function TranscriptScreen({
   items: TranscriptItem[];
   expanded: boolean;
 }) {
-  const content = items.filter((i) => i.kind !== "banner" && i.kind !== "info");
+  const content = items.filter(
+    (i) => i.kind !== "banner" && i.kind !== "info" && i.kind !== "context",
+  );
   const visible = expanded ? content : content.slice(-MAX_ITEMS);
   const hidden = content.length - visible.length;
 

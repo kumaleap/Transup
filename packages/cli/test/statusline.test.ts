@@ -126,6 +126,19 @@ describe("renderContextGrid / renderContextUsage", () => {
     expect(out).toContain("上下文用量");
     expect(out).toContain("m1 · 25k/100k 字符（25%）");
   });
+
+  it("在可信网格着色前净化 hostile model 结构字段", () => {
+    const model = "before\x1b]52;c;ZXZpbA==\x07\x9b31m\n\tafter";
+    const raw = renderContextUsage({chars: 25_000, percent: 25}, model, 44);
+    const plain = strip(raw);
+
+    expect(raw).toContain("\x1b[38;5;");
+    expect(raw).not.toContain("\x1b]52;");
+    expect(plain.replace(/\n/g, "")).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    expect(plain.split("\n")).toHaveLength(7);
+    expect(plain).toContain("before");
+    expect(plain).toContain("after · 25k/100k 字符（25%）");
+  });
 });
 
 describe("formatCostSummary", () => {

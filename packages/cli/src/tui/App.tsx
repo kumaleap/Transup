@@ -66,7 +66,6 @@ import { useTerminalStatus } from "./terminal/use-terminal-status.js";
 import { useTerminalNotifications } from "./terminal/use-terminal-notifications.js";
 import type { TerminalWriter } from "./terminal/writer.js";
 import { useStatusLine } from "./use-status-line.js";
-import { renderContextUsage } from "./context-grid.js";
 import { formatCostSummary, type UsageTotals } from "./cost-summary.js";
 import { Panel } from "./panel/Panel.js";
 import { usePanelController, type PanelRequest } from "./panel/use-panel-controller.js";
@@ -438,6 +437,8 @@ export function App(props: AppProps) {
 
   // ── 首屏横幅（logo + 版本 + 模型/目录/会话/MCP 状态） ─────
   useEffect(() => {
+    const {percent} = engineRef.current!.contextUsage();
+    setStatus((s) => ({...s, contextPercent: percent}));
     push({
       kind: "banner",
       info: {
@@ -481,6 +482,14 @@ export function App(props: AppProps) {
       return true;
     }
     return false;
+  };
+
+  const startActivity = () => {
+    turnStartRef.current = Date.now();
+    liveUsage.current = {input: 0, output: 0};
+    stallTrackerRef.current = createStallTracker();
+    stallIntensityRef.current = 0;
+    setTurnVerb(sampleVerb());
   };
 
   // ── 运行期心跳 ────────────────────────────────────────────
@@ -739,6 +748,7 @@ export function App(props: AppProps) {
         controllerRef.current = controller;
         abortExitArmedRef.current = false;
         runningRef.current = true;
+        startActivity();
         setRunning(true);
         let acted = false;
         try {
@@ -769,7 +779,7 @@ export function App(props: AppProps) {
       }
       case "/context": {
         const usage = engineRef.current!.contextUsage();
-        info(renderContextUsage(usage, props.provider.model, columns));
+        push({kind: "context", usage, model: props.provider.model, columns});
         return true;
       }
       case "/sessions": {
@@ -843,12 +853,7 @@ export function App(props: AppProps) {
     controllerRef.current = controller;
     abortExitArmedRef.current = false;
     runningRef.current = true;
-    turnStartRef.current = Date.now();
-    liveUsage.current = { input: 0, output: 0 };
-    // 每轮一个全新的停滞追踪器与随机动词（turn 内不轮换）
-    stallTrackerRef.current = createStallTracker();
-    stallIntensityRef.current = 0;
-    setTurnVerb(sampleVerb());
+    startActivity();
     setRunning(true);
 
     // 流式文本用 ref 累积（setState 是异步的，flush 时要拿到最新值）

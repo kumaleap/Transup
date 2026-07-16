@@ -308,6 +308,59 @@ class AutomaticCompactAbortProvider implements Provider {
   }
 }
 
+/** Completes one usage-bearing turn, then gates the manual compaction summary. */
+class UsageThenGatedCompactProvider implements Provider {
+  readonly id = "mock";
+  readonly model = "test-model";
+  streamCalls = 0;
+  private releaseSummary!: () => void;
+  private readonly summaryGate = new Promise<void>((resolve) => {
+    this.releaseSummary = resolve;
+  });
+  private markCompactStarted!: () => void;
+  readonly compactStarted = new Promise<void>((resolve) => {
+    this.markCompactStarted = resolve;
+  });
+  private markCompactFinished!: () => void;
+  readonly compactFinished = new Promise<void>((resolve) => {
+    this.markCompactFinished = resolve;
+  });
+
+  release(): void {
+    this.releaseSummary();
+  }
+
+  async *stream(
+    _messages: Message[],
+    tools: Parameters<Provider["stream"]>[1],
+  ): AsyncIterable<ProviderEvent> {
+    this.streamCalls++;
+    if (tools.length > 0) {
+      yield {type: "text_delta", text: "usage-bearing turn complete"};
+      yield {
+        type: "message_done",
+        content: "usage-bearing turn complete",
+        toolCalls: [],
+        usage: {inputTokens: 1200, outputTokens: 340},
+      };
+      return;
+    }
+
+    this.markCompactStarted();
+    try {
+      await this.summaryGate;
+      yield {
+        type: "message_done",
+        content: "manual compact summary",
+        toolCalls: [],
+        usage: {inputTokens: 1, outputTokens: 1},
+      };
+    } finally {
+      this.markCompactFinished();
+    }
+  }
+}
+
 /** Yields usage before the engine can persist its assistant message. */
 class UsageCompletionProvider implements Provider {
   readonly id = "mock";
@@ -692,6 +745,39 @@ describe("TUI", {timeout: 30_000}, () => {
     expect(frame).toContain("▱"); // 上下文水位仪表条
     expect(/[╭╮╰╯]/.test(frame)).toBe(true); // 输入框圆角边框
     unmount();
+  });
+
+  it("恢复大历史时首屏同步真实上下文警告且不调用 provider", async () => {
+    const provider = new MockProvider([]);
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="resumed-context-warning"
+        initialHistory={[
+          {role: "user", content: "u".repeat(1200)},
+          {role: "assistant", content: "a".repeat(1200)},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+        maxContextChars={1000}
+      />,
+    );
+
+    try {
+      await flush();
+      await vi.waitFor(() => {
+        const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+        expect(frame).toMatch(/⚠ 上下文已用 \d+%，满 100% 自动压缩/);
+        expect(frame).toMatch(/上下文 ▰+▱* \d+%/);
+      }, {timeout: 2000});
+      expect(provider.streamCalls).toBe(0);
+    } finally {
+      instance.unmount();
+    }
   });
 
   it("folds official bracketed paste and submits its expanded content synchronously", async () => {
@@ -2345,6 +2431,61 @@ describe("TUI", {timeout: 30_000}, () => {
     }
   }, 20_000);
 
+  it("manual /compact starts with fresh activity time and token state", async () => {
+    const provider = new UsageThenGatedCompactProvider();
+    const instance = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={builtinTools}
+        settings={{}}
+        initialSessionId="manual-compact-fresh-activity"
+        initialHistory={[
+          {role: "user", content: "previous question"},
+          {role: "assistant", content: "previous answer"},
+        ]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    let controlledNow = 0;
+    let nowSpy: ReturnType<typeof vi.spyOn> | undefined;
+    let compactStarted = false;
+
+    try {
+      await flush();
+      instance.stdin.write("complete a measured turn");
+      instance.stdin.write("\r");
+      await vi.waitFor(() => {
+        const frame = instance.lastFrame() ?? "";
+        expect(frame).toContain("usage-bearing turn complete");
+        expect(frame).not.toContain("working…");
+      }, {timeout: 3000});
+
+      controlledNow = Date.now() + 35_000;
+      nowSpy = vi.spyOn(Date, "now").mockImplementation(() => controlledNow);
+      instance.stdin.write("/compact");
+      instance.stdin.write("\r");
+      await provider.compactStarted;
+      compactStarted = true;
+      await vi.waitFor(() => {
+        controlledNow += 100;
+        expect(instance.lastFrame()).toContain("Compacting");
+      }, {timeout: 3000});
+
+      const frame = (instance.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+      const activityLine = frame.split("\n").find((line) => line.includes("Compacting")) ?? "";
+      expect(activityLine).not.toMatch(/\(\d+s/);
+      expect(activityLine).not.toContain("↑1.2k ↓340 tokens");
+    } finally {
+      provider.release();
+      if (compactStarted) await provider.compactFinished;
+      nowSpy?.mockRestore();
+      instance.unmount();
+    }
+  });
+
   it("流式文本按整行上屏，未完成的半行不出现", async () => {
     const provider = new GatedStreamProvider();
     const { stdin, lastFrame, unmount } = render(makeApp(provider));
@@ -2920,12 +3061,8 @@ describe("TUI", {timeout: 30_000}, () => {
         messages: [{ role: "user", content: "目标会话历史" }],
         recentFiles: [],
       });
-    const contextSpy = vi
-      .spyOn(transupCore.AgentEngine.prototype, "contextUsage")
-      .mockImplementationOnce(() => {
-        throw new Error("context failed after load");
-      });
     const provider = new MockProvider([{ content: "好" }]);
+    let contextSpy: ReturnType<typeof vi.spyOn> | undefined;
     const { stdin, lastFrame, unmount } = render(
       <App
         provider={provider}
@@ -2944,6 +3081,11 @@ describe("TUI", {timeout: 30_000}, () => {
       stdin.write("/sessions");
       stdin.write("\r");
       await vi.waitFor(() => expect(lastFrame()).toContain("切换会话"), { timeout: 2000 });
+      contextSpy = vi
+        .spyOn(transupCore.AgentEngine.prototype, "contextUsage")
+        .mockImplementationOnce(() => {
+          throw new Error("context failed after load");
+        });
       stdin.write("1");
       await vi.waitFor(
         () => expect(lastFrame()).toContain("切换会话失败：context failed after load"),
@@ -2969,7 +3111,7 @@ describe("TUI", {timeout: 30_000}, () => {
       );
     } finally {
       unmount();
-      contextSpy.mockRestore();
+      contextSpy?.mockRestore();
       loadSpy.mockRestore();
     }
   });
@@ -3965,16 +4107,32 @@ describe("TUI", {timeout: 30_000}, () => {
     unmount();
   });
 
-  it("/context 显示方块网格与汇总行", async () => {
+  it("/context 保留可信网格 SGR 与布局且不进入 Ctrl+O 会话内容", async () => {
     const { stdin, lastFrame, unmount } = render(makeApp(new MockProvider([])));
     await flush();
     stdin.write("/context");
     stdin.write("\r");
     await flush();
-    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    const raw = lastFrame() ?? "";
+    const frame = raw.replace(/\x1b\[[0-9;]*m/g, "");
+    const gridRows = frame
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[⛁⛶]+$/.test(line));
+
+    expect(frame).not.toMatch(/\[(?:38;5;\d+|0)m/);
+    expect(raw).toContain("\x1b[38;5;239m");
     expect(frame).toContain("上下文用量");
-    expect(frame).toContain("⛶"); // 新会话几乎全空闲
+    expect(gridRows).toHaveLength(5);
+    expect(gridRows.every((line) => line.length >= 10)).toBe(true);
     expect(frame).toMatch(/test-model · .*（\d+%）/);
+
+    stdin.write("\x0f");
+    await flush();
+    const transcript = (lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    expect(transcript).toContain("会话全文（1 条");
+    const transcriptSection = transcript.slice(transcript.lastIndexOf("─ 会话全文"));
+    expect(transcriptSection).not.toContain("上下文用量");
     unmount();
   });
 });

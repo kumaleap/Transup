@@ -14,6 +14,7 @@ import { renderMarkdown, sanitizeTerminalText } from "../highlight.js";
 import { T } from "../theme.js";
 import { Banner, type BannerInfo } from "./Banner.js";
 import { DOT, POINTER, RESULT_MARK } from "./figures.js";
+import { renderContextUsage } from "./context-grid.js";
 
 export { DOT, POINTER } from "./figures.js";
 
@@ -37,6 +38,13 @@ export type TranscriptItem =
   /** 结构化错误（API/系统/命令错误）：⎿ 缩进 + 红色（规格 §1.5） */
   | { id: number; kind: "error"; text: string }
   | { id: number; kind: "info"; text: string; tone: "dim" | "green" | "yellow" | "red" }
+  | {
+      id: number;
+      kind: "context";
+      usage: { chars: number; percent: number };
+      model: string;
+      columns: number;
+    }
   | {
       id: number;
       kind: "compact";
@@ -357,6 +365,12 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
         </Box>
       );
     }
+    case "context":
+      return (
+        <Box>
+          <Text>{renderContextUsage(item.usage, item.model, item.columns)}</Text>
+        </Box>
+      );
     case "compact": {
       // 压缩边界卡：一行低调标记，完整摘要在全文屏（规格 07 §1.2 三段式的"事后"）
       const kb = (n: number) => `${Math.round(n / 1000)}k`;
