@@ -391,3 +391,103 @@ describe("TranscriptItemView", () => {
     expect(frame).not.toContain("()");
   });
 });
+
+describe("tool-group 折叠条目（主屏）", () => {
+  const summary = `Thought for 5s · made ${inline.bold("2")} edits +3 · ran ${inline.bold("1")} shell command`;
+  const children = [
+    {
+      name: "edit_file",
+      displayName: "Update",
+      argSummary: "a.ts",
+      preview: "已修改 a.ts",
+      full: "已修改 a.ts",
+      lineDelta: 3,
+    },
+    {
+      name: "bash",
+      displayName: "bash",
+      argSummary: "npm test",
+      preview: "ok",
+      full: "long hidden detail",
+    },
+  ];
+
+  it("⏺ 2 列 gutter + 摘要行，bold 计数原样透传", () => {
+    const frame = view({ id: 1, kind: "tool-group", summary, children });
+    expect(frame).toContain(`${DOT} Thought for 5s`);
+    expect(frame).toContain(inline.bold("2"));
+    expect(frame).toContain("+3");
+  });
+
+  it("⎿ 提示行：5 列 gutter + Ctrl+O 话术带调用次数", () => {
+    const frame = view({ id: 1, kind: "tool-group", summary, children });
+    const lines = frame.split("\n").filter(Boolean);
+    const hint = lines.find((l) => l.includes("Ctrl+O"));
+    expect(hint).toBeDefined();
+    expect(hint!).toContain("⎿");
+    expect(hint!).toContain("2 次调用详情");
+  });
+
+  it("children 细节不在主屏渲染", () => {
+    const frame = view({ id: 1, kind: "tool-group", summary, children });
+    expect(frame).not.toContain("npm test");
+    expect(frame).not.toContain("long hidden detail");
+    expect(frame).not.toContain("a.ts");
+  });
+});
+
+describe("tool-group 在全文屏（Ctrl+O）摊开 children", () => {
+  const groupItem = {
+    id: 1,
+    kind: "tool-group" as const,
+    summary: "Thought for 5s · made 2 edits",
+    children: [
+      {
+        name: "edit_file",
+        displayName: "Update",
+        argSummary: "a.ts",
+        preview: "已修改 a.ts",
+        full: "已修改 a.ts",
+        lineDelta: 3,
+      },
+      {
+        name: "bash",
+        displayName: "bash",
+        argSummary: "npm test",
+        preview: "ok",
+        full: "line1\nline2\nline3 detail",
+      },
+    ],
+  };
+
+  it("每个 child 按完整工具条目渲染：名称、参数摘要、full 正文", () => {
+    const rendered = render(<TranscriptScreen expanded items={[groupItem]} />);
+    const frame = (rendered.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    rendered.unmount();
+    expect(frame).toContain("会话全文（1 条"); // 组算 1 条会话内容
+    expect(frame).toContain("Update(a.ts)");
+    expect(frame).toContain("bash(npm test)");
+    expect(frame).toContain("line3 detail");
+  });
+
+  it("未展开时每个 child 的输出按 MAX_TOOL_LINES 截断并提示 Ctrl+E", () => {
+    const longChild = {
+      name: "bash",
+      displayName: "bash",
+      argSummary: "make",
+      preview: "ok",
+      full: Array.from({ length: 105 }, (_, i) => `行${i + 1}`).join("\n"),
+    };
+    const rendered = render(
+      <TranscriptScreen
+        expanded={false}
+        items={[{ ...groupItem, children: [...groupItem.children, longChild] }]}
+      />,
+    );
+    const frame = (rendered.lastFrame() ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+    rendered.unmount();
+    expect(frame).toContain("行100");
+    expect(frame).not.toContain("行101");
+    expect(frame).toContain("还有 5 行");
+  });
+});

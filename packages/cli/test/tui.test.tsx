@@ -4195,4 +4195,224 @@ describe("TUI", {timeout: 30_000}, () => {
     expect(transcriptSection).not.toContain("上下文用量");
     unmount();
   });
+
+  // ── 工具调用分组折叠（plan 2026-07-16-tui-tool-group-collapse）──────────
+
+  it("两段文本之间的连续只读工具调用折叠成一行组摘要", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-group-"));
+    const fileA = join(dir, "a.txt").replace(/\\/g, "/");
+    const fileB = join(dir, "b.txt").replace(/\\/g, "/");
+    writeFileSync(fileA, "甲");
+    writeFileSync(fileB, "乙");
+    const provider = new MockProvider([
+      {
+        content: "开始",
+        toolCalls: [
+          { id: "t1", name: "read_file", args: JSON.stringify({ path: fileA }) },
+          { id: "t2", name: "read_file", args: JSON.stringify({ path: fileB }) },
+          { id: "t3", name: "list_dir", args: JSON.stringify({ path: dir }) },
+        ],
+      },
+      { content: "全部读完" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("并读");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("全部读完"), { timeout: 3000 });
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    // 一行组摘要（read/list_dir 分别归类），细节指向 Ctrl+O
+    expect(frame).toContain("read 2 files · searched 1 pattern");
+    expect(frame).toContain("3 次调用详情");
+    // 主屏不再逐条显示工具行与语义摘要
+    expect(frame).not.toContain("Read(");
+    expect(frame).not.toContain("list_dir(");
+    expect(frame).not.toContain("读取 ");
+    // 时序：前文 → 组摘要 → 后文
+    const before = frame.indexOf("开始");
+    const group = frame.indexOf("read 2 files");
+    const after = frame.indexOf("全部读完");
+    expect(before).toBeGreaterThanOrEqual(0);
+    expect(group).toBeGreaterThan(before);
+    expect(after).toBeGreaterThan(group);
+    unmount();
+  });
+
+  it("单个工具调用不折叠，保持逐条显示", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-single-"));
+    const target = join(dir, "solo.txt").replace(/\\/g, "/");
+    writeFileSync(target, "内容");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [{ id: "t1", name: "read_file", args: JSON.stringify({ path: target }) }],
+      },
+      { content: "读完了" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("读一个");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("读完了"), { timeout: 3000 });
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("Read(");
+    expect(frame).toContain("读取 1 行");
+    expect(frame).not.toContain("次调用详情");
+    unmount();
+  });
+
+  it("组中途工具报错：已攒的组先落卡，错误单独成条", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-group-err-"));
+    const fileA = join(dir, "a.txt").replace(/\\/g, "/");
+    const fileB = join(dir, "b.txt").replace(/\\/g, "/");
+    writeFileSync(fileA, "甲");
+    writeFileSync(fileB, "乙");
+    const missing = join(dir, "missing.txt").replace(/\\/g, "/");
+    const provider = new MockProvider([
+      {
+        content: "",
+        toolCalls: [
+          { id: "t1", name: "read_file", args: JSON.stringify({ path: fileA }) },
+          { id: "t2", name: "read_file", args: JSON.stringify({ path: fileB }) },
+          { id: "t3", name: "read_file", args: JSON.stringify({ path: missing }) },
+        ],
+      },
+      { content: "收到" },
+    ]);
+    const { stdin, lastFrame, unmount } = render(makeApp(provider));
+    await flush();
+    stdin.write("读三个");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("收到"), { timeout: 3000 });
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    // 前两个成功的折叠成组
+    expect(frame).toContain("read 2 files");
+    expect(frame).toContain("2 次调用详情");
+    // 报错的第三个单独成条（工具行 + Error 结果）
+    expect(frame).toContain("Read(");
+    expect(frame).toContain("Error");
+    unmount();
+  });
+
+  it("运行中动态区显示进行时摘要；中断时待落卡的组以过去式 flush", async () => {
+    // 慢速 read_file 固件：两个读的耗时错开（只读工具并行执行），
+    // 让"第一个已完成、第二个还在跑"的窗口足够宽
+    const slowRead = {
+      name: "read_file",
+      description: "slow read fixture",
+      schema: z.object({ path: z.string() }),
+      readOnly: true,
+      async execute({ path }: { path: string }) {
+        await new Promise((r) => setTimeout(r, path === "x2" ? 700 : 100));
+        return "内容";
+      },
+    };
+    // 第一轮回工具调用，第二轮挂起等 abort —— 模拟用户中途 Esc
+    class HangAfterToolsProvider implements Provider {
+      readonly id = "mock";
+      readonly model = "test-model";
+      private step = 0;
+      async *stream(
+        _messages?: Message[],
+        _tools?: unknown,
+        signal?: AbortSignal,
+      ): AsyncIterable<ProviderEvent> {
+        if (this.step++ === 0) {
+          yield {
+            type: "message_done",
+            content: "",
+            toolCalls: [
+              { id: "r1", name: "read_file", args: JSON.stringify({ path: "x1" }) },
+              { id: "r2", name: "read_file", args: JSON.stringify({ path: "x2" }) },
+            ],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+          return;
+        }
+        await new Promise<never>((_, reject) => {
+          const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          if (signal?.aborted) return fail();
+          signal?.addEventListener("abort", fail, { once: true });
+        });
+      }
+    }
+    const provider = new HangAfterToolsProvider();
+    const { stdin, lastFrame, unmount } = render(
+      <App
+        provider={provider}
+        projectContext=""
+        tools={[...builtinTools.filter((t) => t.name !== "read_file"), slowRead]}
+        settings={{}}
+        initialSessionId={`tui-test-${Math.random().toString(36).slice(2)}`}
+        initialHistory={[]}
+        mcpToolCount={0}
+        sessionDir={sessionDir}
+        historyPath={newHistoryPath()}
+      />,
+    );
+    await flush();
+    stdin.write("慢读");
+    stdin.write("\r");
+    // r1 已完成、r2 还在跑：动态区出现进行时摘要
+    await vi.waitFor(
+      () => expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toContain("reading 1 file"),
+      { timeout: 3000 },
+    );
+    // 两个都完成、provider 挂起后中断
+    await vi.waitFor(
+      () => expect(lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "")).toContain("reading 2 files"),
+      { timeout: 3000 },
+    );
+    stdin.write("\x1b"); // Esc
+    await vi.waitFor(() => expect(lastFrame()).toContain("已中断"), { timeout: 3000 });
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toContain("read 2 files"); // 过去式落卡
+    expect(frame).toContain("2 次调用详情");
+    unmount();
+  });
+
+  it("组耗时从段边界起算（含模型思考），不是从第一个工具开始", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "transup-tui-group-think-"));
+    const fileA = join(dir, "a.txt").replace(/\\/g, "/");
+    const fileB = join(dir, "b.txt").replace(/\\/g, "/");
+    writeFileSync(fileA, "甲");
+    writeFileSync(fileB, "乙");
+    // 第一轮"思考" 1.1s 才回工具调用；工具本身毫秒级完成。
+    // 若耗时从第一个工具起算则 <1s、无 Thought for 段；从段边界起算则 >=1s。
+    class SlowThinkProvider implements Provider {
+      readonly id = "mock";
+      readonly model = "test-model";
+      private step = 0;
+      async *stream(): AsyncIterable<ProviderEvent> {
+        if (this.step++ === 0) {
+          await new Promise((r) => setTimeout(r, 1100));
+          yield {
+            type: "message_done",
+            content: "",
+            toolCalls: [
+              { id: "t1", name: "read_file", args: JSON.stringify({ path: fileA }) },
+              { id: "t2", name: "read_file", args: JSON.stringify({ path: fileB }) },
+            ],
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+          return;
+        }
+        yield { type: "text_delta", text: "想完了" };
+        yield {
+          type: "message_done",
+          content: "想完了",
+          toolCalls: [],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      }
+    }
+    const { stdin, lastFrame, unmount } = render(makeApp(new SlowThinkProvider()));
+    await flush();
+    stdin.write("想久点");
+    stdin.write("\r");
+    await vi.waitFor(() => expect(lastFrame()).toContain("想完了"), { timeout: 6000 });
+    const frame = lastFrame()!.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(frame).toMatch(/Thought for \d+s · read 2 files/);
+    unmount();
+  });
 });

@@ -81,6 +81,12 @@ import { frameAt } from "./activity/frames.js";
 import { sampleVerb } from "./activity/verbs.js";
 import { statusParts } from "./activity/status-line.js";
 import {
+  editLineDelta,
+  shouldCollapse,
+  summarizeGroup,
+  type ToolGroupEntry,
+} from "./tool-group.js";
+import {
   createStallTracker,
   interpolateColor,
   type StallTracker,
@@ -159,6 +165,8 @@ interface ActiveTool {
   /** bash 等长命令的实时输出（只留尾部几行） */
   tail: string[];
   streamed: boolean;
+  /** 编辑类工具的行数净差（tool_start 时从 parsedArgs 算出，进组摘要的 +N） */
+  lineDelta?: number;
 }
 
 const TAIL_LINES = 6;
@@ -178,6 +186,9 @@ export function App(props: AppProps) {
   const [items, setItems] = useState<TranscriptItem[]>([]);
   const [streamText, setStreamText] = useState("");
   const [activeTool, setActiveTool] = useState<ActiveTool | null>(null);
+  // 本段已完成、还没落卡的工具调用 —— spinner 行实时汇总（进行时），
+  // 段边界（下一段 assistant 文本/turn 结束）折叠成一条 tool-group 落卡
+  const [pendingGroup, setPendingGroup] = useState<ToolGroupEntry[]>([]);
   const [confirmQueue, setConfirmQueue] = useState<ToolUseConfirm[]>([]);
   // 主屏 / 会话全文屏（Ctrl+O）—— 规格 05 §1.2 的"屏幕"就是这么个 state
   const [screen, setScreen] = useState<"prompt" | "transcript">("prompt");
@@ -860,8 +871,46 @@ export function App(props: AppProps) {
     // 流式文本用 ref 累积（setState 是异步的，flush 时要拿到最新值）
     let stream = "";
     let tool: ActiveTool | null = null;
+    // 段边界时间戳：turn 开始/上一段 assistant 文本落卡时打点。
+    // 组摘要的 "Thought for Ns" 从这里起算 —— 含工具调用之间的模型思考。
+    let segmentStart = Date.now();
+    // 本段已完成的成功工具调用，等段边界折叠落卡
+    let groupEntries: ToolGroupEntry[] = [];
+    const flushGroup = () => {
+      if (groupEntries.length === 0) return;
+      const entries = groupEntries;
+      groupEntries = [];
+      setPendingGroup([]);
+      if (!shouldCollapse(entries)) {
+        // 只有 1 条时保持现状逐条显示，避免"组"的仪式感
+        const e = entries[0]!;
+        push({
+          kind: "tool",
+          name: e.displayName,
+          argSummary: e.argSummary,
+          preview: e.preview,
+          full: e.full,
+          isError: false,
+        });
+        return;
+      }
+      push({
+        kind: "tool-group",
+        summary: summarizeGroup({
+          tense: "done",
+          verb: "", // done 形式固定 "Thought for"，不用采样动词
+          elapsedMs: Date.now() - segmentStart,
+          entries,
+        }),
+        children: entries,
+      });
+    };
     const flushStream = () => {
-      if (stream.trim()) push({ kind: "assistant", text: stream.trimEnd() });
+      if (stream.trim()) {
+        flushGroup(); // 组先于其后的文本落卡（保持时序）
+        push({ kind: "assistant", text: stream.trimEnd() });
+        segmentStart = Date.now(); // 新一段从这段文本之后起算
+      }
       stream = "";
       setStreamText("");
     };
@@ -892,7 +941,13 @@ export function App(props: AppProps) {
               ev.call.name,
               ev.parsedArgs,
             );
-            tool = {name: displayName, argSummary, tail: [], streamed: false};
+            tool = {
+              name: displayName,
+              argSummary,
+              tail: [],
+              streamed: false,
+              lineDelta: editLineDelta(ev.call.name, ev.parsedArgs),
+            };
             activeToolRef.current = tool;
             setActiveTool(tool);
             break;
@@ -912,17 +967,33 @@ export function App(props: AppProps) {
           case "tool_end": {
             stallTrackerRef.current?.observeProgress(Date.now());
             const streamed = tool?.streamed ?? false;
-            push({
-              kind: "tool",
-              name: tool?.name ?? ev.call.name,
-              argSummary: tool?.argSummary ?? "",
-              // 错误走规范化（剥标签/补前缀/10 行截断），成功走语义摘要（数字 bold）
-              preview: ev.isError
-                ? formatToolError(ev.content)
-                : summarizeToolResult(ev.call.name, ev.content, streamed),
-              full: sanitizeTerminalText(ev.content), // Ctrl+O 展开的是净化后的完整原文
-              isError: ev.isError,
-            });
+            const displayName = tool?.name ?? ev.call.name;
+            const argSummary = tool?.argSummary ?? "";
+            const full = sanitizeTerminalText(ev.content); // Ctrl+O 展开的是净化后的完整原文
+            if (ev.isError) {
+              // 错误打破分组：已攒的组先落卡，报错的这条单独成条（不被摘要吞掉）
+              flushGroup();
+              push({
+                kind: "tool",
+                name: displayName,
+                argSummary,
+                // 错误走规范化（剥标签/补前缀/10 行截断）
+                preview: formatToolError(ev.content),
+                full,
+                isError: true,
+              });
+            } else {
+              // 成功的调用先进组缓冲，段边界再折叠落卡；语义摘要（数字 bold）留给全屏/单条回退
+              groupEntries.push({
+                name: ev.call.name,
+                displayName,
+                argSummary,
+                preview: summarizeToolResult(ev.call.name, ev.content, streamed),
+                full,
+                lineDelta: tool?.lineDelta,
+              });
+              setPendingGroup([...groupEntries]);
+            }
             tool = null;
             activeToolRef.current = null;
             setActiveTool(null);
@@ -958,15 +1029,19 @@ export function App(props: AppProps) {
           case "compact_start":
           case "compact_end":
             flushStream(); // 保险：压缩边界前把已流出的文本落卡
+            flushGroup(); // 待折叠的组也在压缩边界前落卡
             handleCompactEvent(ev);
             break;
           case "turn_end":
             if (ev.reason === "max_iterations") {
+              flushGroup(); // 组先于错误行落卡（时序）
               pushError("已达到单轮最大迭代次数，强制停止。");
             } else if (ev.reason === "aborted") {
               flushStream();
+              flushGroup();
               info("已中断 · 接下来要我做什么?");
             } else if (ev.reason === "loop_detected") {
+              flushGroup();
               pushError("检测到模型在重复相同的调用（循环空转），已强制停止本轮。");
             }
             break;
@@ -975,6 +1050,7 @@ export function App(props: AppProps) {
     } catch (err: any) {
       if (mountedRef.current) {
         flushStream();
+        flushGroup(); // 组先于错误行落卡
         pushError(`API 错误: ${err.message}`);
       }
     } finally {
@@ -988,6 +1064,7 @@ export function App(props: AppProps) {
       if (!mountedRef.current || !ownsController) return;
 
       flushStream();
+      flushGroup(); // turn 收尾兜底：无后续文本时组在这里落卡
       setActiveTool(null);
 
       const { percent } = engineRef.current!.contextUsage();
@@ -1096,9 +1173,20 @@ export function App(props: AppProps) {
 
           {running && (
             <Box marginTop={1}>
-              {/* 帧符号占 2 列（字符 + 空格）；有 activeTool 时动词行保持不变 */}
+              {/* 帧符号占 2 列（字符 + 空格）；有 activeTool 时动词行保持不变。
+                  本段已完成的工具在这里实时汇总（进行时），落卡时换成过去式 */}
               <Text color={spinnerColor}>
-                {frameAt(elapsedMs)} {compacting ? "Compacting" : turnVerb}…
+                {frameAt(elapsedMs)}{" "}
+                {compacting
+                  ? "Compacting…"
+                  : pendingGroup.length > 0
+                    ? summarizeGroup({
+                        tense: "live",
+                        verb: turnVerb,
+                        elapsedMs: 0,
+                        entries: pendingGroup,
+                      })
+                    : `${turnVerb}…`}
               </Text>
               {spinnerStatus.length > 0 && (
                 <Text dimColor> ({spinnerStatus.join(" · ")})</Text>

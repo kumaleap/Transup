@@ -15,6 +15,7 @@ import { T } from "../theme.js";
 import { Banner, type BannerInfo } from "./Banner.js";
 import { DOT, POINTER, RESULT_MARK } from "./figures.js";
 import { renderContextUsage } from "./context-grid.js";
+import type { ToolGroupEntry } from "./tool-group.js";
 
 export { DOT, POINTER } from "./figures.js";
 
@@ -35,6 +36,12 @@ export type TranscriptItem =
       full?: string;
       isError: boolean;
     }
+  /**
+   * 折叠的工具调用组：两段 assistant 文本之间的连续成功调用。
+   * 主屏只显示 summary 一行 + Ctrl+O 提示；children 在全文屏摊开。
+   * summary 由 summarizeGroup 从已净化输入构造（自带 bold 计数），渲染时原样透传。
+   */
+  | { id: number; kind: "tool-group"; summary: string; children: ToolGroupEntry[] }
   /** 结构化错误（API/系统/命令错误）：⎿ 缩进 + 红色（规格 §1.5） */
   | { id: number; kind: "error"; text: string }
   | { id: number; kind: "info"; text: string; tone: "dim" | "green" | "yellow" | "red" }
@@ -348,6 +355,22 @@ export function TranscriptItemView({ item }: { item: TranscriptItem }) {
               {item.preview}
             </ResultLine>
           )}
+        </Box>
+      );
+    case "tool-group":
+      // 折叠组：绿点 + 摘要一行（summary 自带 bold 计数，原样透传），
+      // 细节不在主屏摊开 —— ⎿ 提示行指向 Ctrl+O 全文屏
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Box>
+            <Box minWidth={2} flexShrink={0}>
+              <Text color={T.success}>{DOT}</Text>
+            </Box>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text>{item.summary}</Text>
+            </Box>
+          </Box>
+          <ResultLine>{`Ctrl+O 查看 ${item.children.length} 次调用详情`}</ResultLine>
         </Box>
       );
     case "error":

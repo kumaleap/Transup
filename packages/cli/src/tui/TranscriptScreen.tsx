@@ -27,6 +27,55 @@ function clampLines(text: string, max: number): { text: string; hidden: number }
   return { text: lines.slice(0, max).join("\n"), hidden: lines.length - max };
 }
 
+/** 完整工具条目：工具名(参数摘要) + 输出正文（未展开时截到 MAX_TOOL_LINES） */
+function FullToolItem({
+  name,
+  argSummary,
+  raw,
+  isError,
+  expanded,
+}: {
+  name: string;
+  argSummary: string;
+  raw: string;
+  isError: boolean;
+  expanded: boolean;
+}) {
+  const { text, hidden } = expanded ? { text: raw, hidden: 0 } : clampLines(raw, MAX_TOOL_LINES);
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box>
+        <Box minWidth={2} flexShrink={0}>
+          <Text color={isError ? T.danger : T.success}>{DOT}</Text>
+        </Box>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text>
+            <Text bold>
+              {sanitizeTerminalText(name, {
+                preserveNewlines: false,
+                preserveTabs: false,
+              })}
+            </Text>
+            {argSummary ? (
+              <Text>
+                ({sanitizeTerminalText(argSummary)})
+              </Text>
+            ) : null}
+          </Text>
+        </Box>
+      </Box>
+      {text && (
+        <Box marginLeft={2} flexDirection="column">
+          <Text dimColor={!isError} color={isError ? T.danger : undefined}>
+            {text}
+          </Text>
+          {hidden > 0 && <Text dimColor>… 还有 {hidden} 行（Ctrl+E 展开全部）</Text>}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean }) {
   switch (item.kind) {
     case "user":
@@ -58,43 +107,34 @@ function FullItem({ item, expanded }: { item: TranscriptItem; expanded: boolean 
           </Box>
         </Box>
       );
-    case "tool": {
+    case "tool":
       // full 是未截断的原始工具输出；老条目没有就退回预览
-      const raw = sanitizeTerminalText(item.full ?? item.preview);
-      const { text, hidden } = expanded ? { text: raw, hidden: 0 } : clampLines(raw, MAX_TOOL_LINES);
       return (
-        <Box flexDirection="column" marginTop={1}>
-          <Box>
-            <Box minWidth={2} flexShrink={0}>
-              <Text color={item.isError ? T.danger : T.success}>{DOT}</Text>
-            </Box>
-            <Box flexGrow={1} flexShrink={1}>
-              <Text>
-                <Text bold>
-                  {sanitizeTerminalText(item.name, {
-                    preserveNewlines: false,
-                    preserveTabs: false,
-                  })}
-                </Text>
-                {item.argSummary ? (
-                  <Text>
-                    ({sanitizeTerminalText(item.argSummary)})
-                  </Text>
-                ) : null}
-              </Text>
-            </Box>
-          </Box>
-          {text && (
-            <Box marginLeft={2} flexDirection="column">
-              <Text dimColor={!item.isError} color={item.isError ? T.danger : undefined}>
-                {text}
-              </Text>
-              {hidden > 0 && <Text dimColor>… 还有 {hidden} 行（Ctrl+E 展开全部）</Text>}
-            </Box>
-          )}
-        </Box>
+        <FullToolItem
+          name={item.name}
+          argSummary={item.argSummary}
+          raw={sanitizeTerminalText(item.full ?? item.preview)}
+          isError={item.isError}
+          expanded={expanded}
+        />
       );
-    }
+    case "tool-group":
+      // 主屏折叠的组在这里摊开：每个 child 按完整工具条目渲染，
+      // 视觉上与逐条显示时完全一致
+      return (
+        <>
+          {item.children.map((c, i) => (
+            <FullToolItem
+              key={i}
+              name={c.displayName}
+              argSummary={c.argSummary}
+              raw={sanitizeTerminalText(c.full ?? c.preview)}
+              isError={false}
+              expanded={expanded}
+            />
+          ))}
+        </>
+      );
     case "compact":
       // 全文屏是唯一能看到压缩摘要正文的地方（主屏只有一行边界卡）
       return (
