@@ -259,6 +259,55 @@ describe("trace replay renderer", () => {
     ]);
   });
 
+  it("retains version-1 records with absent event types while skipping invalid envelopes", async () => {
+    const dir = await tempDir();
+    const recorder = new TraceRecorder({
+      dir,
+      sessionId: "malformed-admission",
+      providerId: "mock",
+      model: "mock-1",
+      cwd: "/repo",
+    });
+    const base = {
+      version: 1,
+      timestamp: "2026-07-09T00:00:00.000Z",
+      sessionId: "malformed-admission",
+      providerId: "mock",
+      model: "mock-1",
+      cwd: "/repo",
+    };
+    const malformedEvents: unknown[] = [{}, {type: ""}, {type: 0}, {type: null}, null, undefined];
+    for (const [index, event] of malformedEvents.entries()) {
+      await recorder.appendRaw(JSON.stringify({
+        ...base,
+        turn: index + 1,
+        ...(event === undefined ? {} : {event}),
+      }));
+    }
+    await recorder.appendRaw(JSON.stringify({
+      ...base,
+      version: 2,
+      turn: 90,
+      event: {type: "turn_end", reason: "done"},
+    }));
+    await recorder.appendRaw("null");
+    await recorder.appendRaw("[]");
+    await recorder.appendRaw(JSON.stringify({
+      ...base,
+      turn: malformedEvents.length + 1,
+      event: {type: "turn_end", reason: "done"},
+    }));
+    await recorder.appendRaw("{broken");
+
+    const lines = (await renderTraceFile(recorder.path)).trimEnd().split("\n");
+
+    expect(lines).toEqual([
+      "Trace malformed-admission · mock/mock-1 · /repo",
+      ...malformedEvents.map((_, index) => `[${index + 1}] invalid_event: unknown`),
+      `[${malformedEvents.length + 1}] turn_end: done`,
+    ]);
+  });
+
   it("renders malformed recognized events and preserves later valid trace entries", async () => {
     const dir = await tempDir();
     const recorder = new TraceRecorder({

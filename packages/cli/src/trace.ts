@@ -63,6 +63,10 @@ export class TraceRecorder {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readTrace(path: string): Promise<TraceEntry[]> {
   let text = "";
   try {
@@ -74,8 +78,10 @@ export async function readTrace(path: string): Promise<TraceEntry[]> {
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
-      const entry = JSON.parse(line) as TraceEntry;
-      if (entry.version === 1 && entry.event?.type) entries.push(entry);
+      const entry: unknown = JSON.parse(line);
+      if (isRecord(entry) && entry.version === 1) {
+        entries.push(entry as unknown as TraceEntry);
+      }
     } catch {
       // Trace files are append-only; skip a damaged tail line after crashes.
     }
@@ -110,10 +116,6 @@ export function renderTrace(entries: TraceEntry[]): string {
 
 export async function renderTraceFile(path: string): Promise<string> {
   return renderTrace(await readTrace(path));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isNumber(value: unknown): value is number {
@@ -185,7 +187,10 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 
 function formatEvent(event: unknown): string {
   if (!isAgentEvent(event)) {
-    const type = isRecord(event) && event.type !== undefined ? event.type : "unknown";
+    const type =
+      isRecord(event) && typeof event.type === "string" && event.type.length > 0
+        ? event.type
+        : "unknown";
     return `invalid_event: ${traceField(type)}`;
   }
   switch (event.type) {
