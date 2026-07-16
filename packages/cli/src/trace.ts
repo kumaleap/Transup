@@ -112,44 +112,113 @@ export async function renderTraceFile(path: string): Promise<string> {
   return renderTrace(await readTrace(path));
 }
 
-function formatEvent(event: AgentEvent): string {
-  try {
-    switch (event.type) {
-      case "text_delta":
-        return `text: ${oneLine(event.text)}`;
-      case "tool_start":
-        return (
-          `tool_start: ${traceField(event.call.name)}(` +
-          `${traceField(event.parsedArgs)})`
-        );
-      case "tool_progress":
-        return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;
-      case "tool_end":
-        return `tool_end: ${traceField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
-      case "usage":
-        return (
-          `usage: input ${traceField(event.usage.inputTokens)} / ` +
-          `output ${traceField(event.usage.outputTokens)}`
-        );
-      case "compact_start":
-        return `compact_start: before ${traceField(event.beforeChars)}`;
-      case "compact_end":
-        return `compact_end: ${event.ok ? "ok" : "failed"} after ${traceField(event.afterChars)}`;
-      case "stream_retry":
-        return (
-          `stream_retry: ${traceField(event.attempt)}/` +
-          `${traceField(event.maxAttempts)} ${oneLine(event.error)}`
-        );
-      case "auto_continue":
-        return `auto_continue: ${traceField(event.reason)}`;
-      case "turn_end":
-        return `turn_end: ${traceField(event.reason)}`;
-    }
-  } catch {
-    // Persisted JSONL is an untyped boundary; one malformed row must not stop replay.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isToolCall(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.name === "string" &&
+    typeof value.args === "string"
+  );
+}
+
+function isAgentEvent(value: unknown): value is AgentEvent {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  switch (value.type) {
+    case "text_delta":
+      return typeof value.text === "string";
+    case "tool_start":
+      return isToolCall(value.call) && isRecord(value.parsedArgs);
+    case "tool_progress":
+      return isToolCall(value.call) && typeof value.chunk === "string";
+    case "tool_end":
+      return (
+        isToolCall(value.call) &&
+        typeof value.content === "string" &&
+        typeof value.isError === "boolean"
+      );
+    case "usage":
+      return (
+        isRecord(value.usage) &&
+        isNumber(value.usage.inputTokens) &&
+        isNumber(value.usage.outputTokens) &&
+        (value.usage.cacheReadTokens === undefined ||
+          isNumber(value.usage.cacheReadTokens)) &&
+        (value.usage.cacheWriteTokens === undefined ||
+          isNumber(value.usage.cacheWriteTokens))
+      );
+    case "compact_start":
+      return isNumber(value.beforeChars);
+    case "compact_end":
+      return (
+        isNumber(value.afterChars) &&
+        typeof value.ok === "boolean" &&
+        (value.summary === undefined || typeof value.summary === "string")
+      );
+    case "stream_retry":
+      return (
+        isNumber(value.attempt) &&
+        isNumber(value.maxAttempts) &&
+        typeof value.error === "string" &&
+        isNumber(value.delayMs)
+      );
+    case "auto_continue":
+      return value.reason === "truncated" || value.reason === "empty_response";
+    case "turn_end":
+      return (
+        value.reason === "done" ||
+        value.reason === "max_iterations" ||
+        value.reason === "aborted" ||
+        value.reason === "loop_detected"
+      );
+    default:
+      return false;
   }
-  const type = (event as {type?: unknown} | null | undefined)?.type ?? "unknown";
-  return `invalid_event: ${traceField(type)}`;
+}
+
+function formatEvent(event: unknown): string {
+  if (!isAgentEvent(event)) {
+    const type = isRecord(event) && event.type !== undefined ? event.type : "unknown";
+    return `invalid_event: ${traceField(type)}`;
+  }
+  switch (event.type) {
+    case "text_delta":
+      return `text: ${oneLine(event.text)}`;
+    case "tool_start":
+      return (
+        `tool_start: ${traceField(event.call.name)}(` +
+        `${traceField(event.parsedArgs)})`
+      );
+    case "tool_progress":
+      return `tool_progress: ${traceField(event.call.name)} ${oneLine(event.chunk)}`;
+    case "tool_end":
+      return `tool_end: ${traceField(event.call.name)} ${event.isError ? "error" : "ok"} ${oneLine(event.content)}`;
+    case "usage":
+      return (
+        `usage: input ${traceField(event.usage.inputTokens)} / ` +
+        `output ${traceField(event.usage.outputTokens)}`
+      );
+    case "compact_start":
+      return `compact_start: before ${traceField(event.beforeChars)}`;
+    case "compact_end":
+      return `compact_end: ${event.ok ? "ok" : "failed"} after ${traceField(event.afterChars)}`;
+    case "stream_retry":
+      return (
+        `stream_retry: ${traceField(event.attempt)}/` +
+        `${traceField(event.maxAttempts)} ${oneLine(event.error)}`
+      );
+    case "auto_continue":
+      return `auto_continue: ${traceField(event.reason)}`;
+    case "turn_end":
+      return `turn_end: ${traceField(event.reason)}`;
+  }
 }
 
 function oneLine(text: string): string {
