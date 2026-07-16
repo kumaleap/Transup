@@ -1,10 +1,12 @@
 .superpowers/
 .worktrees/
+.claude/settings.local.json
+.claude/worktrees/
 
 node_modules/
 .env
 dist/
 .mycode/
 # 项目 settings.json 可入库；个人授权与运行数据留在本机
-.transup/*
-!.transup/settings.json
+**/.transup/*
+!**/.transup/settings.json
